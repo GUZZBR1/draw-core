@@ -607,10 +607,7 @@ class SyntheticCapture:
             )
         quad_delta = self._quad_now - self._prev_quad
         self._prev_quad = self._quad_now.copy()
-        page_vx, page_vy = (
-            float(quad_delta[:, 0].mean()),
-            float(quad_delta[:, 1].mean()),
-        )
+        page_vx, page_vy = _quad_step_velocity(quad_delta)
         if self._motion_blur:
             # A folha em movimento borra na direção do gesto; as
             # coberturas borram junto — a franja de movimento vira
@@ -824,6 +821,23 @@ class SyntheticCapture:
             seed=np.array(self.seed),
             **extra,
         )
+
+
+def _quad_step_velocity(quad_delta):
+    """Velocidade estimada da folha entre quadros (vx, vy).
+
+    A magnitude é a média de |deslocamento| por canto — a média
+    vetorial dos cantos cancela rotação pura em torno do centro
+    (move=(0,0,20) saía com velocidade ~0 e sem blur). A direção
+    é a do canto que mais andou; em translação pura o resultado
+    é o mesmo deslocamento de antes."""
+    corner_mags = np.linalg.norm(quad_delta, axis=1)
+    dominant = int(np.argmax(corner_mags))
+    if corner_mags[dominant] <= 0:
+        return 0.0, 0.0
+    speed = float(corner_mags.mean())
+    unit = quad_delta[dominant] / corner_mags[dominant]
+    return float(unit[0] * speed), float(unit[1] * speed)
 
 
 def _lerp_collapses(quad_from, quad_to):

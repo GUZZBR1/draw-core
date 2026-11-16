@@ -493,6 +493,31 @@ def test_return_lerp_never_collapses_the_sheet():
     )
 
 
+def test_page_velocity_counts_pure_rotation():
+    """O blur da folha usava a media vetorial dos cantos, que
+    cancela rotacao pura em torno do centro: move=(0,0,20) saia
+    sem blur. A estimativa agora e a media de |deslocamento| por
+    canto."""
+    import math as _math
+
+    from lab.sim_source import _quad_step_velocity
+
+    center = np.float32([320, 320])
+    base = np.float32([[100, -40], [40, 100], [-100, 40], [-40, -100]])
+    rad = _math.radians(20)
+    rot = np.float32(
+        [[_math.cos(rad), -_math.sin(rad)], [_math.sin(rad), _math.cos(rad)]]
+    )
+    delta = (base @ rot.T + center) - (base + center)
+    vx, vy = _quad_step_velocity(delta)
+    # Rotacao pura: a media vetorial seria ~0; a media de
+    # |deslocamento| por canto e positiva.
+    assert _math.hypot(vx, vy) > 1.0
+    # Translacao pura sai igual ao deslocamento medio de antes.
+    shift = np.full((4, 2), [3.0, -2.0], dtype=np.float32)
+    assert _quad_step_velocity(shift) == (3.0, -2.0)
+
+
 def test_redraw_text_of_only_spaces_yields_no_specs():
     """Texto so de espacos nao planeja traço nenhum: _translate_specs
     chamava np.concatenate numa lista vazia."""
