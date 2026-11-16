@@ -25,3 +25,79 @@ def test_windows_helper_has_no_repo_imports():
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported.add(node.module.split(".")[0])
     assert not ({"draw", "tools", "lab"} & imported)
+
+# --- testes da logica de rede (sem Windows nem camera) ---
+
+import importlib.util
+import socket
+import struct
+import threading
+
+import pytest
+
+_spec = importlib.util.spec_from_file_location("windows_helper", HELPER)
+wh = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(wh)
+
+TOKEN = b"token-de-teste-para-o-bridge"  # >= TOKEN_MIN_LEN bytes
+
+
+def _hello(token):
+    return wh.HELLO.pack(wh.HELLO_MAGIC, wh.HELLO_VERSION, len(token)) + token
+
+
+def _serve_one_client(host="127.0.0.1"):
+    """Abre um listening socket efemero para alimentar o accept loop."""
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind((host, 0))
+    server.listen(1)
+    return server
+
+
+def _client(server, token=TOKEN):
+    conn = socket.create_connection(server.getsockname()[:2], timeout=5)
+    conn.settimeout(5)
+    conn.sendall(_hello(token))
+    return conn
+
+
+def test_accept_loop_refuses_bad_handshake_and_keeps_listening():
+    """Um par sem token e recusado e o laco continua para o proximo."""
+    server = _serve_one_client()
+    logs = []
+    thread = threading.Thread(
+        target=wh._accept_loop,
+        args=(server, TOKEN, lambda: iter([b"jpeg"])),
+        kwargs={"log": logs.append},
+        daemon=True,
+    )
+    thread.start()
+    with _client(server, token=b"token-errado-de-teste!") as bad:
+        assert bad.recv(4) == b""  # recusado: conexao fechada sem ACCEPT
+    with _client(server) as good:
+        assert good.recv(4) == wh.ACCEPT
+        assert good.recv(wh.HEADER.size + 4)  # o laco chegou num segundo cliente
+    server.close()
+
+
+def test_accept_loop_survives_client_disconnect_mid_stream():
+    """WSL caindo no meio do fluxo nao mata o ajudante residente."""
+    server = _serve_one_client()
+    logs = []
+    thread = threading.Thread(
+        target=wh._accept_loop,
+        args=(server, TOKEN, lambda: iter([b"x" * 8] * 40)),
+        kwargs={"log": logs.append},
+        daemon=True,
+    )
+    thread.start()
+    conn = _client(server)
+    conn.recv(4)  # ACCEPT
+    conn.recv(wh.HEADER.size + 8)  # um frame
+    conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+    conn.close()  # RST: o proximo sendall do servidor levanta OSError
+    with _client(server) as again:
+        assert again.recv(4) == wh.ACCEPT
+        assert again.recv(wh.HEADER.size + 8)
+    server.close()
+

@@ -1,12 +1,14 @@
 # ============================================================
 #  NAO TESTADO. NAO EXECUTADO. ESBOCO.
 #
-#  Este arquivo nunca rodou: foi escrito no WSL, sem maquina
-#  Windows disponivel. Ele existe para fixar a forma do
-#  ajudante (injecao de cursor e laco de captura) antes da
-#  primeira sessao real no Windows, onde cada funcao precisa
-#  ser conferida uma a uma. Nao trate nenhuma parte como
-#  verificada.
+#  Este arquivo nunca rodou numa webcam Windows real: foi
+#  escrito no WSL, sem maquina Windows disponivel. Ele existe
+#  para fixar a forma do ajudante (injecao de cursor e laco de
+#  captura) antes da primeira sessao real no Windows, onde cada
+#  funcao precisa ser conferida uma a uma. Nao trate nenhuma
+#  parte como verificada — excecao: a logica de rede (handshake,
+#  laco de accept, bind e timestamp) e coberta por
+#  tests/test_bridge.py com sockets reais de loopback.
 #
 #  Regras do projeto que este arquivo respeita por desenho:
 #  - NENHUM ML no Windows. Este ajudante captura e injeta;
@@ -354,13 +356,61 @@ def authenticate_client(conn, token, timeout=HANDSHAKE_TIMEOUT_S):
         conn.settimeout(previous)
 
 
-def serve(port=DEFAULT_PORT, host=DEFAULT_HOST, token=None, allow_all_interfaces=False):
+def _handle_client(conn, frames, clock=time.perf_counter_ns):
+    """Envia frames para um cliente autenticado; devolve o total enviado.
+
+    Um OSError/ConnectionError no envio (o WSL desconectou) propaga
+    para quem chamou, que fecha a conexao e volta a escutar.
+    """
+    frame_id = 0
+    for jpeg in frames:
+        capture_ts_us = clock() // 1000
+        header = HEADER.pack(MAGIC, VERSION, 0, frame_id, capture_ts_us, len(jpeg))
+        conn.sendall(header + jpeg)
+        frame_id += 1
+    return frame_id
+
+
+def _accept_loop(server, token, make_frames, clock=time.perf_counter_ns, log=print):
+    """Laco residente: aceita, autentica e serve um cliente por vez.
+
+    O ajudante e residente (PROTOCOL.md, "Transporte"): so sai por
+    Ctrl+C/sinal. Falha de handshake fecha a conexao; queda do
+    cliente no meio do fluxo fecha e volta ao accept. A captura e
+    reaberta por cliente (make_frames() a cada conexao) — nenhum
+    estado de captura e compartilhado entre clientes.
+    """
+    while True:
+        conn, addr = server.accept()
+        if not authenticate_client(conn, token):
+            log(f"Conexao de {addr[0]} recusada: handshake/token invalido.")
+            conn.close()
+            continue
+        try:
+            sent = _handle_client(conn, make_frames(), clock)
+            log(f"Cliente {addr[0]} desconectou apos {sent} frames.")
+        except (OSError, ConnectionError):
+            log(f"Conexao com {addr[0]} caiu; voltando a escutar.")
+        finally:
+            conn.close()
+
+
+def serve(
+    port=DEFAULT_PORT,
+    host=DEFAULT_HOST,
+    token=None,
+    allow_all_interfaces=False,
+    frames=None,
+    clock=time.perf_counter_ns,
+):
     """Laco principal: escuta, autentica o WSL, envia frames. ESBOCO.
 
     O ajudante escuta e o WSL conecta (PROTOCOL.md, "Transporte").
     Conexoes sem o token sao fechadas antes de qualquer frame.
     frame_id comeca em 0 a cada sessao; a epoca do timestamp e o
-    inicio do processo.
+    inicio do processo. O laco e residente: cada
+    cliente caido/recusado volta ao accept; so um sinal encerra.
+    frames/clock existem para os testes injetarem fonte e relogio.
     """
     import socket
 
@@ -373,19 +423,8 @@ def serve(port=DEFAULT_PORT, host=DEFAULT_HOST, token=None, allow_all_interfaces
     server.bind((bind_host, port))
     server.listen(1)
     print(f"Ajudante Draw (ESBOCO) escutando em {bind_host}:{port}.")
-    while True:
-        conn, addr = server.accept()
-        if authenticate_client(conn, token):
-            break
-        print(f"Conexao de {addr[0]} recusada: handshake/token invalido.")
-        conn.close()
-    with conn:
-        frame_id = 0
-        for jpeg in capture_frames():
-            capture_ts_us = time.perf_counter_ns() // 1000
-            header = HEADER.pack(MAGIC, VERSION, 0, frame_id, capture_ts_us, len(jpeg))
-            conn.sendall(header + jpeg)
-            frame_id += 1
+    make_frames = (lambda: frames) if frames is not None else capture_frames
+    _accept_loop(server, token, make_frames, clock)
 
 
 def main():
