@@ -136,10 +136,26 @@ def test_iter_jsonl_reports_line_and_limits(tmp_path):
 # --- gravação privada -----------------------------------------------------
 
 
-def test_ensure_private_dir_keeps_existing_gitignore(tmp_path):
+def test_ensure_private_dir_appends_catch_all_to_existing_gitignore(tmp_path):
     (tmp_path / ".gitignore").write_text("custom\n")
     safe_io.ensure_private_dir(tmp_path)
-    assert (tmp_path / ".gitignore").read_text() == "custom\n"
+    text = (tmp_path / ".gitignore").read_text()
+    assert text.startswith("custom\n")
+    assert "*" in text.split()
+
+
+def test_ensure_private_dir_gitignore_append_is_idempotent(tmp_path):
+    (tmp_path / ".gitignore").write_text("custom\n")
+    safe_io.ensure_private_dir(tmp_path)
+    once = (tmp_path / ".gitignore").read_text()
+    safe_io.ensure_private_dir(tmp_path)
+    assert (tmp_path / ".gitignore").read_text() == once
+
+
+def test_ensure_private_dir_keeps_gitignore_with_catch_all(tmp_path):
+    (tmp_path / ".gitignore").write_text("# comentario\n*\n")
+    safe_io.ensure_private_dir(tmp_path)
+    assert (tmp_path / ".gitignore").read_text() == "# comentario\n*\n"
 
 
 def test_repository_gitignore_covers_private_data():
@@ -147,3 +163,17 @@ def test_repository_gitignore_covers_private_data():
     # dataset/ não é padrão deste repo: datasets vivem em draw-training.
     for pattern in ("captures/", "sessions/", "*.drawcap"):
         assert pattern in lines, pattern
+
+
+def test_read_json_integer_past_digit_limit_is_input_limit(tmp_path):
+    path = tmp_path / "big.json"
+    path.write_text("9" * 5000)
+    with pytest.raises(safe_io.InputLimitError):
+        safe_io.read_json(path)
+
+
+def test_iter_jsonl_integer_past_digit_limit_is_input_limit(tmp_path):
+    path = tmp_path / "big.jsonl"
+    path.write_text('{"n": ' + "9" * 5000 + "}\n")
+    with pytest.raises(safe_io.InputLimitError):
+        list(safe_io.iter_jsonl(path))

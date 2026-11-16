@@ -178,7 +178,7 @@ def read_json(path, max_bytes=MAX_JSON_BYTES):
     data = _read_bounded(path, max_bytes)
     try:
         return json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+    except (ValueError, RecursionError) as error:
         raise InputLimitError(f"{path}: JSON invalido ({error})") from error
 
 
@@ -206,7 +206,7 @@ def iter_jsonl(
             )
         try:
             row = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+        except (ValueError, RecursionError) as error:
             raise InputLimitError(
                 f"{path}:{number}: JSON invalido ({error})"
             ) from error
@@ -226,4 +226,11 @@ def ensure_private_dir(path):
                 handle.write(_PRIVATE_GITIGNORE)
         except FileExistsError:
             pass
+    else:
+        text = marker.read_text(encoding="utf-8")
+        if not any(line.strip() == "*" for line in text.splitlines()):
+            with open(marker, "a", encoding="utf-8") as handle:
+                if text and not text.endswith("\n"):
+                    handle.write("\n")
+                handle.write("*\n")
     return path
