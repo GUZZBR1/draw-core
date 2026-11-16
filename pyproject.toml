@@ -22,6 +22,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 markers = ["slow: tests with threads/real time; run serialized"]
 filterwarnings = ["error::pytest.PytestUnhandledThreadExceptionWarning"]
 faulthandler_timeout = 120
