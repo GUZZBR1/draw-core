@@ -61,3 +61,43 @@ def test_pipeline_simplifies_and_roundtrips(tmp_path):
     )
     assert ev.iou(r_svg, ink) >= 0.45
     assert ev.iou(r_dxf, ink) >= 0.45
+
+
+def test_two_by_two_dot_survives_thinning_and_exports(tmp_path):
+    # Um ponto 2x2 passa por filter_microfragments (area=4) mas o
+    # Zhang-Suen o apagava inteiro: o export omitia o ponto.
+    ink = np.zeros((60, 60), dtype=bool)
+    ink[10:12, 20:22] = True  # ponto 2x2
+    ink[30:35, 5:55] = True  # faixa que sobrevive ao afinamento
+    skel = ev.make_8_minimal(ev.zhang_suen_thin(ink))
+    assert skel[10:12, 20:22].sum() == 1
+
+    polylines = ev.trace_polylines(skel)
+    singles = [p for p in polylines if len(p["points"]) == 1]
+    assert len(singles) == 1
+    px, py = singles[0]["points"][0]
+    assert 20 <= px <= 21 and 10 <= py <= 11
+
+    svg_path = tmp_path / "dot.svg"
+    dxf_path = tmp_path / "dot.dxf"
+    ev.write_svg(polylines, svg_path, 60, 60, 210.0, 297.0, 1.0)
+    ev.write_dxf(polylines, dxf_path, 60, 60, 210.0, 297.0, 1.0)
+    assert "<circle" in svg_path.read_text(encoding="utf-8")
+    assert "LWPOLYLINE" in dxf_path.read_text(encoding="utf-8")
+
+
+def test_parse_svg_paths_roundtrips_isolated_point(tmp_path):
+    # <circle> (ponto isolado) nao era lido de volta pelo parser.
+    lines = [
+        {"points": np.array([[10.0, 10.0], [50.0, 50.0]]), "closed": False},
+        {"points": np.array([[30.0, 20.0]]), "closed": False},
+    ]
+    svg_path = tmp_path / "rt.svg"
+    ev.write_svg(lines, svg_path, 60, 60, 210.0, 297.0, 0.3)
+    parsed = ev.parse_svg_paths(svg_path)
+    assert len(parsed) == 2
+    singles = [p for p, _c in parsed if len(p) == 1]
+    assert len(singles) == 1
+    # round-trip mm -> px (escala por eixo): o ponto volta para (30, 20) px
+    scale = np.array([210.0 / 60, 297.0 / 60])
+    assert np.allclose(singles[0][0] / scale, [30.0, 20.0], atol=0.2)

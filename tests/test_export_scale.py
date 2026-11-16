@@ -7,7 +7,7 @@ imagens fora da grade canônica, onde a escala em x saía errada em até
 +17,9% em silêncio. Estes testes fixam a extensão absoluta em mm.
 
 Aqui ``formats`` é injetado (o chamador com acesso a draw.config monta
-a mesma tripla a partir de FORMATS/paper_grid/mm_per_px); os valores
+a mesma quadrupla a partir de FORMATS/paper_grid/mm_per_px); os valores
 replicam a entrada "a4" do legado.
 """
 

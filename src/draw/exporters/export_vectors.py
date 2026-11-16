@@ -60,7 +60,8 @@ def filter_microfragments(ink, min_area=4):
 
 def zhang_suen_thin(ink):
     """Esqueleto de 1 px por Zhang-Suen vetorizado (sem cv2.ximgproc)."""
-    img = ink.astype(np.uint8)
+    src = ink.astype(np.uint8)
+    img = src.copy()
     changed = True
     while changed:
         changed = False
@@ -85,7 +86,27 @@ def zhang_suen_thin(ink):
             if delete.any():
                 img[delete] = 0
                 changed = True
-    return img.astype(bool)
+    return _keep_component_pixel(src, img.astype(bool))
+
+
+def _keep_component_pixel(src, skel):
+    """Todo componente nao vazio mantem ao menos 1 px no esqueleto.
+
+    Zhang-Suen apaga por completo componentes pequenos — um ponto 2x2
+    some inteiro e o export o omitia. Para o componente apagado,
+    conserva o pixel mais proximo do centroide; componentes cujo
+    esqueleto sobreviveu ficam intocados.
+    """
+    n, labels, _, centroids = cv2.connectedComponentsWithStats(src, connectivity=8)
+    for i in range(1, n):
+        comp = labels == i
+        if (comp & skel).any():
+            continue
+        ys, xs = np.nonzero(comp)
+        cx, cy = centroids[i]
+        pick = int(np.argmin((xs - cx) ** 2 + (ys - cy) ** 2))
+        skel[ys[pick], xs[pick]] = True
+    return skel
 
 
 # ------------------------------------------------------------ travessia
@@ -279,10 +300,10 @@ def median_stroke_width(ink, skel):
 
 
 def _export_scale(img_w, img_h, paper_w_mm, paper_h_mm, scale=None, formats=None):
-    """Escala mm/px; formats sao triplas (dimensoes, grade, mm_por_px).
+    """Escala mm/px; formats sao quadruplas (nome, dimensoes, grade, mm_por_px).
 
     O chamador que tem draw.config monta a lista:
-    [(dims, config.paper_grid(n), config.mm_per_px(n))
+    [(n, dims, config.paper_grid(n), config.mm_per_px(n))
      for n, dims in config.FORMATS.items()].
     """
     if scale is not None:
@@ -441,13 +462,28 @@ def write_dxf(
 
 
 def parse_svg_paths(svg_path):
-    """Lê de volta os <path> do SVG: lista de (Nx2 mm, closed)."""
+    """Lê de volta os <path> e os pontos isolados (<circle>) do SVG:
+    lista de (Nx2 mm, closed); um <circle> vira uma entrada de 1 ponto."""
     text = Path(svg_path).read_text(encoding="utf-8")
     out = []
-    for d in re.findall(r'<path d="([^"]+)"', text):
-        nums = [float(v) for v in re.findall(r"-?\d+\.?\d*", d)]
-        pts = np.array(nums, dtype=np.float64).reshape(-1, 2)
-        out.append((pts, d.strip().upper().endswith("Z")))
+    for match in re.finditer(
+        r'<path d="([^"]+)"|<circle cx="([^"]+)" cy="([^"]+)"', text
+    ):
+        if match.group(1) is not None:
+            d = match.group(1)
+            nums = [float(v) for v in re.findall(r"-?\d+\.?\d*", d)]
+            pts = np.array(nums, dtype=np.float64).reshape(-1, 2)
+            out.append((pts, d.strip().upper().endswith("Z")))
+        else:
+            out.append(
+                (
+                    np.array(
+                        [[float(match.group(2)), float(match.group(3))]],
+                        dtype=np.float64,
+                    ),
+                    False,
+                )
+            )
     return out
 
 
