@@ -158,7 +158,7 @@ class SyntheticCapture:
         if self.erase_rect is not None:
             x, y, w, h = self.erase_rect
             for index, spec in enumerate(self.specs):
-                if _polyline_rect_overlap(spec[3], (x, y, w, h)):
+                if _polyline_rect_overlap(spec[3], (x, y, w, h), spec[2]):
                     self.stroke_erased[index] = True
         self.redraw_specs = []
         if redraw_text:
@@ -884,8 +884,26 @@ def _rigid_pose_lerp(quad_from, quad_to, t):
     return (vec_from * scale) @ rot.T + center
 
 
-def _polyline_rect_overlap(points, rect) -> bool:
-    """Algum ponto do traço dentro do retângulo de página (x, y, w, h)."""
+def _point_segment_distance(point, a, b):
+    """Distância do ponto ao segmento a-b (px de página)."""
+    ab = b - a
+    denom = float(ab @ ab)
+    if denom == 0:
+        return float(np.hypot(*(point - a)))
+    t = max(0.0, min(1.0, float(((point - a) @ ab) / denom)))
+    closest = a + t * ab
+    return float(np.hypot(*(point - closest)))
+
+
+def _polyline_rect_overlap(points, rect, thickness=0) -> bool:
+    """O traço toca o retângulo de página (x, y, w, h)?
+
+    Conta a ESPESSURA: um apagamento que roça só a borda do traço
+    também o apaga — medir só os vértices da linha central deixava
+    traço meio apagado sem o rótulo stroke_erased. Vértice dentro
+    do retângulo já basta; fora, o traço toca quando a distância
+    de qualquer ponto ou canto do retângulo à linha central cabe
+    na metade da espessura."""
     x, y, w, h = rect
     inside = (
         (points[:, 0] >= x)
@@ -893,7 +911,26 @@ def _polyline_rect_overlap(points, rect) -> bool:
         & (points[:, 1] >= y)
         & (points[:, 1] < y + h)
     )
-    return bool(inside.any())
+    if inside.any():
+        return True
+    if thickness <= 0:
+        return False
+    radius = thickness / 2.0
+    x1, y1 = x + w, y + h
+    dx = np.maximum.reduce(
+        [x - points[:, 0], points[:, 0] - x1, np.zeros(len(points))]
+    )
+    dy = np.maximum.reduce(
+        [y - points[:, 1], points[:, 1] - y1, np.zeros(len(points))]
+    )
+    if (np.hypot(dx, dy) <= radius).any():
+        return True
+    corners = np.float32([[x, y], [x1, y], [x1, y1], [x, y1]])
+    for a, b in zip(points[:-1], points[1:]):
+        for corner in corners:
+            if _point_segment_distance(corner, a, b) <= radius:
+                return True
+    return False
 
 
 def _translate_specs(specs, rect, pw, ph):

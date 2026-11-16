@@ -518,6 +518,24 @@ def test_page_velocity_counts_pure_rotation():
     assert _quad_step_velocity(shift) == (3.0, -2.0)
 
 
+def test_erase_touching_only_the_stroke_edge_erases_it():
+    """Apagamento que toca só a espessura do traço (não a linha
+    central) também marca stroke_erased — traço meio apagado não
+    pode sair do GT como intacto."""
+    from lab.sim_source import _polyline_rect_overlap
+
+    # Linha horizontal em y=10, espessura 6 (raio 3): um retangulo
+    # que começa em y=12 toca a borda do traço sem tocar o centro.
+    line = np.array([[20, 10], [80, 10]], dtype=np.int32)
+    assert _polyline_rect_overlap(line, (0, 12, 100, 20), 6)
+    assert not _polyline_rect_overlap(line, (0, 14, 100, 20), 6)
+    # Sem espessura informada, o comportamento anterior se mantém.
+    assert not _polyline_rect_overlap(line, (0, 12, 100, 20))
+    # Retângulo roçando o traço entre vértices (canto na vizinhança
+    # de um segmento) também conta.
+    assert _polyline_rect_overlap(line, (48, 7, 4, 4), 6)
+
+
 def test_redraw_text_of_only_spaces_yields_no_specs():
     """Texto so de espacos nao planeja traço nenhum: _translate_specs
     chamava np.concatenate numa lista vazia."""
