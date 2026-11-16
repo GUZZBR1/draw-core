@@ -150,7 +150,7 @@ export default function SketchPad() {
   }
 
   function continueStroke(event: React.PointerEvent<HTMLCanvasElement>) {
-    const stroke = activeStrokeRef.current;
+    let stroke = activeStrokeRef.current;
     if (!stroke || activePointerRef.current !== event.pointerId) return;
     event.preventDefault();
     const samples = event.nativeEvent.getCoalescedEvents?.() ?? [event.nativeEvent];
@@ -161,7 +161,12 @@ export default function SketchPad() {
     for (const sample of samples) {
       const point = makePoint(sample.clientX, sample.clientY, sample.pressure, bounds);
       const previous = stroke.points[stroke.points.length - 1];
-      if (stroke.points.length < POINT_LIMIT) stroke.points.push(point);
+      if (stroke.points.length >= POINT_LIMIT) {
+        strokesRef.current.push(stroke);
+        stroke = { color: stroke.color, width: stroke.width, tool: stroke.tool, points: [previous] };
+        activeStrokeRef.current = stroke;
+      }
+      stroke.points.push(point);
       if (context) paintStroke(context, { ...stroke, points: [previous, point] }, width, height);
     }
   }
