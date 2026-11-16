@@ -15,6 +15,15 @@ import numpy as np
 _CORNERS_SHAPE = (4, 2)
 _PageDecision = Literal["same", "new_page", "defer"]
 
+# Todo veredito que o pipeline legado produz ou propaga no slot
+# `verdict`: "paper" (o interior do candidato passa no portão de
+# textura — paper.py/neural.py), "blank_maybe" (candidato branco o
+# bastante, mas liso demais para afirmar papel — o rastreador pede
+# confirmação mais longa) e "none" (o laço rebaixa para "none" uma
+# detecção fraca barrada no portão de primeira confirmação). Ausência
+# de veredito é representada por None, não por "none".
+SHEET_VERDICTS = frozenset({"paper", "blank_maybe", "none"})
+
 
 def _corners_float32(value, name):
     """Normaliza cantos para (4, 2) float32, com cópia própria."""
@@ -57,9 +66,11 @@ class FramePacket:
 class SheetQuad:
     """O quadrilátero da folha no espaço da câmera.
 
-    corners é (4, 2) float32 ou None; verdict é "paper" ou None
-    (o detector devolve a dupla (cantos, veredito); sem folha
-    confirmada o par é (None, None)). detector nomeia a fonte.
+    corners é (4, 2) float32 ou None; verdict é None ou um de
+    SHEET_VERDICTS ("paper"/"blank_maybe"/"none" — a folha pode
+    confirmar com o rótulo "blank_maybe" que a sustentou). O par
+    sempre vem junto: sem folha confirmada é (None, None).
+    detector nomeia a fonte.
     """
 
     corners: np.ndarray | None
@@ -76,8 +87,11 @@ class SheetQuad:
             object.__setattr__(
                 self, "corners", _corners_float32(self.corners, "corners")
             )
-        if self.verdict is not None and self.verdict != "paper":
-            raise ValueError(f"verdict precisa ser None ou 'paper': {self.verdict!r}")
+        if self.verdict is not None and self.verdict not in SHEET_VERDICTS:
+            raise ValueError(
+                f"verdict precisa ser None ou um de {sorted(SHEET_VERDICTS)}: "
+                f"{self.verdict!r}"
+            )
 
     @property
     def present(self):
@@ -166,9 +180,10 @@ class DetectionResult:
 
     sequence é o número de sequência do resultado, >= 0. corners é
     (4, 2) float32 somente-leitura quando presente; verdict é None
-    ou "paper" — os dois NÃO precisam vir juntos, porque "papel
-    visto, quadrilátero não fechou" é um caso legítimo (presença
-    sem posição). captured_at é o carimbo de captura do quadro
+    ou um de SHEET_VERDICTS ("paper"/"blank_maybe"/"none") — os dois
+    NÃO precisam vir juntos, porque "papel visto, quadrilátero não
+    fechou" é um caso legítimo (presença sem posição). captured_at é
+    o carimbo de captura do quadro
     examinado; detect_ms é a duração da detecção em ms, >= 0.
     gate_info é o pacote do portão quando o rastro o traz.
     coverage_mask e hand_mask são máscaras 2D uint8 (visões
@@ -192,8 +207,11 @@ class DetectionResult:
             object.__setattr__(
                 self, "corners", _corners_float32(self.corners, "corners")
             )
-        if self.verdict is not None and self.verdict != "paper":
-            raise ValueError(f"verdict precisa ser None ou 'paper': {self.verdict!r}")
+        if self.verdict is not None and self.verdict not in SHEET_VERDICTS:
+            raise ValueError(
+                f"verdict precisa ser None ou um de {sorted(SHEET_VERDICTS)}: "
+                f"{self.verdict!r}"
+            )
         if self.detect_ms < 0:
             raise ValueError(f"detect_ms precisa ser >= 0: {self.detect_ms}")
         for name in ("coverage_mask", "hand_mask"):

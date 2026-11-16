@@ -104,6 +104,13 @@ def test_sheet_quad_rejects_bad_verdict():
         SheetQuad(corners=QUAD, verdict="table")
 
 
+def test_sheet_quad_accepts_blank_maybe():
+    """O rastreador confirma com o veredito que sustentou a folha:
+    "blank_maybe" sustentado entra confirmado com esse rótulo."""
+    quad = SheetQuad(corners=QUAD, verdict="blank_maybe", detector="classic")
+    assert quad.verdict == "blank_maybe"
+
+
 def test_sheet_quad_is_frozen():
     quad = SheetQuad(corners=QUAD, verdict="paper")
     with pytest.raises(FrozenInstanceError):
@@ -302,6 +309,18 @@ def test_detection_result_allows_paper_without_quad():
     diferente de SheetQuad, aqui os dois não precisam vir juntos."""
     result = _detection_result(corners=None, verdict="paper")
     assert result.corners is None and result.verdict == "paper"
+
+
+def test_detection_result_accepts_every_legacy_verdict():
+    """Todo veredito que o pipeline legado produz/propaga sai do
+    contrato: "paper", "blank_maybe" (candidato branco demais para
+    afirmar papel) e "none" (detecção fraca rebaixada pelo portão
+    de primeira confirmação do laço), com ou sem quadrilátero."""
+    for verdict in (None, "paper", "blank_maybe", "none"):
+        result = _detection_result(verdict=verdict)
+        assert result.verdict == verdict
+    without_quad = _detection_result(corners=None, verdict="blank_maybe")
+    assert without_quad.corners is None and without_quad.verdict == "blank_maybe"
 
 
 def test_detection_result_rejects_bad_verdict_and_negative_ms():
