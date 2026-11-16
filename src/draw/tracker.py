@@ -366,6 +366,16 @@ class SheetTracker:
                 self._pending_sustain_count = 0
                 self.missed = True
             self._frames_since_seen += 1
+        elif ran_detection:
+            # Deteccao negativa ANTES da primeira confirmacao: o
+            # candidato nao pode sobreviver a uma ausencia — senao o
+            # _pending_since velho satisfaz a persistencia no
+            # primeiro quadro da volta e a janela do filtro herda
+            # os cantos do candidato morto.
+            self._pending = None
+            self._pending_since = None
+            self._pending_sustain_count = 0
+            self._recent.clear()
 
         # A perda so e avaliada em quadro com resultado de deteccao.
         # Desde que a deteccao virou thread propria (carimbo de

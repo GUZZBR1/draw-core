@@ -118,3 +118,48 @@ def test_blank_maybe_confirms_under_noisy_detections():
     assert confirmed_at is not None and confirmed_at <= 3.0, (
         f"blank_maybe sob ruído σ=20 não confirmou (t={confirmed_at})"
     )
+
+
+def test_blank_candidate_does_not_survive_absence():
+    """blank_maybe que volta apos ausencia nao confirma na hora.
+
+    Candidato pendente morre numa deteccao negativa mesmo antes da
+    primeira confirmacao: sem a limpeza, o _pending_since velho
+    satisfaz o dobro de persistencia no primeiro quadro da volta.
+    """
+    tracker = tracker_module.SheetTracker()
+    tracker.update(BASE.copy(), "blank_maybe", True, 0.0)
+    assert tracker.has_pending
+    tracker.update(None, None, True, 2.0)  # deteccao rodou, nada visto
+    assert not tracker.has_pending
+    event = tracker.update(BASE.copy(), "blank_maybe", True, 5.0)
+    assert event is None
+    assert tracker.corners is None
+    # Confirma so depois do dobro de persistencia do candidato novo.
+    event = tracker.update(
+        BASE.copy(),
+        "blank_maybe",
+        True,
+        5.0 + 2 * tracker_module._SHEET_JUMP_PERSIST_SECONDS + 0.05,
+    )
+    assert event == "seen"
+
+
+def test_returning_sheet_does_not_inherit_stale_candidate_corners():
+    """Folha em outra posicao nao herda cantos do candidato morto.
+
+    A janela do filtro tambem faz parte do estado de candidato: sem
+    a limpeza, a mediana mistura a posicao antiga com a nova e o
+    candidato renasce puxado para os cantos antigos.
+    """
+    tracker = tracker_module.SheetTracker()
+    tracker.update(BASE.copy(), "blank_maybe", True, 0.0)
+    tracker.update(None, None, True, 2.0)
+    moved = BASE + np.array([300.0, 200.0], dtype=np.float32)
+    tracker.update(moved, "blank_maybe", True, 3.0)
+    assert tracker.has_pending
+    distance = tracker_module.corner_distance(tracker._pending, moved)
+    assert distance <= 1.5, (
+        f"candidato novo nasceu {distance:.1f} px longe da deteccao: "
+        "a janela do filtro herdou os cantos antigos"
+    )
