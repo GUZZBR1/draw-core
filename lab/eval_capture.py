@@ -234,27 +234,45 @@ def run_pipeline(
         detection_worker=detector,
         ink_worker=worker,
         hand_presence_worker=hand_presence_worker,
+        hand_masker=ecc_hand_masker,
         clock=clock,
         log=lambda *_args: None,
     )
     frame_index = 0
-    while True:
-        ok, frame = capture.read()
-        if not ok:
-            break
-        clock.now = frame_index / fps
-        outcome = loop.step(
-            FramePacket(image=frame, captured_at=clock.now, sequence=frame_index + 1)
-        )
-        if worker.pump() and outcome is None:
-            outcome = loop.collect_ink()
-        if worker.error is not None:
-            raise RuntimeError("worker de tinta falhou") from worker.error
-        if outcome is not None:
-            raise RuntimeError(f"laço do Draw encerrou: {outcome}")
-        if on_frame is not None:
-            on_frame(loop, worker, frame_index)
-        frame_index += 1
+    anchors = []
+    try:
+        while True:
+            ok, frame = capture.read()
+            if not ok:
+                break
+            clock.now = frame_index / fps
+            outcome = loop.step(
+                FramePacket(
+                    image=frame, captured_at=clock.now, sequence=frame_index + 1
+                )
+            )
+            if worker.pump() and outcome is None:
+                outcome = loop.collect_ink()
+                # A âncora de CADA publicação: a tinta de uma folha que
+                # se moveu caiu na pose daquele quadro, não da última —
+                # a avaliação do GT projeta por todas elas.
+                anchor = worker.anchor_corners
+                if anchor is not None:
+                    anchors.append(np.asarray(anchor, np.float32).copy())
+            if worker.error is not None:
+                raise RuntimeError("worker de tinta falhou") from worker.error
+            if outcome is not None:
+                raise RuntimeError(f"laço do Draw encerrou: {outcome}")
+            if on_frame is not None:
+                on_frame(loop, worker, frame_index)
+            frame_index += 1
+    finally:
+        # Os landmarkers (MediaPipe) fecham aqui, não pelo __del__:
+        # num vídeo longo eles vazavam até o fim do processo.
+        if ecc_hand_masker is not None:
+            ecc_hand_masker.close()
+        if presence is not None:
+            presence.close()
     if frame_index == 0:
         raise ValueError("fonte de vídeo não contém frames decodificáveis")
     mask = None if loop.clean_mask is None else loop.clean_mask.copy()
@@ -262,6 +280,7 @@ def run_pipeline(
     passes = worker.stats()["passes_total"]
     return {
         "mask": mask,
+        "anchors": anchors,
         "corners": None if corners is None else np.asarray(corners).copy(),
         "frames": frame_index,
         "fps": fps,
@@ -309,13 +328,17 @@ def evaluate_canvas(
     *,
     canvas_space="page",
     corners=None,
+    anchors=None,
     stroke_recall=0.5,
 ):
     """Alinha GT por homografia conhecida, nunca por ajuste ao desenho.
 
     page sem corners pressupõe retificação ideal (bundle necessário).
-    page com corners usa a âncora real detectada. scene exige a mesma
-    grade de câmera que ink_full. NPY simples não tem traços individuais.
+    page com corners usa a âncora real detectada. `anchors` recebe a
+    âncora de CADA publicação de tinta — num vídeo com folha móvel o
+    GT é projetado por todas elas e unido, nunca só pela pose final.
+    scene exige a mesma grade de câmera que ink_full. NPY simples não
+    tem traços individuais.
     """
     from draw.paper import perspective_matrix
 
@@ -373,7 +396,7 @@ def evaluate_canvas(
         else None
     )
 
-    def project(mask):
+    def project(mask, matrix, page_matrix):
         """Projeta máscara de página para a grade do canvas/cena.
 
         Folha curvada exporta o mapa denso cena→página da sua pose —
@@ -381,7 +404,9 @@ def evaluate_canvas(
         cena→canvas segue a âncora detectada. Sem âncora (ideal_page)
         ou sem mapa, o caminho é a homografia de sempre.
         """
-        if scene_map is not None and (canvas_space == "scene" or corners is not None):
+        if scene_map is not None and (
+            canvas_space == "scene" or matrix is not None
+        ):
             scene = cv2.remap(
                 mask,
                 scene_map[0],
@@ -405,20 +430,47 @@ def evaluate_canvas(
             raise ValueError("canvas da cena e ink_full têm grades diferentes")
         if bundle is not None:
             page_matrix = bundle[page_to_scene_key]
+            stroke_mats = [None]
+            stroke_page_mats = [page_matrix]
     elif canvas_space == "page":
+        anchor_list = []
+        for anchor in anchors or ():
+            anchor_list.append(np.asarray(anchor, np.float32))
         if corners is not None:
-            corners = np.asarray(corners, np.float32)
-            if corners.shape != (4, 2) or not np.isfinite(corners).all():
-                raise ValueError("corners precisa ter formato (4, 2) e valores finitos")
+            anchor_list.append(np.asarray(corners, np.float32))
+        # Dedup por bytes: vídeo estático repete a mesma âncora a cada
+        # publicação e uma projeção por repetição seria desperdício.
+        anchor_list = list({a.tobytes(): a for a in anchor_list}.values())
+        if anchor_list:
             destination = np.float32([[0, 0], [width, 0], [width, height], [0, height]])
-            matrix = perspective_matrix(corners, destination)
-            if bundle is not None:
-                page_matrix = matrix @ bundle[page_to_scene_key]
-            else:
-                truth = cv2.warpPerspective(
-                    truth, matrix, (width, height), flags=cv2.INTER_NEAREST
-                )
-            alignment = "detected_anchor"
+            projections = []
+            stroke_mats = []
+            stroke_page_mats = []
+            for anchor in anchor_list:
+                if anchor.shape != (4, 2) or not np.isfinite(anchor).all():
+                    raise ValueError(
+                        "corners precisa ter formato (4, 2) e valores finitos"
+                    )
+                matrix = perspective_matrix(anchor, destination)
+                stroke_mats.append(matrix)
+                if bundle is not None:
+                    page_matrix = matrix @ bundle[page_to_scene_key]
+                    stroke_page_mats.append(page_matrix)
+                    projections.append(project(page_truth, matrix, page_matrix))
+                else:
+                    projections.append(
+                        cv2.warpPerspective(
+                            truth, matrix, (width, height), flags=cv2.INTER_NEAREST
+                        )
+                    )
+            truth = (
+                projections[0]
+                if len(projections) == 1
+                else np.maximum.reduce(projections)
+            )
+            alignment = (
+                "per_frame_anchors" if len(anchor_list) > 1 else "detected_anchor"
+            )
         elif bundle is not None:
             ph, pw = bundle["page_ink_full"].shape
             page_matrix = np.diag([width / pw, height / ph, 1.0])
@@ -426,7 +478,9 @@ def evaluate_canvas(
         else:
             raise ValueError("GT NPY em espaço de página exige --corners; use o bundle")
         if page_matrix is not None:
-            truth = project(page_truth)
+            stroke_mats = [None]
+            stroke_page_mats = [page_matrix]
+            truth = project(page_truth, None, page_matrix)
     else:
         raise ValueError("canvas_space precisa ser page ou scene")
 
@@ -443,7 +497,15 @@ def evaluate_canvas(
             # conta: apagado pela borracha não é predição esperada.
             if page_truth is not None:
                 mask = mask & page_truth
-            yield project(mask)
+            projected = [
+                project(mask, m, pm)
+                for m, pm in zip(stroke_mats, stroke_page_mats, strict=True)
+            ]
+            yield (
+                projected[0]
+                if len(projected) == 1
+                else np.maximum.reduce(projected)
+            )
 
     report = compare_masks(prediction, truth, strokes(), stroke_recall=stroke_recall)
     report.update(
@@ -476,6 +538,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         pipeline = None
+        anchors = None
         corners = (
             None if args.corners is None else np.load(args.corners, allow_pickle=False)
         )
@@ -498,7 +561,9 @@ def main(argv=None):
                 capture.release()
             prediction = pipeline.pop("mask")
             corners = pipeline.pop("corners")
+            anchors = pipeline.pop("anchors")
             pipeline["anchor_corners"] = None if corners is None else corners.tolist()
+            pipeline["anchor_count"] = len(anchors)
         else:
             prediction = load_canvas(args.canvas, args.canvas_kind)
         report = evaluate_canvas(
@@ -506,6 +571,7 @@ def main(argv=None):
             args.gt,
             canvas_space=args.canvas_space,
             corners=corners,
+            anchors=anchors,
             stroke_recall=args.stroke_recall,
         )
         if pipeline is not None:
@@ -516,7 +582,12 @@ def main(argv=None):
             if args.save_canvas.suffix.lower() != ".npy":
                 raise ValueError("--save-canvas exige extensão .npy")
             args.save_canvas.parent.mkdir(parents=True, exist_ok=True)
-            np.save(args.save_canvas, prediction.astype(np.uint8) * 255)
+            # astype(uint8) ANTES do *255 truncava probabilidades a 0/1;
+            # binariza primeiro, depois escala para 0/255.
+            np.save(
+                args.save_canvas,
+                (np.asarray(prediction) > 0).astype(np.uint8) * 255,
+            )
             if corners is not None:
                 np.save(args.save_canvas.with_suffix(".corners.npy"), corners)
         serialized = json.dumps(report, ensure_ascii=False, indent=2) + "\n"

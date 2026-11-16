@@ -223,3 +223,33 @@ def test_run_pipeline_rejeita_fps_invalido(tmp_path):
 
     with pytest.raises(ValueError, match="FPS"):
         ec.run_pipeline(_NoFps(1), page_clean_model="x.onnx", verify=None)
+
+
+def test_evaluate_canvas_projeta_gt_por_cada_ancora(tmp_path):
+    # Folha andou no meio do vídeo: a tinta confirmada caiu nas duas
+    # poses. Projetar o GT só pela âncora final perderia a metade
+    # inicial — a união por quadro é a comparação justa.
+    from lab.eval_capture import evaluate_canvas
+
+    h, w = 40, 60
+    scene_gt = np.zeros((h, w), np.uint8)
+    scene_gt[5:15, 5:15] = 1
+    scene_gt[20:30, 20:30] = 1
+    gt_path = tmp_path / "gt.npy"
+    np.save(gt_path, scene_gt)
+
+    a1 = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
+    a2 = np.float32([[4, 0], [w + 4, 0], [w + 4, h], [4, h]])
+    # Canvas: o traço 1 ficou sob a1, o traço 2 sob a2 (pose nova).
+    prediction = np.zeros((h, w), np.uint8)
+    prediction[5:15, 5:15] = 1
+    prediction[20:30, 24:34] = 1
+
+    single = evaluate_canvas(
+        prediction, gt_path, canvas_space="page", corners=a2, anchors=None
+    )
+    multi = evaluate_canvas(
+        prediction, gt_path, canvas_space="page", corners=a2, anchors=[a1]
+    )
+    assert multi["alignment"] == "per_frame_anchors"
+    assert multi["iou"] > single["iou"]
