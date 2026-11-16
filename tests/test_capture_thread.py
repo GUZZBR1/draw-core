@@ -27,6 +27,7 @@ segue nao medida.
 Uso: python tests/test_capture_thread.py
 """
 
+import os
 import sys
 import tempfile
 import threading
@@ -48,6 +49,10 @@ def check(name, condition, detail=""):
     else:
         print(f"FALHOU - {name} {detail}")
         FAILURES.append(name)
+        # Sob pytest a verificacao tem de falhar de verdade; no modo
+        # script (__main__) o relatorio no fim decide a saida.
+        if "PYTEST_CURRENT_TEST" in os.environ:
+            raise AssertionError(f"{name} {detail}")
 
 
 def _now_ms():
@@ -364,6 +369,23 @@ def scenario_queue_age():
         dropped >= 5,
         f"dropped={dropped} consumed={consumed}",
     )
+
+
+def test_on_done_error_does_not_kill_writer(tmp_path):
+    writer = PngWriter()
+    done = []
+
+    def boom(_path):
+        raise RuntimeError("confirmacao quebrou")
+
+    first = tmp_path / "one.png"
+    second = tmp_path / "two.png"
+    writer.save(first, np.zeros((4, 4, 3), np.uint8), on_done=boom)
+    writer.save(second, np.zeros((4, 4, 3), np.uint8), on_done=done.append)
+    writer.close()
+    assert first.exists()
+    assert second.exists()
+    assert done == [second]
 
 
 if __name__ == "__main__":

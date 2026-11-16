@@ -84,6 +84,20 @@ def test_open_capture_keeps_capture_when_probe_fails(monkeypatch):
     assert not cap.released
 
 
+def test_open_capture_raises_when_recovery_reopen_is_closed(monkeypatch):
+    # A reabertura de recuperacao de exposicao devolveu uma captura
+    # fechada: o desfecho e o erro de abertura de sempre, nao uma
+    # captura morta entregue em silencio.
+    monkeypatch.setattr(camera_module, "_probe_exposure", lambda capture: 149.0)
+    blown = _FakeCapture()
+    closed = _FakeCapture(opened=False)
+    factory = _factory([blown, closed])
+    with pytest.raises(RuntimeError, match="Nao consegui abrir"):
+        camera_module.open_capture(0, capture_factory=factory)
+    assert blown.released
+    assert closed.released
+
+
 def test_probe_exposure_settles_on_bright_frames():
     cap = _FakeCapture(value=110)
     mean = camera_module._probe_exposure(cap, seconds=5.0)
