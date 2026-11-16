@@ -531,9 +531,26 @@ class SyntheticCapture:
         """Interpola o quad entre quad_from e quad_to — saída da folha
         (lift_out) e o retorno dela deslizando para a pose nova."""
         t = min(1.0, (local + 1) / (phase["end"] - phase["start"]))
-        self._quad_now = phase["quad_from"] + t * (
-            phase["quad_to"] - phase["quad_from"]
-        )
+        if "rigid_lerp" not in phase:
+            # O lerp de cantos degenera quando a transição gira a
+            # folha: cantos opostos cruzam o centro e a folha
+            # colapsa no ponto médio (um retorno de meia volta com
+            # número par de quadros zera a área exatamente nele).
+            # Nesses casos interpola a POSE rígida — centro
+            # translada, a folha gira em torno dele — que nunca
+            # degenera. Transição sem colapso segue no lerp de
+            # cantos de sempre (mesma saída de antes).
+            phase["rigid_lerp"] = _lerp_collapses(
+                phase["quad_from"], phase["quad_to"]
+            )
+        if phase["rigid_lerp"]:
+            self._quad_now = _rigid_pose_lerp(
+                phase["quad_from"], phase["quad_to"], t
+            )
+        else:
+            self._quad_now = phase["quad_from"] + t * (
+                phase["quad_to"] - phase["quad_from"]
+            )
 
     def read(self):
         if not self._opened or self._position >= self.frame_count:
@@ -807,6 +824,50 @@ class SyntheticCapture:
             seed=np.array(self.seed),
             **extra,
         )
+
+
+def _lerp_collapses(quad_from, quad_to):
+    """True se o lerp de cantos degenera a folha no meio do caminho.
+
+    Num giro grande os cantos opostos se cruzam: o ponto médio do
+    lerp comprime a folha até quase um ponto. Mede a área do quad
+    no meio da interpolação contra a das pontas.
+    """
+    area = min(
+        abs(cv2.contourArea(quad_from.astype(np.float32))),
+        abs(cv2.contourArea(quad_to.astype(np.float32))),
+    )
+    if area <= 0:
+        return False
+    mid = (np.asarray(quad_from) + np.asarray(quad_to)) * 0.5
+    return abs(cv2.contourArea(mid.astype(np.float32))) < 0.25 * area
+
+
+def _rigid_pose_lerp(quad_from, quad_to, t):
+    """Interpolação de POSE rígida entre dois quads (4, 2).
+
+    Centro translada linearmente, a folha gira em torno dele pelo
+    ângulo médio entre os vetores dos cantos e a escala média
+    interpola — a forma nunca degenera no meio do caminho."""
+    quad_from = np.asarray(quad_from, dtype=np.float32)
+    quad_to = np.asarray(quad_to, dtype=np.float32)
+    center_from = quad_from.mean(axis=0)
+    center_to = quad_to.mean(axis=0)
+    vec_from = quad_from - center_from
+    vec_to = quad_to - center_to
+    z = (vec_to[:, 0] + 1j * vec_to[:, 1]) * np.conj(
+        vec_from[:, 0] + 1j * vec_from[:, 1]
+    )
+    theta = math.atan2(float(z.sum().imag), float(z.sum().real))
+    scale_end = float(np.linalg.norm(vec_to, axis=1).mean()) / float(
+        np.linalg.norm(vec_from, axis=1).mean()
+    )
+    angle = t * theta
+    scale = 1.0 + t * (scale_end - 1.0)
+    ca, sa = math.cos(angle), math.sin(angle)
+    rot = np.float32([[ca, -sa], [sa, ca]])
+    center = center_from + t * (center_to - center_from)
+    return (vec_from * scale) @ rot.T + center
 
 
 def _polyline_rect_overlap(points, rect) -> bool:

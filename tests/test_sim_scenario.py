@@ -456,3 +456,57 @@ def test_hand_mass_ground_truth_neutral(tmp_path):
         np.testing.assert_array_equal(
             bundle["page_ink_final"] > 0, bundle["page_ink_full"] > 0
         )
+
+
+def test_return_lerp_never_collapses_the_sheet():
+    """Retorno de meia volta (180 graus) com numero par de quadros:
+    o lerp de cantos colapsava a folha no ponto medio — cantos
+    opostos cruzam o centro. Transicoes que degeneram interpolam
+    a POSE rigida (rotacao em torno do centro + translacao)."""
+    capture = scenario(
+        erase_stroke=None,
+        redraw_text=None,
+        lift=(300, 200),
+        return_pose=(0, 0, 180),
+        absent_seconds=0.2,
+        lift_seconds=0.2,
+        return_seconds=0.4,  # 4 quadros a 10 fps — par
+    )
+    phase = next(p for p in capture.phases if p["kind"] == "return")
+    n = phase["end"] - phase["start"]
+    assert n % 2 == 0
+    endpoint_area = min(
+        abs(cv2.contourArea(phase["quad_from"].astype(np.float32))),
+        abs(cv2.contourArea(phase["quad_to"].astype(np.float32))),
+    )
+    mid_local = n // 2 - 1  # t = 0.5 exato
+    capture._step_quad_lerp(phase, mid_local)
+    mid_area = abs(cv2.contourArea(capture._quad_now.astype(np.float32)))
+    assert mid_area > 0.5 * endpoint_area
+    # O ponto medio rigido e congruente com as pontas: mesmos
+    # lados, area cheia.
+    first = phase["quad_from"]
+    assert np.isclose(
+        np.linalg.norm(first[1] - first[0]),
+        np.linalg.norm(capture._quad_now[1] - capture._quad_now[0]),
+        rtol=0.05,
+    )
+
+
+def test_non_collapsing_lerp_keeps_corner_interpolation():
+    """Transicao sem colapso (lift_out translada) segue no lerp de
+    cantos de sempre — mesma saida de antes, bit a bit."""
+    capture = scenario(
+        erase_stroke=None,
+        redraw_text=None,
+        lift=(300, 200),
+        absent_seconds=0.2,
+        lift_seconds=0.4,
+        return_seconds=0.4,
+    )
+    phase = next(p for p in capture.phases if p["kind"] == "lift_out")
+    local = 1
+    t = min(1.0, (local + 1) / (phase["end"] - phase["start"]))
+    expected = phase["quad_from"] + t * (phase["quad_to"] - phase["quad_from"])
+    capture._step_quad_lerp(phase, local)
+    np.testing.assert_allclose(capture._quad_now, expected)
