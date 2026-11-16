@@ -393,10 +393,19 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 # regime de 1 Hz do modo sem sinal de mao — e o
                 # descanso so volta quando a geometria retorna a
                 # moldura ou a saida prova que nao ha nada novo.
+                # A comparacao e POSICIONAL, como a dos gatilhos
+                # da arbitragem: uma ancora com rotulos rolados
+                # (_anchor_roll, de um pouso rodado) nao pode
+                # fazer toda passada seguinte parecer deslocada
+                # pela permutacao — e o deslocamento de POSE que
+                # afasta, nao o da rotulacao.
+                anchor_positional = (
+                    self._anchor_corners
+                    if self._anchor_roll == 0
+                    else np.roll(self._anchor_corners, -self._anchor_roll, axis=0)
+                )
                 away = (
-                    float(
-                        np.max(np.linalg.norm(corners - self._anchor_corners, axis=1))
-                    )
+                    float(np.max(np.linalg.norm(corners - anchor_positional, axis=1)))
                     > _GEO_WAKE_MOVE_PX
                 )
                 if away:
