@@ -1,0 +1,298 @@
+"""Paridade ponta a ponta: Pipeline do draw-core vs SheetInkLoop legado.
+
+Roda o mesmo corpus (diretório de frames ou MP4) pelos dois laços, com
+os MESMOS binários de modelo e adaptadores síncronos equivalentes, e
+compara por frame: presença da folha, cantos do rastreador e a máscara
+de canvas confirmada. O laço legado roda num subprocesso dentro do
+repo antigo (--legacy-repo; os pacotes `draw` dos dois lados colidem
+num mesmo processo) pelo driver lab/parity_legacy_driver.py, que liga
+as 8 flags do conjunto validado — o default do legado não é a
+configuração validada; no draw-core elas já são o default.
+
+Diferença com a paridade de workers falsos (tests/test_pipeline*): aqui
+detecção neural, rastreador, warp, trabalhadora de tinta e acumulador
+são os reais dos dois lados — só a execução é adaptada (síncrona,
+relógio de cena) nos dois.
+
+Uso:
+  python lab/parity_e2e.py --corpus <dir|video.mp4> --out <dir> \
+      [--legacy-repo ~/draw] [--frames 120] [--fps 2.0] \
+      [--iou-min 0.999] [--corner-tol-px 0.5]
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp"}
+
+
+def iter_frames(source, limit):
+    path = Path(source)
+    if path.is_dir():
+        files = sorted(p for p in path.iterdir() if p.suffix.lower() in IMG_EXTS)
+        for i, f in enumerate(files):
+            if i >= limit:
+                break
+            frame = cv2.imread(str(f))
+            if frame is not None:
+                yield i, frame
+        return
+    capture = cv2.VideoCapture(str(path))
+    try:
+        index = 0
+        while index < limit:
+            ok, frame = capture.read()
+            if not ok:
+                break
+            yield index, frame
+            index += 1
+    finally:
+        capture.release()
+
+
+def run_new(corpus, out_dir, *, frames, fps, sheet_model, ink_model, verify):
+    """Lado novo: Pipeline com adaptadores síncronos, defaults de produção."""
+    from draw.app import _detect_sheet_combined_traced
+    from draw.contracts import DetectionResult, FramePacket
+    from draw.ink.worker import PageCleanWorker
+    from draw.page_clean import PageCleanInk
+    from draw.perception import NeuralSheetDetector
+    from draw.pipeline import Pipeline
+    from draw.tracker import _gate_info_from_trace
+
+    detector = NeuralSheetDetector(str(sheet_model), verify=verify)
+    detector.load()
+    page_clean = PageCleanInk(str(ink_model), verify=verify)
+    page_clean.load()
+
+    class Clock:
+        def __init__(self, dt):
+            self.dt = dt
+            self.t = 0.0
+
+        def __call__(self):
+            return self.t
+
+    clock = Clock(1.0 / fps)
+
+    class SyncDet:
+        """Mesma decisão do app (detecção combinada), execução síncrona."""
+
+        def __init__(self):
+            self._result = None
+            self._seq = 0
+            self.error = None
+            self.traces = []
+
+        def submit(self, frame, captured_at, frame_index=None):
+            outcome = _detect_sheet_combined_traced(frame, detector)
+            corners, verdict, trace = outcome[0], outcome[1], outcome[2]
+            extras = outcome[3] if len(outcome) > 3 else None
+            self._seq += 1
+            self._result = DetectionResult(
+                sequence=self._seq,
+                corners=corners,
+                verdict=verdict,
+                captured_at=captured_at,
+                detect_ms=1.0,
+                gate_info=_gate_info_from_trace(trace),
+                coverage_mask=(extras.get("coverage_mask") if extras else None),
+                hand_mask=(extras.get("hand_mask") if extras else None),
+            )
+            self.traces.append(trace)
+
+        def poll(self, after_seq):
+            if self._result is None or self._result.sequence <= after_seq:
+                return None
+            return self._result
+
+        def take_traces(self, upto_result_seq=None):
+            return []
+
+    det = SyncDet()
+    worker = PageCleanWorker(page_clean, None, clock=clock)
+    loop = Pipeline(
+        detection_worker=det, ink_worker=worker, clock=clock, log=lambda *_a: None
+    )
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    records, canvases = [], []
+    for idx, frame in iter_frames(corpus, frames):
+        clock.t = idx * clock.dt
+        loop.step(FramePacket(image=frame, captured_at=clock.t, sequence=idx + 1))
+        worker.pump()
+        loop.collect_ink()
+        if worker.error is not None:
+            raise RuntimeError("trabalhadora de tinta falhou") from worker.error
+        records.append(
+            {
+                "frame": idx,
+                "present": loop.tracker.corners is not None,
+                "corners": (
+                    None
+                    if loop.tracker.corners is None
+                    else np.asarray(loop.tracker.corners, float).tolist()
+                ),
+            }
+        )
+        canvases.append(
+            np.zeros((1, 1), bool)
+            if loop.clean_mask is None
+            else (np.asarray(loop.clean_mask) > 0)
+        )
+    (out_dir / "telemetry.json").write_text(json.dumps({"frames": records}, indent=1))
+    np.savez_compressed(out_dir / "canvas.npz", *canvases)
+    return records, canvases
+
+
+def run_legacy(legacy_repo, corpus, out_dir, *, frames, fps, sheet_model, ink_model):
+    """Lado legado: subprocesso com PYTHONPATH=<repo legado>."""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(legacy_repo)
+    driver = _REPO_ROOT / "lab" / "parity_legacy_driver.py"
+    cmd = [
+        sys.executable,
+        str(driver),
+        "--corpus",
+        str(corpus),
+        "--out",
+        str(out_dir),
+        "--frames",
+        str(frames),
+        "--fps",
+        str(fps),
+        "--sheet-model",
+        str(sheet_model),
+        "--ink-model",
+        str(ink_model),
+    ]
+    result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(result.stdout[-3000:])
+        print(result.stderr[-3000:], file=sys.stderr)
+        raise SystemExit("driver legado falhou")
+    out_dir = Path(out_dir)
+    telemetry = json.loads((out_dir / "telemetry.json").read_text())
+    with np.load(out_dir / "canvas.npz") as archive:
+        # As chaves sao arr_0..arr_N: ordem numerica, nao lexica.
+        canvases = [
+            archive[key]
+            for key in sorted(archive.files, key=lambda k: int(k.split("_")[1]))
+        ]
+    return telemetry["frames"], canvases
+
+
+def compare(new_records, new_masks, old_records, old_masks, *, iou_min, corner_tol):
+    """Relatório de divergências por frame."""
+    report = {"frames": 0, "divergences": []}
+    for new, old, nm, om in zip(
+        new_records, old_records, new_masks, old_masks, strict=True
+    ):
+        report["frames"] += 1
+        issues = {}
+        if new["present"] != old["present"]:
+            issues["present"] = {"new": new["present"], "legacy": old["present"]}
+        if new["corners"] is not None and old["corners"] is not None:
+            delta = float(
+                np.linalg.norm(
+                    np.asarray(new["corners"]) - np.asarray(old["corners"]), axis=1
+                ).max()
+            )
+            if delta > corner_tol:
+                issues["corner_max_delta_px"] = delta
+        if nm.shape == om.shape:
+            union = int((nm | om).sum())
+            iou = 1.0 if union == 0 else float((nm & om).sum() / union)
+            if iou < iou_min:
+                issues["canvas_iou"] = round(iou, 6)
+                issues["canvas_px"] = {"new": int(nm.sum()), "legacy": int(om.sum())}
+        elif nm.size != om.size:
+            issues["canvas_shape"] = {"new": list(nm.shape), "legacy": list(om.shape)}
+        if issues:
+            report["divergences"].append({"frame": new["frame"], **issues})
+    report["ok"] = not report["divergences"]
+    return report
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--corpus", required=True)
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--legacy-repo", default=str(Path.home() / "draw"))
+    ap.add_argument("--frames", type=int, default=120)
+    ap.add_argument("--fps", type=float, default=2.0)
+    ap.add_argument("--sheet-model")
+    ap.add_argument("--ink-model")
+    ap.add_argument("--iou-min", type=float, default=0.999)
+    ap.add_argument("--corner-tol-px", type=float, default=0.5)
+    ap.add_argument(
+        "--allow-unverified",
+        action="store_true",
+        help="desliga a verificação do manifesto no lado novo (modelos fora dele)",
+    )
+    args = ap.parse_args(argv)
+
+    legacy_repo = Path(args.legacy_repo)
+    if not (legacy_repo / "draw" / "loop.py").exists():
+        raise SystemExit(f"repo legado não encontrado em {legacy_repo}")
+    legacy_models = legacy_repo / "models"
+    sheet_model = Path(
+        args.sheet_model or legacy_models / "draw_seg_v3_dyn.onnx"
+    ).resolve()
+    ink_model = Path(args.ink_model or legacy_models / "page_clean_unet.onnx").resolve()
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+
+    if args.allow_unverified:
+        verify = None
+    else:
+        from draw.infra.manifest import verify_model
+
+        verify = verify_model
+    new_records, new_masks = run_new(
+        args.corpus,
+        out / "new",
+        frames=args.frames,
+        fps=args.fps,
+        sheet_model=sheet_model,
+        ink_model=ink_model,
+        verify=verify,
+    )
+    old_records, old_masks = run_legacy(
+        legacy_repo,
+        args.corpus,
+        out / "legacy",
+        frames=args.frames,
+        fps=args.fps,
+        sheet_model=sheet_model,
+        ink_model=ink_model,
+    )
+    report = compare(
+        new_records,
+        new_masks,
+        old_records,
+        old_masks,
+        iou_min=args.iou_min,
+        corner_tol=args.corner_tol_px,
+    )
+    report["corpus"] = str(args.corpus)
+    report["sheet_model"] = str(sheet_model)
+    report["ink_model"] = str(ink_model)
+    (out / "parity.json").write_text(json.dumps(report, indent=1))
+    print(json.dumps(report, indent=1))
+    return 0 if report["ok"] else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
