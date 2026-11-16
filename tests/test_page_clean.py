@@ -31,8 +31,47 @@ def _page(seed=3):
     return page
 
 
+def _position_sensitive_model(path):
+    """ONNX [N,3,256,256] -> [N,1,256,256]: logit = (luminancia-0.5)*100.
+
+    A saída DEPENDE do conteúdo de cada bloco: região escura vira
+    logit fortemente negativo (prob≈0, fora da máscara) e região
+    clara vira fortemente positivo — um bloco repetido ou trocado
+    de lugar muda a máscara na posição, coisa que o fixture
+    uniforme (logit positivo em todo pixel) não detectava.
+    """
+    import onnx
+    from onnx import TensorProto, helper, numpy_helper
+
+    nodes = [
+        helper.make_node("ReduceMean", ["image"], ["mean"], axes=[1], keepdims=1),
+        helper.make_node("Sub", ["mean", "half"], ["centered"]),
+        helper.make_node("Mul", ["centered", "gain"], ["logits"]),
+    ]
+    initializers = [
+        numpy_helper.from_array(np.array(0.5, dtype=np.float32), "half"),
+        numpy_helper.from_array(np.array(100.0, dtype=np.float32), "gain"),
+    ]
+    graph = helper.make_graph(
+        nodes,
+        "draw-test-position-sensitive",
+        [helper.make_tensor_value_info("image", TensorProto.FLOAT, ["N", 3, 256, 256])],
+        [
+            helper.make_tensor_value_info(
+                "logits", TensorProto.FLOAT, ["N", 1, 256, 256]
+            )
+        ],
+        initializers,
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    model.ir_version = 8
+    onnx.checker.check_model(model)
+    onnx.save(model, str(path))
+    return path
+
+
 def test_batched_mosaic_matches_one_tile_per_call(tmp_path):
-    path = onnx_fixtures.page_clean_model(tmp_path / "pc.onnx", patch=256)
+    path = _position_sensitive_model(tmp_path / "pc.onnx")
     shared = dict(model_path=path, threshold=0.5, verify=None)
 
     batched = page_clean.PageCleanInk(**shared)
@@ -47,6 +86,11 @@ def test_batched_mosaic_matches_one_tile_per_call(tmp_path):
     assert a.shape == page.shape[:2]
     assert a.dtype == np.uint8
     assert np.array_equal(a, b)
+    # A máscara não é constante: a mancha escura de _page()
+    # ([60:140, 40:160]) sai zerada e o fundo claro sai marcado —
+    # um bloco repetido ou reordenado moveria a mancha.
+    assert a[100, 100] == 0
+    assert a[10, 10] == 255
 
 
 def test_fixed_batch_file_uses_the_per_tile_path(tmp_path):
