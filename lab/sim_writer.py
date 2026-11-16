@@ -892,8 +892,14 @@ def audit_one(scen_dir, out_dir, flags, detector_kind="real"):
         # Deriva: distância dos px do canvas ao GT exato.
         dist = cv2.distanceTransform((~gt_last).astype(np.uint8), cv2.DIST_L2, 5)
         dvals = dist[canvas_bin]
-        fin["chamfer_median_px"] = float(np.median(dvals))
-        fin["chamfer_p90_px"] = float(np.percentile(dvals, 90))
+        # Cenário sem nenhuma tinta confirmada: canvas_bin todo False
+        # esvazia dvals e np.percentile abortava a auditoria inteira.
+        if dvals.size:
+            fin["chamfer_median_px"] = float(np.median(dvals))
+            fin["chamfer_p90_px"] = float(np.percentile(dvals, 90))
+        else:
+            fin["chamfer_median_px"] = None
+            fin["chamfer_p90_px"] = None
     else:
         fin["gt_px"] = 0
         fin["canvas_px"] = int(canvas_bin.sum())
