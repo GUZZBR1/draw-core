@@ -9,14 +9,17 @@ visíveis no código.
 
 O pacote `onnx` só é necessário para *gerar* o arquivo. Sem ele, os
 testes que dependem destes fixtures saem como skip — o onnxruntime
-continua sendo o único requisito de execução.
+continua sendo o único requisito de execução. O import é de topo de
+propósito: sem o pacote a importação deste módulo falha e o
+`pytest.importorskip("onnx_fixtures")` dos testes vira skip, como
+documentado acima.
 """
 
 import numpy as np
+import onnx  # noqa: F401  (import de topo: sem ele o importorskip vira skip)
 
 
 def _build(nodes, inputs, outputs, initializers, path):
-    import onnx
     from onnx import helper
 
     graph = helper.make_graph(nodes, "draw-test-model", inputs, outputs, initializers)

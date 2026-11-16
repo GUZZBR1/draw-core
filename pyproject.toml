@@ -17,11 +17,16 @@ dependencies = [
 hand = ["mediapipe>=0.10"]
 dev = ["pytest>=8", "ruff>=0.6", "onnx>=1.16"]
 
+# lab/ e ferramenta de desenvolvimento (simulador/metricas), usada
+# a partir da raiz do repositorio — ex.: python -m lab.sim_source.
+# Nao faz parte da distribuicao; o pythonpath do pytest abaixo so
+# existe para os testes importarem lab.
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 markers = ["slow: tests with threads/real time; run serialized"]
 filterwarnings = ["error::pytest.PytestUnhandledThreadExceptionWarning"]
 faulthandler_timeout = 120

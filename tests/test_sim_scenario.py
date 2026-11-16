@@ -1,0 +1,583 @@
+"""Cenário escrever→apagar→redesenhar→mover da fonte sintética."""
+
+import json
+
+import cv2
+import numpy as np
+import pytest
+from lab import sim_source
+from lab.sim_source import SyntheticCapture, export_video
+
+
+def drain(capture):
+    frames = 0
+    while True:
+        ok, frame = capture.read()
+        if not ok:
+            return frames
+        frames += 1
+
+
+def scenario(**kwargs):
+    options = dict(
+        fps=10,
+        stroke_seconds=0.2,
+        warmup_seconds=0.2,
+        settle_seconds=0.3,
+        hold_seconds=0.4,
+        erase_stroke=-1,
+        redraw_text="ui",
+        erase_seconds=0.3,
+    )
+    options.update(kwargs)
+    return SyntheticCapture("Draw ok", **options)
+
+
+def kinds(capture):
+    return [phase["kind"] for phase in capture.phases]
+
+
+def test_default_timeline_unchanged():
+    capture = SyntheticCapture("ab", fps=4, stroke_seconds=0.5, settle_seconds=0.5)
+    assert kinds(capture) == ["warmup", "write", "settle"]
+    assert capture.frame_count == capture.phases[-1]["end"]
+    assert capture.erase_rect is None and not capture.redraw_specs
+    assert np.array_equal(capture._quad_now, capture.quad)
+
+
+def test_scenario_timeline_order_and_bounds():
+    capture = scenario(move=(20, 10, 1.5))
+    assert kinds(capture) == [
+        "warmup",
+        "write",
+        "hold",
+        "erase",
+        "hold",
+        "write",
+        "hold",
+        "move",
+        "settle",
+    ]
+    start = 0
+    for phase in capture.phases:
+        assert phase["start"] == start and phase["end"] > start
+        start = phase["end"]
+    assert capture.frame_count == start
+
+
+def test_erase_validations():
+    with pytest.raises(ValueError, match="alternativas"):
+        SyntheticCapture("a", erase_stroke=0, erase_rect=(10, 10, 20, 20))
+    with pytest.raises(ValueError, match="exige"):
+        SyntheticCapture("a", redraw_text="b")
+    with pytest.raises(ValueError, match="fora"):
+        SyntheticCapture("ab", erase_stroke=99)
+    with pytest.raises(ValueError, match="fora"):
+        SyntheticCapture("ab", erase_rect=(-5, 0, 10, 10))
+    with pytest.raises(ValueError, match="move"):
+        SyntheticCapture("ab", move=(1, 2, 3, 4))
+
+
+def drain_until(capture, frame_index):
+    """Lê até o frame inclusive; útil para parar numa fronteira de fase."""
+    while capture.get(cv2.CAP_PROP_POS_FRAMES) <= frame_index:
+        ok, _ = capture.read()
+        if not ok:
+            break
+
+
+def _raster(bundle, indices):
+    mask = np.zeros(bundle["page_ink_full"].shape, np.uint8)
+    points, offsets = bundle["points"], bundle["offsets"]
+    for index in indices:
+        geo = points[offsets[index] : offsets[index + 1]]
+        cv2.polylines(
+            mask, [geo.astype(np.int32)], False, 255, int(bundle["thickness"][index])
+        )
+    return mask
+
+
+def test_erasure_removes_ink_only_inside_rect():
+    capture = scenario()
+    assert capture.erase_rect is not None
+    x, y, w, h = capture.erase_rect
+    inside_before = int(capture.page_ink_full[y : y + h, x : x + w].sum())
+    assert inside_before > 0
+    erase_end = next(p["end"] for p in capture.phases if p["kind"] == "erase")
+    drain_until(capture, erase_end - 1)
+    assert not capture._ink[y : y + h, x : x + w].any()
+    # fora do retângulo, a tinta dos traços sobrevive
+    outside = capture._ink.copy()
+    outside[y : y + h, x : x + w] = 0
+    assert outside.any()
+
+
+def test_redraw_lands_on_erased_area():
+    capture = scenario()
+    assert capture.redraw_specs
+    points = np.concatenate([spec[3] for spec in capture.redraw_specs])
+    x, y, w, h = capture.erase_rect
+    cx, cy = points.mean(axis=0)
+    assert x - w <= cx <= x + 2 * w and y - h <= cy <= y + 2 * h
+    drain(capture)
+    # GT por fase: plano inclui todos os traços; estado final sem o retângulo
+    assert set(np.unique(capture.stroke_phase)) == {0, 1}
+    assert capture.stroke_erased.any()
+
+
+def test_move_shifts_final_quad():
+    moved = scenario(move=(30, 15, 2.0))
+    drain(moved)
+    assert not np.allclose(moved._quad_now, moved.quad)
+    still = scenario(move=None)
+    drain(still)
+    assert np.array_equal(still._quad_now, still.quad)
+
+
+def test_ground_truth_bundle_phase_fields(tmp_path):
+    capture = scenario(move=(20, 10, 1.5))
+    drain(capture)
+    gt = tmp_path / "scenario.gt.npz"
+    capture.save_ground_truth(gt)
+    with np.load(gt, allow_pickle=False) as bundle:
+        for key in (
+            "page_ink_final",
+            "stroke_phase",
+            "stroke_erased",
+            "erase_rect",
+            "events",
+            "quad_final",
+            "page_to_scene_final",
+        ):
+            assert key in bundle.files
+        assert bundle["page_ink_final"].shape == bundle["page_ink_full"].shape
+        assert int(bundle["stroke_phase"].max()) == 1
+        events = json.loads(str(bundle["events"]))
+        # estado final: traço apagado some, redesenho fica no lugar
+        final = bundle["page_ink_final"] > 0
+        full = bundle["page_ink_full"] > 0
+        assert not np.array_equal(final, full)
+        erased_mask = _raster(bundle, np.nonzero(bundle["stroke_erased"])[0]) > 0
+        redraw_mask = _raster(bundle, np.nonzero(bundle["stroke_phase"] == 1)[0]) > 0
+        redraw_mask = cv2.dilate(redraw_mask.astype(np.uint8), np.ones((3, 3))) > 0
+        x, y, w, h = (int(v) for v in bundle["erase_rect"])
+        leftover = np.zeros_like(final)
+        leftover[y : y + h, x : x + w] = True
+        assert not (final & erased_mask & leftover & ~redraw_mask).any()
+        assert (final & redraw_mask).any()
+    assert [e["kind"] for e in events] == kinds(capture)
+
+
+def test_scenario_is_deterministic():
+    a, b = scenario(), scenario()
+    assert a.erase_rect == b.erase_rect
+    assert len(a.redraw_specs) == len(b.redraw_specs)
+    for sa, sb in zip(a.redraw_specs, b.redraw_specs, strict=False):
+        assert np.array_equal(sa[3], sb[3])
+
+
+def test_export_manifest_marks_scenario(tmp_path):
+    capture = scenario()
+    manifest = export_video(capture, tmp_path / "s.mp4")
+    assert manifest["pose"] == "scenario"
+    assert manifest["strokes_redraw"] == len(capture.redraw_specs)
+    assert manifest["strokes_erased"] == int(capture.stroke_erased.sum())
+    assert [p["kind"] for p in manifest["phases"]] == kinds(capture)
+    fixed = export_video(
+        SyntheticCapture("ab", fps=4, settle_seconds=0.5), tmp_path / "f.mp4"
+    )
+    assert fixed["pose"] == "fixed"
+
+
+def test_lift_return_timeline_and_absent_scene():
+    """lift & return: a folha some de cena por inteiro (só mesa nos
+    frames de absent) e volta na pose declarada por return_pose."""
+    capture = scenario(
+        erase_stroke=None,
+        redraw_text=None,
+        move=None,
+        lift=(300, 200),
+        return_pose=(-40, 30, 18),
+        absent_seconds=0.8,
+        lift_seconds=0.4,
+        return_seconds=0.4,
+    )
+    assert kinds(capture) == [
+        "warmup",
+        "write",
+        "lift_out",
+        "absent",
+        "return",
+        "settle",
+    ]
+    masks = {}
+    while True:
+        ok, _ = capture.read()
+        if not ok:
+            break
+        if capture.last_scene is not None:
+            masks[capture._position - 1] = capture.last_scene["mask"]
+    import lab.gen_synthetic as gs
+
+    for phase in capture.phases:
+        end = phase["end"] - 1
+        if phase["kind"] == "absent":
+            # durante a ausência, nada de papel nem tinta na cena
+            assert not (masks[end] == gs.PAPER).any()
+            assert not (masks[end] == gs.INK).any()
+        elif phase["kind"] == "return":
+            assert (masks[end] == gs.PAPER).sum() > 0
+    # a volta obedece a return_pose: pose final difere da inicial
+    assert not np.allclose(capture._quad_now, capture.quad)
+
+
+def test_lift_return_ground_truth(tmp_path):
+    """GT declara as fases novas e a pose final rodada."""
+    capture = scenario(
+        erase_stroke=None,
+        redraw_text=None,
+        move=None,
+        lift=(200, 150),
+        return_pose=(0, 0, 25),
+        absent_seconds=0.5,
+    )
+    drain(capture)
+    gt = tmp_path / "lift.gt.npz"
+    capture.save_ground_truth(gt)
+    with np.load(gt, allow_pickle=False) as bundle:
+        events = json.loads(str(bundle["events"]))
+        assert [e["kind"] for e in events] == kinds(capture)
+        assert "absent" in [e["kind"] for e in events]
+        # a tinta sobrevive à saída: estado final = plano completo
+        np.testing.assert_array_equal(
+            bundle["page_ink_final"] > 0, bundle["page_ink_full"] > 0
+        )
+        assert not np.allclose(bundle["quad_final"], bundle["quad"])
+        assert not np.allclose(bundle["page_to_scene_final"], bundle["page_to_scene"])
+
+
+def test_events_carry_quad_end_matching_simulated_pose(tmp_path):
+    """quad_end declara a pose no ÚLTIMO frame de cada fase geométrica
+    — o avaliador reconstrói poses intermediárias (move+lift+return),
+    não só inicial/final."""
+    capture = scenario(
+        erase_stroke=None,
+        redraw_text=None,
+        move=(40, 20, 8),
+        lift=(200, 150),
+        return_pose=(0, 0, 10),
+        lift_seconds=0.3,
+        absent_seconds=0.3,
+        return_seconds=0.3,
+    )
+    quads = {}
+    while True:
+        ok, _ = capture.read()
+        if not ok:
+            break
+        quads[capture._position - 1] = capture._quad_now.copy()
+    gt = tmp_path / "q.gt.npz"
+    capture.save_ground_truth(gt)
+    with np.load(gt, allow_pickle=False) as bundle:
+        events = json.loads(str(bundle["events"]))
+        for event in events:
+            if event["kind"] in ("move", "lift_out", "return"):
+                quad_end = np.asarray(event["quad_end"], np.float32)
+                assert quad_end.shape == (4, 2)
+                assert np.isfinite(quad_end).all()
+                np.testing.assert_allclose(quad_end, quads[event["end"] - 1], atol=1e-4)
+            else:
+                assert "quad_end" not in event
+        # a última fase geométrica termina na pose final do bundle
+        np.testing.assert_allclose(
+            np.asarray(events[-2]["quad_end"], np.float32),
+            bundle["quad_final"],
+            atol=1e-4,
+        )
+
+
+def test_lift_validations():
+    with pytest.raises(ValueError):
+        SyntheticCapture("ab", return_pose=(10, 0, 15))
+    with pytest.raises(ValueError):
+        SyntheticCapture("ab", lift=(0, 0))
+    with pytest.raises(ValueError):
+        SyntheticCapture("ab", lift=(10, 0, 0))
+
+
+def test_lift_starts_from_post_move_pose():
+    """Combinação move+lift: a saída parte da pose DEPOIS do move —
+    o quad_at_lift é composto em __init__, não pode saltar de volta
+    para a pose inicial quando o lift_out começa."""
+    capture = scenario(
+        erase_stroke=None,
+        redraw_text=None,
+        move=(60, 30, 5),
+        lift=(300, 200),
+        return_pose=(0, 0, 0),
+        absent_seconds=0.4,
+        lift_seconds=0.4,
+        return_seconds=0.4,
+    )
+    lift_out = next(p for p in capture.phases if p["kind"] == "lift_out")
+    move_end = next(p for p in capture.phases if p["kind"] == "move")
+    # o quad_from do lift é a pose pós-move: distinto da pose inicial
+    # (que é o quad_from do move) e igual ao quad que o move produz
+    # no seu último frame — sem salto na transição
+    assert not np.allclose(lift_out["quad_from"], move_end["quad_from"])
+    moved_quads = {}
+    while True:
+        ok, _ = capture.read()
+        if not ok:
+            break
+        moved_quads[capture._position - 1] = capture._quad_now.copy()
+    end_move = moved_quads[move_end["end"] - 1]
+    np.testing.assert_allclose(lift_out["quad_from"], end_move, atol=1.0)
+
+
+def test_rest_hand_and_sweep_timeline():
+    """Palma apoiada após cada hold + sweep antes da geometria. As
+    fases são neutras de GT: a tinta não muda com a mão por cima."""
+    capture = scenario(
+        move=(40, 20, 0),
+        rest_hand_seconds=0.5,
+        sweep_seconds=0.6,
+    )
+    assert kinds(capture) == [
+        "warmup",
+        "write",
+        "hold",
+        "rest_hand",
+        "erase",
+        "hold",
+        "rest_hand",
+        "write",
+        "hold",
+        "rest_hand",
+        "sweep",
+        "move",
+        "settle",
+    ]
+    ink_at = {}
+    hand_at = {}
+    while True:
+        ok, _ = capture.read()
+        if not ok:
+            break
+        idx = capture._position - 1
+        ink_at[idx] = capture._ink.copy()
+        import lab.gen_synthetic as gs
+
+        hand_at[idx] = (capture.last_scene["mask"] == gs.HAND).sum()
+    rest = next(p for p in capture.phases if p["kind"] == "rest_hand")
+    sweep = next(p for p in capture.phases if p["kind"] == "sweep")
+    # a palma pousa sobre o canvas e o sweep a mantém em cena
+    assert hand_at[rest["end"] - 1] > 0
+    assert hand_at[sweep["start"] + 1] > 0
+    assert hand_at[sweep["end"] - 1] > 0
+    # mão não muda a tinta: GT antes/depois do rest é idêntico
+    np.testing.assert_array_equal(ink_at[rest["start"] - 1], ink_at[rest["end"] - 1])
+
+
+def test_rest_hand_without_erase_still_rests():
+    """Sem borracha não há hold natural: rest_hand_seconds cria o
+    repouso após a escrita — pousar depois de escrever é o gesto mais
+    comum da mesa."""
+    capture = SyntheticCapture(
+        "ab",
+        fps=10,
+        stroke_seconds=0.2,
+        warmup_seconds=0.2,
+        settle_seconds=0.3,
+        rest_hand_seconds=0.4,
+    )
+    assert kinds(capture) == ["warmup", "write", "hold", "rest_hand", "settle"]
+
+
+def test_grab_hand_rides_the_sheet():
+    """A mão que segura a folha acompanha o quad no move/lift/return
+    e some de cena com ela no absent."""
+    capture = scenario(
+        erase_stroke=None,
+        redraw_text=None,
+        move=None,
+        lift=(400, 300),
+        return_pose=(0, 0, 10),
+        absent_seconds=0.4,
+        grab_hand=True,
+    )
+    import lab.gen_synthetic as gs
+
+    hand_at = {}
+    while True:
+        ok, _ = capture.read()
+        if not ok:
+            break
+        hand_at[capture._position - 1] = (capture.last_scene["mask"] == gs.HAND).sum()
+    lift_out = next(p for p in capture.phases if p["kind"] == "lift_out")
+    absent = next(p for p in capture.phases if p["kind"] == "absent")
+    ret = next(p for p in capture.phases if p["kind"] == "return")
+    # pegada na folha no início da saída e no fim do retorno
+    assert hand_at[lift_out["start"]] > 0
+    assert hand_at[ret["end"] - 1] > 0
+    # ausência: nem folha nem mão
+    assert hand_at[absent["end"] - 1] == 0
+
+
+def test_hand_mass_validations():
+    with pytest.raises(ValueError):
+        SyntheticCapture("ab", rest_hand_seconds=-1)
+    with pytest.raises(ValueError):
+        SyntheticCapture("ab", sweep_seconds=-0.5)
+    with pytest.raises(ValueError):
+        SyntheticCapture("ab", hand_scale=0)
+    with pytest.raises(ValueError):
+        SyntheticCapture("ab", hand_scale=99)
+
+
+def test_hand_mass_ground_truth_neutral(tmp_path):
+    """As fases de mão exportam kind/start/end e o GT não muda —
+    palma e sweep não são tinta."""
+    capture = scenario(
+        erase_stroke=None,
+        redraw_text=None,
+        move=None,
+        lift=None,
+        rest_hand_seconds=0.3,
+        sweep_seconds=0.4,
+    )
+    drain(capture)
+    gt = tmp_path / "hand.gt.npz"
+    capture.save_ground_truth(gt)
+    with np.load(gt, allow_pickle=False) as bundle:
+        events = json.loads(str(bundle["events"]))
+        assert [e["kind"] for e in events] == kinds(capture)
+        assert "rest_hand" in [e["kind"] for e in events]
+        assert "sweep" in [e["kind"] for e in events]
+        np.testing.assert_array_equal(
+            bundle["page_ink_final"] > 0, bundle["page_ink_full"] > 0
+        )
+
+
+def test_return_lerp_never_collapses_the_sheet():
+    """Retorno de meia volta (180 graus) com numero par de quadros:
+    o lerp de cantos colapsava a folha no ponto medio — cantos
+    opostos cruzam o centro. Transicoes que degeneram interpolam
+    a POSE rigida (rotacao em torno do centro + translacao)."""
+    capture = scenario(
+        erase_stroke=None,
+        redraw_text=None,
+        lift=(300, 200),
+        return_pose=(0, 0, 180),
+        absent_seconds=0.2,
+        lift_seconds=0.2,
+        return_seconds=0.4,  # 4 quadros a 10 fps — par
+    )
+    phase = next(p for p in capture.phases if p["kind"] == "return")
+    n = phase["end"] - phase["start"]
+    assert n % 2 == 0
+    endpoint_area = min(
+        abs(cv2.contourArea(phase["quad_from"].astype(np.float32))),
+        abs(cv2.contourArea(phase["quad_to"].astype(np.float32))),
+    )
+    mid_local = n // 2 - 1  # t = 0.5 exato
+    capture._step_quad_lerp(phase, mid_local)
+    mid_area = abs(cv2.contourArea(capture._quad_now.astype(np.float32)))
+    assert mid_area > 0.5 * endpoint_area
+    # O ponto medio rigido e congruente com as pontas: mesmos
+    # lados, area cheia.
+    first = phase["quad_from"]
+    assert np.isclose(
+        np.linalg.norm(first[1] - first[0]),
+        np.linalg.norm(capture._quad_now[1] - capture._quad_now[0]),
+        rtol=0.05,
+    )
+
+
+def test_page_velocity_counts_pure_rotation():
+    """O blur da folha usava a media vetorial dos cantos, que
+    cancela rotacao pura em torno do centro: move=(0,0,20) saia
+    sem blur. A estimativa agora e a media de |deslocamento| por
+    canto."""
+    import math as _math
+
+    from lab.sim_source import _quad_step_velocity
+
+    center = np.float32([320, 320])
+    base = np.float32([[100, -40], [40, 100], [-100, 40], [-40, -100]])
+    rad = _math.radians(20)
+    rot = np.float32(
+        [[_math.cos(rad), -_math.sin(rad)], [_math.sin(rad), _math.cos(rad)]]
+    )
+    delta = (base @ rot.T + center) - (base + center)
+    vx, vy = _quad_step_velocity(delta)
+    # Rotacao pura: a media vetorial seria ~0; a media de
+    # |deslocamento| por canto e positiva.
+    assert _math.hypot(vx, vy) > 1.0
+    # Translacao pura sai igual ao deslocamento medio de antes.
+    shift = np.full((4, 2), [3.0, -2.0], dtype=np.float32)
+    assert _quad_step_velocity(shift) == (3.0, -2.0)
+
+
+def test_erase_touching_only_the_stroke_edge_erases_it():
+    """Apagamento que toca só a espessura do traço (não a linha
+    central) também marca stroke_erased — traço meio apagado não
+    pode sair do GT como intacto."""
+    from lab.sim_source import _polyline_rect_overlap
+
+    # Linha horizontal em y=10, espessura 6 (raio 3): um retangulo
+    # que começa em y=12 toca a borda do traço sem tocar o centro.
+    line = np.array([[20, 10], [80, 10]], dtype=np.int32)
+    assert _polyline_rect_overlap(line, (0, 12, 100, 20), 6)
+    assert not _polyline_rect_overlap(line, (0, 14, 100, 20), 6)
+    # Sem espessura informada, o comportamento anterior se mantém.
+    assert not _polyline_rect_overlap(line, (0, 12, 100, 20))
+    # Retângulo roçando o traço entre vértices (canto na vizinhança
+    # de um segmento) também conta.
+    assert _polyline_rect_overlap(line, (48, 7, 4, 4), 6)
+
+
+def test_redraw_text_of_only_spaces_yields_no_specs():
+    """Texto so de espacos nao planeja traço nenhum: _translate_specs
+    chamava np.concatenate numa lista vazia."""
+    capture = scenario(erase_stroke=0, redraw_text="   ")
+    assert capture.redraw_specs == []
+
+
+def test_non_collapsing_lerp_keeps_corner_interpolation():
+    """Transicao sem colapso (lift_out translada) segue no lerp de
+    cantos de sempre — mesma saida de antes, bit a bit."""
+    capture = scenario(
+        erase_stroke=None,
+        redraw_text=None,
+        lift=(300, 200),
+        absent_seconds=0.2,
+        lift_seconds=0.4,
+        return_seconds=0.4,
+    )
+    phase = next(p for p in capture.phases if p["kind"] == "lift_out")
+    local = 1
+    t = min(1.0, (local + 1) / (phase["end"] - phase["start"]))
+    expected = phase["quad_from"] + t * (phase["quad_to"] - phase["quad_from"])
+    capture._step_quad_lerp(phase, local)
+    np.testing.assert_allclose(capture._quad_now, expected)
+
+
+def test_polyline_rect_overlap_exclusive_border_not_erased():
+    """A regiao apagada e [x, x+w) x [y, y+h): o ultimo pixel
+    apagado e x+w-1. Um traco cuja linha central so encosta na
+    borda exclusiva nao foi apagado — o rotulo nao pode
+    contradizer a tinta restante."""
+    rect = (10, 5, 20, 10)  # apaga x 10..29, y 5..14
+    # Linha central na borda exclusiva direita: intacta.
+    edge = np.array([[30, 5], [30, 15]], dtype=np.float32)
+    assert not sim_source._polyline_rect_overlap(edge, rect, 1)
+    edge_bottom = np.array([[10, 15], [29, 15]], dtype=np.float32)
+    assert not sim_source._polyline_rect_overlap(edge_bottom, rect, 1)
+    # Invadindo a regiao por um pixel: apagado.
+    inside = np.array([[29, 5], [29, 15]], dtype=np.float32)
+    assert sim_source._polyline_rect_overlap(inside, rect, 1)
+    # So a espessura alcancando a regiao (dist == thickness/2):
+    # apagado, como na correcao anterior.
+    by_thickness = np.array([[31, 5], [31, 15]], dtype=np.float32)
+    assert sim_source._polyline_rect_overlap(by_thickness, rect, 4)
