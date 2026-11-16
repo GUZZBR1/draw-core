@@ -603,16 +603,32 @@ class SheetDetectionWorker:
             started = time.monotonic()
             try:
                 outcome = self._detect(frame)
+                corners, verdict = outcome[0], outcome[1]
+                trace = outcome[2] if len(outcome) > 2 else None
+                extras = outcome[3] if len(outcome) > 3 and self._coverage else None
+                detect_ms = round((time.monotonic() - started) * 1000.0, 1)
+                # A validação do contrato fica dentro do boundary de
+                # exceção: uma saída malformada do detector registra
+                # _error e para a trabalhadora do mesmo jeito que uma
+                # exceção do detector — nunca mata a thread em silêncio.
+                result = DetectionResult(
+                    sequence=self._result_seq + 1,
+                    corners=corners,
+                    verdict=verdict,
+                    captured_at=captured_at,
+                    detect_ms=detect_ms,
+                    gate_info=_gate_info_from_trace(trace),
+                    coverage_mask=(
+                        extras.get("coverage_mask") if extras is not None else None
+                    ),
+                    hand_mask=(extras.get("hand_mask") if extras is not None else None),
+                )
             except Exception as error:  # noqa: BLE001 - vai para o laco
                 with self._condition:
                     self._error = error
                     self._stopped = True
                     self._condition.notify_all()
                 return
-            corners, verdict = outcome[0], outcome[1]
-            trace = outcome[2] if len(outcome) > 2 else None
-            extras = outcome[3] if len(outcome) > 3 and self._coverage else None
-            detect_ms = round((time.monotonic() - started) * 1000.0, 1)
             with self._condition:
                 if trace is not None:
                     self._acq_seq += 1
@@ -633,18 +649,7 @@ class SheetDetectionWorker:
                 self._completed += 1
                 self._last_detect_ms = detect_ms
                 self._result_seq += 1
-                self._result = DetectionResult(
-                    sequence=self._result_seq,
-                    corners=corners,
-                    verdict=verdict,
-                    captured_at=captured_at,
-                    detect_ms=detect_ms,
-                    gate_info=_gate_info_from_trace(trace),
-                    coverage_mask=(
-                        extras.get("coverage_mask") if extras is not None else None
-                    ),
-                    hand_mask=extras.get("hand_mask") if extras is not None else None,
-                )
+                self._result = result
                 self._condition.notify_all()
 
     def take_traces(self, upto_result_seq=None):

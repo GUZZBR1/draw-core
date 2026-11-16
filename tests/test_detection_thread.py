@@ -192,3 +192,48 @@ def test_worker_drops_extras_with_coverage_off():
         assert result.hand_mask is None
     finally:
         worker.stop()
+
+
+# ---------- vereditos do detector ----------
+
+
+def test_blank_maybe_verdict_is_published_and_worker_survives():
+    """O detector pode devolver "blank_maybe" (candidato branco liso
+    demais para afirmar papel): o resultado sai com esse veredito e
+    a trabalhadora segue viva para o quadro seguinte."""
+
+    def detect_blank(_frame):
+        return QUAD.copy(), "blank_maybe"
+
+    worker = SheetDetectionWorker(detect_blank).start()
+    try:
+        worker.submit(np.zeros((8, 8, 3), np.uint8), 1.0, 0)
+        result = _poll_until(worker, 0)
+        assert result.verdict == "blank_maybe"
+        np.testing.assert_array_equal(result.corners, QUAD)
+        worker.submit(np.zeros((8, 8, 3), np.uint8), 1.1, 1)
+        newer = _poll_until(worker, result.sequence)
+        assert newer.verdict == "blank_maybe"
+        assert worker.error is None
+    finally:
+        worker.stop()
+
+
+def test_invalid_verdict_reports_worker_error():
+    """Um veredito fora dos aceitos falha na construção do contrato:
+    a falha chega ao laço como erro (worker.error), não mata a
+    thread em silêncio deixando poll/error presos em None."""
+
+    def detect_bogus(_frame):
+        return QUAD.copy(), "table"
+
+    worker = SheetDetectionWorker(detect_bogus).start()
+    try:
+        worker.submit(np.zeros((8, 8, 3), np.uint8), 1.0, 0)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and worker.error is None:
+            time.sleep(0.005)
+        assert isinstance(worker.error, ValueError)
+        assert worker.poll(0) is None
+    finally:
+        worker.stop()
