@@ -1,0 +1,244 @@
+"""Acumulador de tinta em camadas: voto entre passadas."""
+
+from collections import deque
+
+import cv2
+import numpy as np
+
+from . import identity, registration, votes
+from .config import InkConfig
+
+
+class LayeredInkAccumulator:
+    """Tinta de uma geracao em duas camadas: provisoria e confirmada.
+
+    Cada passada entrega o mapa de probabilidade do modelo. A
+    camada provisoria e o que as passadas da janela viram acima do
+    limiar e ainda nao confirmou: ela existe para a tela mostrar a
+    tinta nova na primeira passada, e so para a tela. A camada
+    confirmada e o canvas: um pixel so entra nela pelas regras de
+    voto acima com a porta de fronteira (evidencia sub-limiar nao
+    expande a borda da tinta ja confirmada), e dela nao sai
+    dentro da geracao.
+
+    Pixel provisorio que sai da janela sem confirmar e retratado:
+    some da camada provisoria e entra na contagem de retratados.
+    E essa contagem que mede o risco declarado da publicacao
+    especulativa, o page-clean pegar mobiliario: a regua de replay
+    le quanta tinta provisoria some depois.
+
+    So a trabalhadora de tinta toca nesta classe.
+    """
+
+    def __init__(self, threshold=0.7, config=None):
+        self.threshold = float(threshold)
+        self._config = config if config is not None else InkConfig()
+        self.reset()
+
+    def reset(self):
+        self._window = deque(maxlen=votes._INK_VOTE_WINDOW)
+        self._removal_streak = None
+        self._confirmed = None
+        self._provisional = None
+        self._provisional_ever = None
+        self._retracted_ever = None
+        self._low_overlap_streak = 0
+        self._turn_fired = False
+        self._score_buf = None
+        self._hits_buf = None
+        self._seen_buf = None
+
+    def _window_stats(self):
+        """(soma, hits, visto-como-tinta) da janela, sem empilhar.
+
+        O caminho antigo fazia np.stack da janela (3 mapas float32
+        de pagina inteira, ~12 MB) e somava/contava/maximizava
+        sobre a pilha a cada passada — o maior transitorio do
+        acumulador (pesquisa de performance de 2026-11-03, T10).
+        Aqui as tres reducoes saem por acumulacao em buffers
+        reusados: a soma adiciona os mesmos mapas na mesma ordem
+        (resultado float identico), hits e visto sao contagens
+        inteiras/booleanas exatas. Os buffers sao devolvidos para
+        leitura imediata; a proxima chamada os sobrescreve.
+        """
+        window = list(self._window)
+        shape = window[0].shape
+        if self._score_buf is None or self._score_buf.shape != shape:
+            self._score_buf = np.zeros(shape, dtype=np.float32)
+            self._hits_buf = np.zeros(shape, dtype=np.int32)
+            self._seen_buf = np.zeros(shape, dtype=bool)
+        score = self._score_buf
+        np.copyto(score, window[0])
+        for item in window[1:]:
+            np.add(score, item, out=score)
+        hits = self._hits_buf
+        hits[...] = window[0] >= votes._INK_VOTE_HIT
+        for item in window[1:]:
+            np.add(hits, item >= votes._INK_VOTE_HIT, out=hits)
+        seen = self._seen_buf
+        seen[...] = window[0] > self.threshold
+        for item in window[1:]:
+            np.logical_or(seen, item > self.threshold, out=seen)
+        return score, hits, seen
+
+    def add(self, prob, visible=None, *, removal_allowed=True):
+        prob = np.asarray(prob, dtype=np.float32)
+        if visible is not None:
+            visible = np.asarray(visible, dtype=bool)
+            if visible.shape != prob.shape:
+                visible = None
+        if self._confirmed is None or self._confirmed.shape != prob.shape:
+            self._removal_streak = None
+            self._confirmed = np.zeros(prob.shape, dtype=np.uint8)
+            self._provisional = np.zeros(prob.shape, dtype=np.uint8)
+            self._provisional_ever = np.zeros(prob.shape, dtype=bool)
+            self._retracted_ever = np.zeros(prob.shape, dtype=bool)
+            self._window.clear()
+            self._low_overlap_streak = 0
+            self._turn_fired = False
+        confirmed_before = self._confirmed > 0
+        canvas_before = int(np.count_nonzero(self._confirmed))
+        # Oclusao: pixel que a passada nao pode ver (a mao sobre a
+        # pagina) nao entrega evidencia, nem a favor nem contra. A
+        # probabilidade dele entra zerada na janela — soma zero no
+        # escore, nao conta hit nem "visto como tinta" —, o
+        # julgamento de virada mede a cobertura so sobre a tinta
+        # confirmada visivel (ou se abstem quando quase tudo esta
+        # coberto: mao segurando a pagina nao e pagina trocada) e a
+        # camada provisoria congela onde nao ha visao (ver abaixo).
+        evidence = (
+            prob if visible is None else np.where(visible, prob, 0.0).astype(np.float32)
+        )
+        mask_now = evidence > self.threshold
+        turn = False
+        if canvas_before >= identity._INK_TURN_MIN_CANVAS_PX and not self._turn_fired:
+            if visible is None:
+                judge_turn = True
+                turn_low = (
+                    int(np.count_nonzero(mask_now & confirmed_before))
+                    <= identity._INK_TURN_MAX_OVERLAP * canvas_before
+                )
+            else:
+                visible_confirmed = confirmed_before & visible
+                visible_px = int(np.count_nonzero(visible_confirmed))
+                judge_turn = (
+                    visible_px >= identity._OCCLUSION_TURN_MIN_VISIBLE_PX
+                    and visible_px >= 0.5 * canvas_before
+                )
+                turn_low = judge_turn and (
+                    int(np.count_nonzero(mask_now & visible_confirmed))
+                    <= identity._INK_TURN_MAX_OVERLAP * visible_px
+                )
+            if judge_turn:
+                if turn_low:
+                    self._low_overlap_streak += 1
+                    if self._low_overlap_streak >= identity._INK_TURN_PASSES:
+                        turn = True
+                        self._turn_fired = True
+                else:
+                    self._low_overlap_streak = 0
+        self._window.append(evidence.copy())
+        score, hits, seen_as_ink = self._window_stats()
+        confirmed_rule = (score >= votes._INK_VOTE_SCORE_STRONG) | (
+            (hits >= votes._INK_VOTE_MIN_HITS) & (score >= votes._INK_VOTE_SCORE)
+        )
+        if np.any(confirmed_rule):
+            # Porta de fronteira (ver votes._INK_FRONTIER_RADIUS):
+            # dentro da faixa do ombro da tinta (confirmada ou
+            # vista acima do limiar nesta janela), so confirma
+            # quem alguma passada viu como tinta; a soma
+            # sub-limiar das copias deslocadas nao engrossa o
+            # traco nem poe camada nova sobre ele.
+            anchor = seen_as_ink | confirmed_before
+            near_anchor = (
+                cv2.dilate(
+                    anchor.astype(np.uint8),
+                    votes._INK_FRONTIER_KERNEL,
+                )
+                > 0
+            )
+            confirmed_rule &= seen_as_ink | ~near_anchor
+        new_confirmed = confirmed_rule & ~confirmed_before
+        new_confirmed_px = int(np.count_nonzero(new_confirmed))
+        if new_confirmed_px:
+            self._confirmed[new_confirmed] = 255
+        removed_px = 0
+        if self._config.removal:
+            if self._removal_streak is None:
+                self._removal_streak = np.zeros(prob.shape, dtype=np.uint8)
+            # Sem máscara de visibilidade não há evidência negativa confiável.
+            witnessed = False
+            if removal_allowed and visible is not None and canvas_before:
+                retained = np.count_nonzero(confirmed_before & visible & mask_now)
+                witnessed = (
+                    retained >= registration._REMOVAL_RETAINED_FRACTION * canvas_before
+                    or retained >= registration._REMOVAL_WITNESS_FLOOR_PX
+                )
+            missing = (
+                confirmed_before
+                & visible
+                & np.isfinite(prob)
+                & (prob <= registration._REMOVAL_LOW_PROB)
+                if witnessed
+                else np.zeros(prob.shape, dtype=bool)
+            )
+            if witnessed:
+                # Com testemunha: pixel à vista e não ausente vê o
+                # streak zerar (evidência positiva ou prova
+                # inconclusiva); pixel ausente conta. Ocluído ou sem
+                # testemunha não informa nada — o streak segura, não
+                # zera: a ausência do F-10 segue precisando ser
+                # persistente, mas não precisa ser em passadas
+                # consecutivas nem desobstruídas (a testemunha e a
+                # mão oscilam em cena real — medido: retained
+                # 1,5k~13,9k alternando no sim-hand, streak nunca
+                # completava).
+                resettable = visible & ~missing
+                self._removal_streak[resettable] = 0
+                self._removal_streak[missing] = np.minimum(
+                    self._removal_streak[missing].astype(np.uint16) + 1,
+                    registration._REMOVAL_PASSES,
+                ).astype(np.uint8)
+            removed = self._removal_streak >= registration._REMOVAL_PASSES
+            removed_px = int(np.count_nonzero(removed))
+            if removed_px:
+                self._confirmed[removed] = 0
+                self._removal_streak[removed] = 0
+                # Nenhuma memória de voto pode ressuscitar o traço apagado.
+                for item in self._window:
+                    item[removed] = 0
+                self._score_buf = self._hits_buf = self._seen_buf = None
+                seen_as_ink[removed] = False
+                score[removed] = 0
+                hits[removed] = 0
+        confirmed_now = self._confirmed > 0
+        provisional_now = seen_as_ink & ~confirmed_now
+        previous_provisional = self._provisional > 0
+        if visible is not None:
+            # Sem visao nao ha retracao nem estreia: o provisorio
+            # coberto fica como estava. Retrair e afirmar que a
+            # tinta sumiu — e quem esta sobre ela e a mao, nao o
+            # apagador; sem este congelamento, toda oclusao virava
+            # retracao na regua e a tinta piscava ao reaparecer.
+            provisional_now = provisional_now | (previous_provisional & ~visible)
+        retracted = previous_provisional & ~provisional_now & ~confirmed_now
+        if np.any(retracted):
+            self._retracted_ever |= retracted
+        self._provisional_ever |= provisional_now
+        provisional_changed = bool(np.any(provisional_now != previous_provisional))
+        self._provisional = np.where(provisional_now, 255, 0).astype(np.uint8)
+        result = {
+            "confirmed": self._confirmed.copy(),
+            "provisional": self._provisional.copy(),
+            "confirmed_changed": new_confirmed_px > 0 or removed_px > 0,
+            "provisional_changed": provisional_changed,
+            "new_confirmed_px": new_confirmed_px,
+            "confirmed_px": int(np.count_nonzero(self._confirmed)),
+            "provisional_px": int(np.count_nonzero(self._provisional)),
+            "provisional_ever_px": int(np.count_nonzero(self._provisional_ever)),
+            "retracted_px_total": int(np.count_nonzero(self._retracted_ever)),
+            "turn": turn,
+        }
+        if self._config.removal:
+            result["removed_confirmed_px"] = removed_px
+        return result
