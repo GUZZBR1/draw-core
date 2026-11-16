@@ -209,6 +209,45 @@ types in `contracts.py`.
   `--legacy-ink`, `--markers`, `--ink-model` (the `ink_model` module does not
   even exist).
 
+## Intentional deviations from legacy
+
+Behavior that differs from legacy on purpose (bugs found by automated review
+or by the migration). Parity runs must account for them.
+
+- Tracker: absence before the first confirmation discards the pending
+  `blank_maybe` candidate (legacy kept it and could confirm a returning blank
+  immediately or hand stale corners to a new sheet).
+- Sheet detection: an edge with no reliable measurement and no continuity
+  stores "absent" in the edge memory (legacy inherited the old line, pulling a
+  new sheet toward the previous one).
+- Ink worker: rotated landings enter ink rest (legacy compared positional
+  quads with a rolled anchor and never rested).
+- Camera: drain mode is not migrated (Tier C); `PngWriter` survives a failing
+  `on_done`; a failed recovery reopen raises the normal opening error.
+- Integrity is fail-closed (`verify` required); `DRAW_ORT_SPIN`,
+  `DRAW_ORT_THREADS`, `DRAW_PAGE_CLEAN_THREADS`, `DRAW_HAND_MODEL`,
+  `DRAW_PAGE_CLEAN_MODEL`, `DRAW_NEURAL_MODEL` env reads are gone (explicit
+  arguments; spin always disabled).
+- `HandMasker.close()` is lock-serialized and deterministic (legacy relied on
+  mediapipe's `__del__`, which could deadlock).
+- Safe I/O: JSON integers past Python's digit limit raise `InputLimitError`;
+  `ensure_private_dir` appends a catch-all to an existing `.gitignore`.
+- Session reports: unique, atomic writes; same-second sessions no longer
+  collide; `latest.json` is replaced atomically.
+- Contracts: array fields are read-only views/copies; `SheetQuad` corners and
+  verdict must agree.
+- Lab: unique photo ids, rotation ceiling respected, rigid 180 degree returns,
+  blur from per-corner motion, thickness-aware erased-stroke labels, `lab`
+  included in the installed package; `judge_candidate` resolves relative
+  candidate paths, reports `INCONCLUSIVO` when no gated judge ran, and has no
+  `--with-replay`; segment-based Douglas-Peucker; `cldice` of a missed dot is 0.
+- Site: reduced-motion progress follows scroll, instant programmatic scrolls,
+  long strokes continue past the point cap, webcam card can be dismissed,
+  graphite strokes follow the theme.
+- Bridge: helper stays resident across client disconnects, total handshake
+  deadline, wildcard host aliases need the explicit opt-in, timestamps are
+  process-relative as the protocol states.
+
 ## Open questions
 
 - Release hosting for model binaries (Release in this repo vs legacy
