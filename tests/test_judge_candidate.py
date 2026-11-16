@@ -9,7 +9,10 @@ esquemas reais de judge_sheet.py/judge_absence.py.
 """
 
 import json
+import os
 import sys
+import time
+from pathlib import Path
 
 import pytest
 from lab import judge_candidate as jc
@@ -211,3 +214,115 @@ def test_relative_candidate_reaches_judges_as_absolute(tmp_path, monkeypatch):
     assert rc == 2
     argv = json.loads(captured.read_text())
     assert argv[-1] == str(candidate.resolve())
+
+
+def _make_bench(tmp_path):
+    bench = tmp_path / "bench"
+    (bench / "scripts").mkdir(parents=True)
+    (bench / "results").mkdir()
+    return bench
+
+
+def test_relative_bench_dir_and_python_are_resolved(tmp_path, monkeypatch):
+    """Os juizes rodam com cwd=scripts_dir: --bench-dir e --python
+    relativos precisam ser resolvidos contra o cwd do usuario."""
+    import subprocess as sp
+
+    bench = _make_bench(tmp_path)
+    for name in ("judge_sheet.py", "judge_absence.py", "judge_adversarial.py"):
+        (bench / "scripts" / name).write_text("# stub\n")
+    candidate = tmp_path / "cand.onnx"
+    candidate.write_bytes(b"onnx")
+    captured = {}
+
+    def fake_run(cmd, cwd=None, **_kw):
+        captured["cmd"] = cmd
+        captured["cwd"] = cwd
+        results = Path(cwd).parent / "results"
+        report = results / "sheet_test.json"
+        report.write_text(json.dumps(sheet_json()))
+        # st_mtime usa o relogio grosso do kernel (atraso de ate um tick
+        # em relacao a time.time()): o filtro >= t0 exige mtime novo.
+        future = time.time() + 1
+        os.utime(report, (future, future))
+        return sp.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(jc.subprocess, "run", fake_run)
+    monkeypatch.chdir(tmp_path)
+    rc = jc.main(
+        [
+            "--candidate",
+            "cand.onnx",
+            "--bench-dir",
+            "bench",
+            "--python",
+            "./fakepy/bin/python",
+            "--skip",
+            "absence,adversarial",
+            "--out-dir",
+            str(tmp_path / "out"),
+        ]
+    )
+    assert rc == 0
+    assert captured["cmd"][0] == str(Path("fakepy/bin/python").resolve())
+    assert Path(captured["cmd"][1]).is_absolute()
+    assert Path(captured["cmd"][1]).name == "judge_sheet.py"
+    assert Path(captured["cwd"]).is_absolute()
+
+
+def test_missing_python_exits_two_with_message(tmp_path, monkeypatch, capsys):
+    """Interpretador inexistente: FileNotFoundError do subprocess
+    virava traceback (saida 1); agora e erro de execucao (saida 2)."""
+    bench = _make_bench(tmp_path)
+    for name in ("judge_sheet.py", "judge_absence.py", "judge_adversarial.py"):
+        (bench / "scripts" / name).write_text("# stub\n")
+    candidate = tmp_path / "cand.onnx"
+    candidate.write_bytes(b"onnx")
+    monkeypatch.chdir(tmp_path)
+    rc = jc.main(
+        [
+            "--candidate",
+            str(candidate),
+            "--bench-dir",
+            str(bench),
+            "--python",
+            str(tmp_path / "no-such-python"),
+            "--skip",
+            "absence,adversarial",
+        ]
+    )
+    assert rc == 2
+    assert "ERRO" in capsys.readouterr().err
+
+
+def test_corrupt_report_exits_two_with_message(tmp_path, monkeypatch, capsys):
+    """Relatorio ilegivel (JSON quebrado) e erro de execucao (saida 2),
+    nao REPROVADO com traceback."""
+    bench = _make_bench(tmp_path)
+    results = bench / "results"
+    corrupt = (
+        "import pathlib,os,time\n"
+        f"p=pathlib.Path({str(results)!r}, 'sheet_bad.json')\n"
+        "p.write_text('{nao e json')\n"
+        "t=time.time()+1\n"
+        "os.utime(p,(t,t))\n"
+    )
+    for name in ("judge_sheet.py", "judge_absence.py", "judge_adversarial.py"):
+        (bench / "scripts" / name).write_text(corrupt)
+    candidate = tmp_path / "cand.onnx"
+    candidate.write_bytes(b"onnx")
+    monkeypatch.chdir(tmp_path)
+    rc = jc.main(
+        [
+            "--candidate",
+            str(candidate),
+            "--bench-dir",
+            str(bench),
+            "--python",
+            sys.executable,
+            "--skip",
+            "absence,adversarial",
+        ]
+    )
+    assert rc == 2
+    assert "ERRO" in capsys.readouterr().err

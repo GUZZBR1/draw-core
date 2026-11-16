@@ -346,7 +346,13 @@ def main(argv=None):
     if not candidate.is_file():
         print(f"candidato não encontrado: {candidate}", file=sys.stderr)
         return 2
-    bench = Path(args.bench_dir)
+    # bench e python tambem sao usados pelos juizes (cwd=scripts_dir
+    # e argv[0]): relativos precisam ser resolvidos contra o cwd do
+    # usuario. Nome solto ("python3") nao e caminho — fica para o PATH.
+    bench = Path(args.bench_dir).resolve()
+    python = args.python
+    if "/" in python or "\\" in python:
+        python = str(Path(python).resolve())
     scripts_dir = bench / "scripts"
     results_dir = bench / "results"
     for script in ("judge_sheet.py", "judge_absence.py", "judge_adversarial.py"):
@@ -370,12 +376,23 @@ def main(argv=None):
             if name in skip:
                 continue
             report_path, dt = run_judge(
-                args.python, scripts_dir, results_dir, script, prefix, candidate
+                python, scripts_dir, results_dir, script, prefix, candidate
             )
             durations[name] = round(dt, 1)
-            sections[name] = extractors[name](json.loads(report_path.read_text()))
+            try:
+                data = json.loads(report_path.read_text())
+            except (OSError, ValueError) as error:
+                raise RuntimeError(
+                    f"relatório ilegível {report_path}: {error}"
+                ) from error
+            try:
+                sections[name] = extractors[name](data)
+            except (KeyError, TypeError) as error:
+                raise RuntimeError(
+                    f"relatório fora do esquema {report_path}: {error}"
+                ) from error
             sections[name]["report"] = str(report_path)
-    except RuntimeError as e:
+    except (RuntimeError, OSError) as e:
         print(f"ERRO: {e}", file=sys.stderr)
         return 2
 
