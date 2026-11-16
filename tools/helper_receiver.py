@@ -241,7 +241,13 @@ def record(
     token=None,
     max_payload=MAX_PAYLOAD_LEN,
 ):
-    """Grava o fluxo do socket byte a byte num arquivo. Retorna n."""
+    """Grava o fluxo do socket byte a byte num arquivo. Retorna n.
+
+    max_frames<=0 é rejeitado: zero frames não exige conexão, e
+    aceitar o valor faria o laço gravar um frame antes de parar.
+    """
+    if max_frames is not None and max_frames <= 0:
+        raise ValueError("max_frames precisa ser um inteiro positivo")
     count = 0
     with _connect(host, port, token, timeout) as sock:
         with open(out_path, "wb") as handle:
@@ -369,16 +375,18 @@ def _selfcheck():
 
     # Caminho de socket: servidor loopback efêmero numa thread, com
     # handshake de token. A primeira conexão usa um token errado e
-    # precisa ser recusada; a segunda autentica e recebe os frames.
+    # precisa ser recusada; as duas seguintes autenticam e recebem
+    # os frames — uma pelo frames_from_socket, outra pelo record
+    # (socket -> arquivo cru), que o selfcheck também cobre.
     token = secrets.token_urlsafe(32)
     server = socket.socket()
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("127.0.0.1", 0))
-    server.listen(2)
+    server.listen(3)
     port = server.getsockname()[1]
 
     def serve():
-        for _attempt in range(2):
+        for _attempt in range(3):
             conn, _addr = server.accept()
             with conn:
                 if not server_handshake(conn, token):
@@ -396,16 +404,40 @@ def _selfcheck():
     except AuthenticationError:
         print("PASS socket: token errado recusado no handshake")
     received = list(frames_from_socket("127.0.0.1", port, timeout=10, token=token))
-    thread.join(timeout=10)
     ok, message = _check_roundtrip(expected, received, "socket (loopback)")
     print(("PASS " if ok else "FAIL ") + message)
     if not ok:
         failures.append(message)
 
+    # record(): o caminho socket -> arquivo byte a byte. O arquivo
+    # gravado é relido por frames_from_file e conferido por inteiro.
+    with tempfile.TemporaryDirectory() as tmp:
+        rec_path = Path(tmp) / "socket.drawcap"
+        try:
+            recorded = record(
+                "127.0.0.1", port, rec_path, timeout=10, token=token
+            )
+        except Exception as error:  # noqa: BLE001 - selfcheck reporta, nao levanta
+            failures.append(f"record (socket->arquivo): {error}")
+            print(f"FAIL record (socket->arquivo): {error}")
+        else:
+            ok, message = _check_roundtrip(
+                expected, list(frames_from_file(rec_path)), "record (socket->arquivo)"
+            )
+            print(("PASS " if ok else "FAIL ") + message)
+            if not ok:
+                failures.append(message)
+            if recorded != n:
+                failures.append(
+                    f"record gravou {recorded} frames, esperados {n}"
+                )
+                print(f"FAIL record: {recorded} frames gravados, esperados {n}")
+    thread.join(timeout=10)
+
     if failures:
         print(f"SELFCHECK FALHOU: {len(failures)} problema(s).")
         return 1
-    print(f"SELFCHECK OK: {2 * n + n} frames conferidos no total.")
+    print(f"SELFCHECK OK: {4 * n} frames conferidos no total.")
     return 0
 
 
@@ -446,6 +478,9 @@ def main():
 
     if args.selfcheck:
         return _selfcheck()
+
+    if args.max_frames is not None and args.max_frames <= 0:
+        parser.error("--max-frames exige um inteiro positivo")
 
     if args.record:
         if not args.host or not args.out:

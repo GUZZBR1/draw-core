@@ -258,3 +258,10 @@ def test_decode_jpeg_accepts_valid_frame():
 
 def test_decode_jpeg_respects_frame_limits():
     assert rx.decode_jpeg(_jpeg(320, 240), max_side=100) is None
+
+
+def test_record_rejects_zero_max_frames(tmp_path):
+    import pytest
+
+    with pytest.raises(ValueError, match="max_frames"):
+        rx.record("127.0.0.1", 1, tmp_path / "x.drawcap", max_frames=0, token=TOKEN)
