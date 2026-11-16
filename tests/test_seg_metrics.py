@@ -253,3 +253,13 @@ def test_evaluate_in_roi_only_counts_inside():
 def test_interior_roi_cuts_margin():
     roi = seg_metrics.interior_roi((100, 200), 0.1)
     assert roi.sum() == 80 * 160 and not roi[0, 0] and roi[50, 100]
+
+
+def test_cldice_empty_prediction_against_point_scores_zero():
+    """Esqueleto vazio de mascara NAO vazia (um ponto 2x2 some na
+    esqueletizacao) nao pode valer "vazio dos dois lados": predicao
+    vazia contra GT real vale 0.0."""
+    pred = np.zeros((2, 2), dtype=bool)
+    gt = np.ones((2, 2), dtype=bool)
+    r = seg_metrics.cldice_binary(pred, gt)
+    assert r["cldice"] == 0.0

@@ -540,6 +540,13 @@ def cldice_binary(pred, gt, tolerance_px=0, valid=None):
         gt = gt & valid
     skel_pred = skeletonize(pred)
     skel_gt = skeletonize(gt)
+    # Esqueleto vazio de máscara NÃO vazia (um ponto 2x2 some na
+    # esqueletização): a própria máscara vira o esqueleto — sem
+    # isso uma predição vazia contra GT não vazio marcava 1.0.
+    if pred.any() and not skel_pred.any():
+        skel_pred = pred
+    if gt.any() and not skel_gt.any():
+        skel_gt = gt
     if valid is not None:
         skel_pred &= valid
         skel_gt &= valid
