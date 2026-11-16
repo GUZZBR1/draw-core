@@ -18,7 +18,7 @@ export default function ScrollbarControl() {
     const thumbRatio = 48 / trackHeight;
     const position = Math.max(0, Math.min(1, (pointerRatio - thumbRatio / 2) / (1 - thumbRatio)));
     const maxScroll = document.documentElement.scrollHeight - window.innerHeight;
-    window.scrollTo({ top: position * maxScroll, behavior: 'auto' });
+    window.scrollTo({ top: position * maxScroll, behavior: 'instant' });
   }
 
   function moveByKeyboard(key: string) {
@@ -33,7 +33,7 @@ export default function ScrollbarControl() {
     if (!(key in steps)) return;
     const next = Math.max(0, Math.min(100, scrollPercent + steps[key]));
     const maxScroll = document.documentElement.scrollHeight - window.innerHeight;
-    window.scrollTo({ top: (next / 100) * maxScroll, behavior: 'auto' });
+    window.scrollTo({ top: (next / 100) * maxScroll, behavior: 'instant' });
   }
 
   return (

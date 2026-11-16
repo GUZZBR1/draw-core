@@ -12,7 +12,7 @@ export default function App() {
   const [productRefresh, setProductRefresh] = useState(0);
 
   useEffect(() => {
-    window.scrollTo({ top: 0, behavior: 'auto' });
+    window.scrollTo({ top: 0, behavior: 'instant' });
     document.body.classList.toggle('home-scroll', location.pathname === '/');
   }, [location.pathname]);
 
@@ -21,7 +21,7 @@ export default function App() {
       <SiteHeader
         onRepeatProduct={() => {
           setProductRefresh((revision) => revision + 1);
-          window.scrollTo({ top: 0, behavior: 'auto' });
+          window.scrollTo({ top: 0, behavior: 'instant' });
         }}
       />
       <motion.div
