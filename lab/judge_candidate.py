@@ -193,7 +193,14 @@ def consolidate(sections):
         scope.append("adversarial (informativo)")
     else:
         scope.append("adversarial PULADO")
-    verdict = "REPROVADO_NA_BANCADA" if failed else SHEET_APTO
+    if failed:
+        verdict = "REPROVADO_NA_BANCADA"
+    elif "sheet" not in sections and "absence" not in sections:
+        # Nenhum juiz com portão executou (--skip sheet,absence):
+        # nada foi julgado — não pode sair APTO.
+        verdict = "INCONCLUSIVO"
+    else:
+        verdict = SHEET_APTO
     return verdict, scope, failed
 
 

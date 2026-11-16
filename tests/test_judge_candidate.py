@@ -143,3 +143,35 @@ def test_with_replay_option_was_removed():
     aceita em silencio."""
     with pytest.raises(SystemExit):
         jc.parse_args(["--candidate", "x.onnx", "--with-replay"])
+
+
+def test_consolidate_inconclusive_when_no_gate_judge_ran():
+    """--skip sheet,absence deixava `failed` vazio e consolidava
+    APTO sem julgar nada. Sem juiz com portao, INCONCLUSIVO."""
+    verdict, _scope, _failed = jc.consolidate({})
+    assert verdict == "INCONCLUSIVO"
+    # O adversarial e informativo (sem portao): sozinho nao julga.
+    adversarial = {
+        "adversarial": jc.extract_adversarial_reasons(
+            {
+                "models": {
+                    "candidate": {"cenas": {"blur": {"smartdoc_bg05": {}}}},
+                    "ft_dyn": {"cenas": {"blur": {"smartdoc_bg05": {}}}},
+                }
+            }
+        )
+    }
+    verdict, _scope, _failed = jc.consolidate(adversarial)
+    assert verdict == "INCONCLUSIVO"
+
+
+def test_consolidate_still_apto_or_reprovado_with_a_gate():
+    sections = {
+        "sheet": jc.extract_sheet_reasons(sheet_json()),
+        "absence": jc.extract_absence_reasons(absence_json()),
+    }
+    verdict, _scope, _failed = jc.consolidate(sections)
+    assert verdict == "APTO_A_TESTE_AO_VIVO"
+    sections["sheet"]["verdict"] = "REPROVADO_NA_BANCADA"
+    verdict, _scope, _failed = jc.consolidate(sections)
+    assert verdict == "REPROVADO_NA_BANCADA"
