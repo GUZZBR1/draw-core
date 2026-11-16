@@ -325,14 +325,18 @@ class Pipeline:
             detected_verdict = det_result.verdict
             det_captured_at = det_result.captured_at
             self.detect_ms = det_result.detect_ms
+            # A máscara de mão do detector alimenta a oclusão
+            # semântica (seg_hand_occlusion) mesmo com a cobertura
+            # desligada — no legado as duas vinham na mesma flag,
+            # aqui são sinais separados. Um resultado sem máscara
+            # limpa a evidência velha em vez de deixar oclusão
+            # defasada.
+            self._hand_mask_det = det_result.hand_mask
             if self._config.coverage:
-                # Extras da detecção: a
-                # máscara acompanha o quad que saiu dela — chegou
-                # junto, guarda junto; um resultado sem máscara
-                # limpa a evidência
-                # velha em vez de deixar cobertura defasada.
+                # A máscara de cobertura acompanha o quad que saiu
+                # dela — chegou junto, guarda junto; sem ela limpa
+                # em vez de deixar cobertura defasada.
                 self._coverage_mask = det_result.coverage_mask
-                self._hand_mask_det = det_result.hand_mask
             ran_detection = True
         else:
             detected_corners, detected_verdict = None, None

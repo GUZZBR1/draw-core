@@ -515,3 +515,33 @@ def test_reopen_counts_and_resets_display_version():
     assert loop.generation_events["reopen"] >= 1
     assert loop.clean_generation == ink.generation >= 1
     assert loop.clean_display_version == 0
+
+
+def test_det_hand_mask_reaches_occlusion_without_coverage():
+    """coverage=False com seg_hand_occlusion=True: a máscara de mão
+    do DetectionResult segue vedando o voto — são campos separados;
+    a mão não depende da flag de cobertura."""
+    state = {"with_mask": True}
+    hand = np.zeros((720, 1280), np.uint8)
+    hand[120:280, 200:420] = 255
+
+    def script(_i):
+        if state["with_mask"]:
+            return QUAD.copy(), "paper", {"hand_mask": hand}
+        return QUAD.copy(), "paper", {}
+
+    loop, _det, ink = _make_loop(
+        script, config=PipelineConfig(coverage=False, seg_hand_occlusion=True)
+    )
+    _drive(loop, 30)
+    assert loop._hand_mask_det is not None
+    visibles = [v for _g, _c, v, _cov in ink.submitted if v is not None]
+    assert visibles, "a oclusão semântica precisa chegar ao submit"
+    vis = visibles[-1]
+    assert not vis.all() and vis.any()
+    assert all(cov is None for _g, _c, _v, cov in ink.submitted)
+    # Resultado sem máscara limpa a evidência, igual à cobertura.
+    state["with_mask"] = False
+    _drive(loop, 10)
+    assert loop._hand_mask_det is None
+    assert ink.submitted[-1][2] is None
