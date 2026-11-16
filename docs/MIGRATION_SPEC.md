@@ -14,11 +14,20 @@ that the hot path can later move to C++ without touching the rest.
 1. **Runtime imports no training stack.** `src/draw/` depends only on
    `numpy`, `opencv-python-headless`, `onnxruntime` (+ optional
    `mediapipe` extra). No `torch`, no `pandas`.
-2. **Everything crosses stages through `contracts.py`.** Frozen
-   dataclasses, no loose dicts or positional tuples between modules.
-3. **Test-driven migration.** One module per PR, together with its tests.
-   A module counts as migrated only when `pytest` is green in this repo.
-4. **One PR per change.** Each PR is small, reviewable, and CI-green.
+2. **Stages end on `contracts.py` dataclasses.** The final stage
+   boundary is the frozen dataclasses, with no loose dicts or
+   positional tuples between modules. During the migration each
+   module keeps its legacy return shape (tuples included) and the
+   integration PR adapts them to `contracts`; do not widen those
+   shapes meanwhile.
+3. **Test-driven migration.** One module per PR, together with its
+   tests. A module counts as migrated only when `pytest` is green in
+   this repo. Modules with a hard mutual dependency may share a PR,
+   saying so in the description.
+4. **Every PR stands alone.** Each PR is based on `main`, small,
+   reviewable, and CI-green on its own: no imports from, and no
+   reliance on, other open PRs. Files two PRs must both change get
+   byte-identical edits.
 5. **No dead flags.** A `DRAW_*` flag survives only if it is on in the
    production configuration. Rejected or default-off experiments stay in
    legacy (see Flags).
@@ -139,29 +148,38 @@ vetoed), `DRAW_IDENTITY_WATCH`, `DRAW_PAGE_TURN_EVENT` (hotfix-disabled),
 `DRAW_IDENTITY_CHAMFER` (diagnostic), `DRAW_REG_CONTENT_GUARD`, and
 `DRAW_ANCHOR_MOTION_ABSTAIN` (reverted).
 
-Real configuration, not flags: model paths, `DRAW_MODEL_STRICT`,
-`DRAW_FORMAT`, ORT/OpenCV thread caps.
+Real configuration, not flags: model paths, `DRAW_FORMAT`, ORT/OpenCV
+thread caps. These moved to explicit constructor/`Config` arguments —
+the `DRAW_ORT_SPIN`, `DRAW_ORT_THREADS`, `DRAW_PAGE_CLEAN_THREADS`,
+`DRAW_HAND_MODEL`, `DRAW_PAGE_CLEAN_MODEL` and `DRAW_NEURAL_MODEL` env
+reads are gone (spin is always disabled). `DRAW_MODEL_STRICT` stays as
+the single env read the runtime keeps.
 
 Consequence for parity: legacy must be run **with the Tier A env set** when
 used as the reference.
 
 ## PR sequence
 
-Every item is its own PR against `main`.
+Every item is its own PR against `main`. Modules with a hard mutual
+dependency shipped grouped — those groupings are marked.
 
 1. Scaffold: pyproject, ruff, CI, `.gitattributes`, manifest, this spec.
-2. `contracts.py` + tests.
-3. `infra/`: safe_io, manifest verification, config (+ tests).
-4. `geometry.py` (+ `test_native_scale_parity`, neural quad guards).
-5. `perception.py` (+ ONNX contract/preprocess tests).
-6. `tracker.py` (+ sheet tracker, page identity, loss clock tests).
-7. `camera.py` (+ capture tests).
-8. `accumulator.py` split from `ink_layers.py`, in 2-3 PRs (votes,
-   registration/identity, worker), each with its ink tests.
-9. `hand.py`, `exporters.py`.
-10. `pipeline.py` + CLI.
-11. `lab/`: replay lab, simulator (with final-state GT), judges, falsifier.
-12. `site/`, `bridge/`.
+2. `contracts.py` + tests (PR #2).
+3. `infra/`: safe_io, manifest verification, config (PR #3).
+4. `tracker.py` (+ sheet tracker, page identity, loss clock tests) (PR #4).
+5. `camera.py` (+ capture tests) (PR #5).
+6. `geometry.py` + `perception.py` in one PR (PR #6): the corner fit
+   consumes the ONNX session output directly and they cannot pass CI
+   apart.
+7. `page_clean.py` (PR #7), `infra` telemetry/session report (PR #8).
+8. `ink-engine` (PR #9): the `ink_layers.py` runtime (accumulator,
+   votes, registration/identity, worker) in one PR — the pieces share
+   worker state and cannot pass CI apart.
+9. `hand.py` (PR #10).
+10. `lab/` in two PRs: simulator (`lab-sim`, PR #11) and
+    metrics/vectorize (`lab-metrics-vectorize`, PR #12).
+11. `site/` (PR #13), `bridge/` (PR #14).
+12. `pipeline.py` + CLI, `exporters.py` beyond vectorize (pending).
 13. Parity gate: replay the same recorded sessions through legacy and
     this repo; deterministic core (geometry, tracker, accumulator) must match.
 
@@ -237,8 +255,9 @@ or by the migration). Parity runs must account for them.
 - Contracts: array fields are read-only views/copies; `SheetQuad` corners and
   verdict must agree.
 - Lab: unique photo ids, rotation ceiling respected, rigid 180 degree returns,
-  blur from per-corner motion, thickness-aware erased-stroke labels, `lab`
-  included in the installed package; `judge_candidate` resolves relative
+  blur from per-corner motion, thickness-aware erased-stroke labels
+  respecting the exclusive erase border; `lab` is dev tooling run from
+  the repo root, not part of the installed package; `judge_candidate` resolves relative
   candidate paths, reports `INCONCLUSIVO` when no gated judge ran, and has no
   `--with-replay`; segment-based Douglas-Peucker; `cldice` of a missed dot is 0.
 - Site: reduced-motion progress follows scroll, instant programmatic scrolls,
