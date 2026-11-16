@@ -56,7 +56,6 @@ O arquivo do modelo fica fora do repositório (binário de 15 MB). O
 caminho chega sempre por argumento explícito ao detector.
 """
 
-import os
 import time
 from pathlib import Path
 from typing import NamedTuple, Tuple
@@ -68,7 +67,6 @@ from . import geometry as _geometry
 
 _INPUT_SIZE = 384
 _ORT_INTRA_THREADS = 3
-_ENV_THREADS_VAR = "DRAW_ORT_THREADS"
 _MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 _STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 _NORM_SCALE = (1.0 / (255.0 * _STD)).astype(np.float32)
@@ -131,7 +129,7 @@ def _frame_to_tensor(frame, size):
     return tensor[None].astype(np.float32)
 
 
-def _load_session(model_path, *, verify):
+def _load_session(model_path, *, verify, intra_threads=None):
     try:
         import onnxruntime as ort
     except ImportError as error:
@@ -150,7 +148,11 @@ def _load_session(model_path, *, verify):
     if verify is not None:
         verify(path)
     options = ort.SessionOptions()
-    options.intra_op_num_threads = _ort_intra_threads()
+    options.intra_op_num_threads = (
+        intra_threads
+        if intra_threads is not None and intra_threads > 0
+        else _ORT_INTRA_THREADS
+    )
     _disable_spin(options)
     return ort.InferenceSession(
         str(path), sess_options=options, providers=["CPUExecutionProvider"]
@@ -167,36 +169,11 @@ def _disable_spin(options):
     detectores rodaram 2-3x mais lentos que isolados com spin
     ligado. O estudo de performance de 2026-11-03 apontou o spin
     como suspeito do piso de ~2,5 nucleos sem explicacao no regime
-    sem folha. DRAW_ORT_SPIN=1 religa, para o A/B na mesa.
+    sem folha. O runtime migrou sem o religar: a sessao sempre
+    roda com spin desabilitado, o padrao do legado.
     """
-    if os.environ.get("DRAW_ORT_SPIN", "").strip() == "1":
-        return
     options.add_session_config_entry("session.intra_op.allow_spinning", "0")
     options.add_session_config_entry("session.inter_op.allow_spinning", "0")
-
-
-def _ort_intra_threads():
-    """Threads intra-op da sessão: 3, do teto combinado de pools.
-
-    Os pools nativos do app somados disputavam os nucleos fisicos
-    (oversubscription medida na mesa do Lucas, 2026-11-02: CPU
-    desenhando 550,8% com detector 4 + tinta 8 + OpenCV 16; com
-    detector 2 + tinta 4 caiu para 289,8%, passada igual). O
-    padrao do detector fica em 3: a soma dos pools ORT (3 + 4)
-    cabe nos nucleos com folga, e 2 mediram +31% por chamada de
-    deteccao — 3 e o ponto medio. A variável DRAW_ORT_THREADS
-    troca o valor sem tocar no código, para medir em outra
-    máquina; valor inválido ou não positivo volta ao medido.
-    """
-    raw = os.environ.get(_ENV_THREADS_VAR)
-    if raw:
-        try:
-            value = int(raw)
-        except ValueError:
-            value = 0
-        if value > 0:
-            return value
-    return _ORT_INTRA_THREADS
 
 
 class _SessionContract(NamedTuple):
@@ -292,16 +269,18 @@ class NeuralSheetDetector:
     para decidir se a reserva clássica pode falar.
     """
 
-    def __init__(self, model_path, *, verify, timing=False):
+    def __init__(self, model_path, *, verify, intra_threads=None, timing=False):
         """model_path é obrigatório; verify é um callable
         Callable[[Path | str], None] | None obrigatório chamado sobre
         o arquivo antes de abrir a sessão (o pipeline injeta
         draw.infra.manifest.verify_model; verify=None é o opt-out
-        explícito). timing=True liga o cronômetro de fases
-        (get_timing_stats)."""
+        explícito). intra_threads é o teto intra-op da sessão ORT
+        (None = 3, o valor medido na mesa). timing=True liga o
+        cronômetro de fases (get_timing_stats)."""
         self.model_path = str(model_path)
         self._timing_enabled = bool(timing)
         self._verify = verify
+        self._intra_threads = intra_threads
         self._session = None
         self._contract = None
         self._contract_session = None
@@ -352,7 +331,11 @@ class NeuralSheetDetector:
 
     def _get_session(self):
         if self._session is None:
-            self._session = _load_session(self.model_path, verify=self._verify)
+            self._session = _load_session(
+                self.model_path,
+                verify=self._verify,
+                intra_threads=self._intra_threads,
+            )
         return self._session
 
     def contract(self):
