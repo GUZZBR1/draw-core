@@ -264,7 +264,7 @@ def test_relative_bench_dir_and_python_are_resolved(tmp_path, monkeypatch):
         ]
     )
     assert rc == 0
-    assert captured["cmd"][0] == str(Path("fakepy/bin/python").resolve())
+    assert captured["cmd"][0] == str(Path("fakepy/bin/python").absolute())
     assert Path(captured["cmd"][1]).is_absolute()
     assert Path(captured["cmd"][1]).name == "judge_sheet.py"
     assert Path(captured["cwd"]).is_absolute()
@@ -326,3 +326,64 @@ def test_corrupt_report_exits_two_with_message(tmp_path, monkeypatch, capsys):
     )
     assert rc == 2
     assert "ERRO" in capsys.readouterr().err
+
+
+def test_venv_python_keeps_symlink_path(tmp_path, monkeypatch):
+    """Path.resolve() dereferencia o symlink bin/python do venv e
+    troca o interpretador pelo python base (perdendo as deps do venv).
+    absolute() torna o caminho absoluto SEM resolver o symlink."""
+    import subprocess as sp
+    import venv
+
+    env = tmp_path / "mlvenv"
+    venv.create(env, symlinks=True)  # with_pip=False por padrao
+    venv_py = env / "bin" / "python"
+    assert venv_py.exists()
+
+    bench = _make_bench(tmp_path)
+    for name in ("judge_sheet.py", "judge_absence.py", "judge_adversarial.py"):
+        (bench / "scripts" / name).write_text("# stub\n")
+    candidate = tmp_path / "cand.onnx"
+    candidate.write_bytes(b"onnx")
+    captured = {}
+    real_run = sp.run
+
+    def fake_run(cmd, cwd=None, **_kw):
+        captured["cmd"] = cmd
+        out = real_run(
+            [cmd[0], "-c", "import sys; print(sys.prefix)"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        captured["prefix"] = out.stdout.strip()
+        results = Path(cwd).parent / "results"
+        report = results / "sheet_t.json"
+        report.write_text(json.dumps(sheet_json()))
+        future = time.time() + 1
+        os.utime(report, (future, future))
+        return sp.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(jc.subprocess, "run", fake_run)
+    monkeypatch.chdir(tmp_path)
+    rc = jc.main(
+        [
+            "--candidate",
+            "cand.onnx",
+            "--bench-dir",
+            str(bench),
+            "--python",
+            "mlvenv/bin/python",
+            "--skip",
+            "absence,adversarial",
+            "--out-dir",
+            str(tmp_path / "out"),
+        ]
+    )
+    assert rc == 0
+    # argv[0] e o python DO VENV (caminho absoluto, symlink intacto),
+    # nao o interpretador base (/usr/bin/python3*).
+    assert captured["cmd"][0] == str(venv_py)
+    assert captured["cmd"][0] != str(venv_py.resolve())
+    # e executando-o, sys.prefix e o diretorio do venv.
+    assert captured["prefix"] == str(env)

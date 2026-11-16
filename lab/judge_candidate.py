@@ -347,12 +347,15 @@ def main(argv=None):
         print(f"candidato não encontrado: {candidate}", file=sys.stderr)
         return 2
     # bench e python tambem sao usados pelos juizes (cwd=scripts_dir
-    # e argv[0]): relativos precisam ser resolvidos contra o cwd do
+    # e argv[0]): relativos precisam virar absolutos contra o cwd do
     # usuario. Nome solto ("python3") nao e caminho — fica para o PATH.
     bench = Path(args.bench_dir).resolve()
     python = args.python
     if "/" in python or "\\" in python:
-        python = str(Path(python).resolve())
+        # absolute(), nao resolve(): resolve() dereferencia o symlink
+        # bin/python do venv e troca o interpretador pelo python base
+        # (/usr/bin/python3), perdendo as dependencias do venv.
+        python = str(Path(python).absolute())
     scripts_dir = bench / "scripts"
     results_dir = bench / "results"
     for script in ("judge_sheet.py", "judge_absence.py", "judge_adversarial.py"):
