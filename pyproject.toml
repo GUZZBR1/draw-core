@@ -17,6 +17,9 @@ dependencies = [
 hand = ["mediapipe>=0.10"]
 dev = ["pytest>=8", "ruff>=0.6", "onnx>=1.16"]
 
+[project.scripts]
+draw = "draw.app:main"
+
 # lab/ e ferramenta de desenvolvimento (simulador/metricas), usada
 # a partir da raiz do repositorio — ex.: python -m lab.sim_source.
 # Nao faz parte da distribuicao; o pythonpath do pytest abaixo so
