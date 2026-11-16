@@ -568,27 +568,27 @@ def _label_components(mask):
 
 
 def _skeleton_or_component_pixels(mask):
-    """Esqueleto com 1 px garantido por componente conectado não vazio.
+    """Esqueleto com cada componente apagado devolvido INTEIRO.
 
     Zhang-Suen apaga por completo componentes pequenos — um ponto 2x2
-    some inteiro. O fallback anterior só disparava quando o esqueleto
-    INTEIRO ficava vazio: um ponto ao lado de um traço sumia da conta
-    (predição sem o ponto marcava clDice 1.0) e um ponto previsto a
-    mais escapava da penalidade. Aqui cada componente apagado conserva
-    o pixel mais próximo do centroide; os que sobrevivem não mudam.
+    some inteiro. Sem fallback, um ponto do GT ao lado de um traço sai
+    da conta (predição sem ele marcava clDice 1.0) e um ponto previsto
+    a mais escapava; com fallback de 1 px "mais central", dois pontos
+    sobrepostos escolhiam pixels diferentes e a interseção ia a zero.
+    Aqui cada componente cujo esqueleto some por completo volta com
+    TODOS os seus pixels (preservando a sobreposição real); os que
+    sobrevivem à esqueletização ficam intactos.
+
+    Custo: uma rotulação e uma contagem indexada por rótulo — sem
+    construir ``labels == i`` por componente (antes componentes x área:
+    ~5k grãos em 1024x1024 levavam ~0.7 s aqui, 2.4 s na medição do
+    review, contra ~0.01 s do thinning).
     """
     mask = np.asarray(mask, dtype=bool)
     skel = skeletonize(mask)
     labels, n = _label_components(mask)
-    for i in range(1, n + 1):
-        comp = labels == i
-        if (comp & skel).any():
-            continue
-        ys, xs = np.nonzero(comp)
-        cy, cx = float(ys.mean()), float(xs.mean())
-        pick = int(np.argmin((ys - cy) ** 2 + (xs - cx) ** 2))
-        skel[ys[pick], xs[pick]] = True
-    return skel
+    has_skeleton = np.bincount(labels[skel], minlength=n + 1) > 0
+    return skel | (mask & ~has_skeleton[labels])
 
 
 def cldice_binary(pred, gt, tolerance_px=0, valid=None):

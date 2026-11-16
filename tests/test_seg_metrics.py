@@ -1,4 +1,5 @@
 import json
+import time
 
 import numpy as np
 import pytest
@@ -322,3 +323,68 @@ def test_validate_masks_rejects_fractional_labels():
     pred_ok = np.zeros((10, 10), dtype=np.float64)
     pred_ok[2:4, 2:4] = 2.0
     seg_metrics.iou_per_class(pred_ok, gt)
+
+
+def test_cldice_overlapping_dots_score_half():
+    # Dois pontos 2x2 deslocados 1 px: o fallback por componente inteiro
+    # preserva a sobreposicao real de 2 px (com o fallback de 1 px,
+    # os pixels "mais centrais" divergiam e a interseccao ia a zero).
+    gt = np.zeros((60, 60), dtype=bool)
+    gt[2:4, 2:4] = True
+    pred = np.zeros((60, 60), dtype=bool)
+    pred[2:4, 3:5] = True
+    r = seg_metrics.cldice_binary(pred, gt)
+    # S(pred) tem 4 px, 2 dentro de V(gt): tprec = 0.5; simetrico tsens.
+    assert r["tprec"] == pytest.approx(0.5)
+    assert r["tsens"] == pytest.approx(0.5)
+    assert r["cldice"] == pytest.approx(0.5)
+
+
+def test_cldice_dot_fully_covered_scores_one():
+    gt = np.zeros((60, 60), dtype=bool)
+    gt[2:4, 2:4] = True
+    assert seg_metrics.cldice_binary(gt.copy(), gt)["cldice"] == 1.0
+    pred = gt.copy()
+    pred[30:35, 5:55] = True  # cobre o ponto e adiciona um traco a mais
+    r = seg_metrics.cldice_binary(pred, gt)
+    assert r["tsens"] == 1.0  # todo o ponto do GT coberto
+    assert r["tprec"] < 1.0  # o traco extra pesa na precisao
+
+
+def test_cldice_dot_partially_covered():
+    gt = np.zeros((60, 60), dtype=bool)
+    gt[2:4, 2:4] = True
+    pred = np.zeros((60, 60), dtype=bool)
+    pred[2:4, 2:3] = True  # barra 2x1 cobrindo metade do ponto
+    r = seg_metrics.cldice_binary(pred, gt)
+    assert r["tprec"] == 1.0  # a barra sobrevive e esta toda dentro
+    assert r["tsens"] == pytest.approx(0.5)
+    assert r["cldice"] == pytest.approx(2 * 1.0 * 0.5 / 1.5)
+
+
+def test_skeleton_fallback_scales_and_matches_naive_reference():
+    rng = np.random.default_rng(0)
+    mask = rng.random((1024, 1024)) < 0.005  # ~5k graos isolados
+    times = []
+    for _ in range(2):
+        t0 = time.perf_counter()
+        seg_metrics._skeleton_or_component_pixels(mask)
+        times.append(time.perf_counter() - t0)
+    # Limite folgado: a varredura por componente custava ~0.7 s aqui
+    # (2.4 s na medicao do review); a versao indexada roda em dezenas
+    # de ms. Mede-se duas vezes e pega-se a menor para nao brigar com
+    # jitter de CI.
+    assert min(times) < 0.5
+
+    # Propriedade: resultado == esqueleto uniao componentes sumidos,
+    # conferido contra uma referencia ingenua por componente.
+    small = rng.random((60, 80)) < 0.08
+    skel = seg_metrics.skeletonize(small)
+    labels, n = seg_metrics._label_components(small)
+    ref = skel.copy()
+    for i in range(1, n + 1):
+        comp = labels == i
+        if not (comp & skel).any():
+            ref |= comp
+    got = seg_metrics._skeleton_or_component_pixels(small)
+    assert np.array_equal(got, ref)
