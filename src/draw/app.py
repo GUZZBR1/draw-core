@@ -230,9 +230,7 @@ def run_check(source=0):
             "AVISO: as checagens de /dev/video* e de permissoes Unix "
             "valem so no Linux; testando a abertura direta da camera."
         )
-        return (
-            0 if _check_camera_open(source, f"camera {source}") and all_ok else 1
-        )
+        return 0 if _check_camera_open(source, f"camera {source}") and all_ok else 1
 
     nodes = _video_nodes()
     if not nodes:
@@ -479,7 +477,6 @@ def run(
     _apply_opencv_thread_cap()
     _require_gui_backend()
 
-
     # Recursos que o finally derruba; None = ainda nao iniciado.
     # Depois do probe de GUI, TODO o setup roda dentro do try: uma
     # falha em qualquer ponto (pasta sem permissao, modelo, camera)
@@ -515,7 +512,9 @@ def run(
 
         page_clean = None
         if not markers_mode:
-            page_clean = PageCleanInk(page_clean_model, verify=manifest_module.verify_model)
+            page_clean = PageCleanInk(
+                page_clean_model, verify=manifest_module.verify_model
+            )
             try:
                 page_clean.load()
                 print(
@@ -576,7 +575,9 @@ def run(
         # Capturas, telemetria e relatórios são privados: a pasta ganha
         # um .gitignore "*" qualquer que seja o --save-dir.
         save_path = ensure_private_dir(save_dir)
-        telemetry = telemetry_module.SessionTelemetry(save_path / "telemetry.jsonl").start()
+        telemetry = telemetry_module.SessionTelemetry(
+            save_path / "telemetry.jsonl"
+        ).start()
         format_metadata = {
             "paper_format": config.PAPER_FORMAT,
             "page_grid": [config.PAPER_W, config.PAPER_H],
@@ -622,7 +623,9 @@ def run(
                 "modelo_tinta": _model_header(
                     page_clean.model_path if page_clean is not None else None
                 ),
-                "tinta_modo": ("page-clean" if page_clean is not None else "marcadores"),
+                "tinta_modo": (
+                    "page-clean" if page_clean is not None else "marcadores"
+                ),
                 "mao_disponivel": clean_hand_presence is not None,
                 "camera_abertura": camera_module._LAST_OPEN_PROBE,
             },

@@ -259,8 +259,12 @@ def test_require_gui_backend_levanta_sem_highgui(monkeypatch):
 
 def test_require_gui_backend_ok_com_highgui(monkeypatch):
     calls = []
-    monkeypatch.setattr(app_module.cv2, "namedWindow", lambda *a, **k: calls.append("n"))
-    monkeypatch.setattr(app_module.cv2, "destroyWindow", lambda *a, **k: calls.append("d"))
+    monkeypatch.setattr(
+        app_module.cv2, "namedWindow", lambda *a, **k: calls.append("n")
+    )
+    monkeypatch.setattr(
+        app_module.cv2, "destroyWindow", lambda *a, **k: calls.append("d")
+    )
     app_module._require_gui_backend()
     assert calls == ["n", "d"]
 
