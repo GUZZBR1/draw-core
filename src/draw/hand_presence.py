@@ -132,11 +132,15 @@ class MediaPipeHandPresence:
         return True, moved
 
 
-def make_hand_presence(model_path):
-    """Adaptador de presenca se o modelo de mao existe, senao None."""
+def make_hand_presence(model_path, *, verify):
+    """Adaptador de presenca se o modelo de mao existe, senao None.
+
+    verify segue para o HandMasker: um callable que confere o
+    arquivo do modelo, ou o None explicito de quem optou por nao
+    verificar."""
     if not hand_module.hand_model_available(model_path):
         return None
-    return MediaPipeHandPresence(hand_module.HandMasker(model_path))
+    return MediaPipeHandPresence(hand_module.HandMasker(model_path, verify=verify))
 
 
 class HandPresenceWorker:

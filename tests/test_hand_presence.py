@@ -76,7 +76,7 @@ def _install_fake_mediapipe(monkeypatch, fail_video=False):
 def _masker(tmp_path):
     model = tmp_path / "hand_landmarker.task"
     model.write_bytes(b"stub")
-    return hand_module.HandMasker(str(model))
+    return hand_module.HandMasker(str(model), verify=None)
 
 
 def test_presence_signature_uses_video_with_monotonic_ts(monkeypatch, tmp_path):

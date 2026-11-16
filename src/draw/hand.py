@@ -110,10 +110,11 @@ class HandMasker:
     com falha na criação). A indisponibilidade avisa uma vez e é
     permanente na sessão: não adianta tentar de novo a cada frame.
 
-    O parametro verify e um callable (Path|str) -> None injetavel:
-    o pipeline passa draw.infra.manifest.verify_model para barrar
-    modelo divergente ou nao registrado antes de o MediaPipe abrir
-    o arquivo; None desliga a verificacao.
+    O parametro verify e um callable (Path|str) -> None injetavel
+    e nomeado OBRIGATORIO: o pipeline passa
+    draw.infra.manifest.verify_model para barrar modelo divergente
+    ou nao registrado antes de o MediaPipe abrir o arquivo; o None
+    explicito significa que o chamador optou por nao verificar.
 
     O landmarker e fechado deterministicamente por close() —
     idempotente, e o objeto vira context manager — nunca por
@@ -121,7 +122,7 @@ class HandMasker:
     vazado finalizado pelo GC na thread principal.
     """
 
-    def __init__(self, model_path=None, verify=None):
+    def __init__(self, model_path=None, *, verify):
         self._requested_path = model_path
         resolved = _resolve_model_path(model_path)
         if resolved is not None and verify is not None:

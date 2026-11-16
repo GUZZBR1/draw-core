@@ -11,6 +11,7 @@ import types
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from draw import hand as hand_module
 
@@ -83,7 +84,7 @@ def test_import_and_mask_without_mediapipe_degrade_once(tmp_path, capsys, monkey
     # O pacote e extra opcional: importar draw.hand ja aconteceu no
     # topo; sys.modules[...] = None forca o ImportError do uso.
     monkeypatch.setitem(sys.modules, "mediapipe", None)
-    masker = hand_module.HandMasker(_model(tmp_path))
+    masker = hand_module.HandMasker(_model(tmp_path), verify=None)
     frame = np.zeros((40, 50, 3), dtype=np.uint8)
     assert masker.mask(frame) is None
     assert masker.mask(frame) is None
@@ -96,9 +97,17 @@ def test_verify_receives_the_resolved_model_path(tmp_path):
     assert calls == [masker._requested_path]
 
 
+def test_verify_is_a_required_named_argument(tmp_path):
+    # Integridade fail-closed: esquecer o verificador e erro de
+    # chamada, nao "desligado por acidente"; o None explicito e o
+    # opt-out.
+    with pytest.raises(TypeError):
+        hand_module.HandMasker(_model(tmp_path))
+
+
 def test_loading_uses_the_explicit_model_and_image_mode(monkeypatch, tmp_path):
     _log, created = _install_fake_mediapipe(monkeypatch)
-    masker = hand_module.HandMasker(_model(tmp_path))
+    masker = hand_module.HandMasker(_model(tmp_path), verify=None)
     frame = np.zeros((80, 100, 3), dtype=np.uint8)
     mask = masker.mask(frame)
     assert len(created) == 1
@@ -107,7 +116,7 @@ def test_loading_uses_the_explicit_model_and_image_mode(monkeypatch, tmp_path):
 
 def test_detected_hand_fills_scaled_hull_and_forearm(monkeypatch, tmp_path):
     _install_fake_mediapipe(monkeypatch)
-    masker = hand_module.HandMasker(_model(tmp_path))
+    masker = hand_module.HandMasker(_model(tmp_path), verify=None)
     frame = np.zeros((80, 100, 3), dtype=np.uint8)
     mask = masker.mask(frame)
     assert mask is not None
@@ -119,7 +128,7 @@ def test_detected_hand_fills_scaled_hull_and_forearm(monkeypatch, tmp_path):
 
 def test_close_is_idempotent_and_permanent(monkeypatch, tmp_path):
     _log, created = _install_fake_mediapipe(monkeypatch)
-    masker = hand_module.HandMasker(_model(tmp_path))
+    masker = hand_module.HandMasker(_model(tmp_path), verify=None)
     frame = np.zeros((80, 100, 3), dtype=np.uint8)
     assert masker.mask(frame) is not None
     assert len(created) == 1
@@ -133,7 +142,7 @@ def test_close_is_idempotent_and_permanent(monkeypatch, tmp_path):
 
 def test_close_also_closes_the_video_landmarker(monkeypatch, tmp_path):
     _log, created = _install_fake_mediapipe(monkeypatch)
-    masker = hand_module.HandMasker(_model(tmp_path))
+    masker = hand_module.HandMasker(_model(tmp_path), verify=None)
     frame = np.zeros((80, 100, 3), dtype=np.uint8)
     masker.presence_signature(frame, timestamp_ms=1000)
     masker.presence_signature(frame)
@@ -145,7 +154,7 @@ def test_close_also_closes_the_video_landmarker(monkeypatch, tmp_path):
 def test_context_manager_closes(monkeypatch, tmp_path):
     _log, created = _install_fake_mediapipe(monkeypatch)
     frame = np.zeros((80, 100, 3), dtype=np.uint8)
-    with hand_module.HandMasker(_model(tmp_path)) as masker:
+    with hand_module.HandMasker(_model(tmp_path), verify=None) as masker:
         masker.mask(frame)
     assert created[0].closed == 1
 
@@ -163,5 +172,5 @@ def test_no_model_path_and_no_default_means_unavailable(tmp_path, monkeypatch):
     monkeypatch.setattr(
         hand_module, "_DEFAULT_CANDIDATES", (str(tmp_path / "nada.task"),)
     )
-    masker = hand_module.HandMasker()
+    masker = hand_module.HandMasker(verify=None)
     assert masker.mask(np.zeros((10, 10, 3), dtype=np.uint8)) is None
