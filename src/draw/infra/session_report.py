@@ -82,8 +82,7 @@ class SessionReport:
             stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(epoch))
             frac = int((epoch % 1) * 1000)
             self._report_path = self._directory / (
-                f"session-{stamp}-{frac:03d}"
-                f"-{os.getpid()}-{next(_REPORT_SEQ)}.json"
+                f"session-{stamp}-{frac:03d}-{os.getpid()}-{next(_REPORT_SEQ)}.json"
             )
         return self._report_path
 

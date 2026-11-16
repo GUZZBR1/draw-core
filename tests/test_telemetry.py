@@ -60,9 +60,7 @@ def test_records_carry_snapshot_fields_and_counter_deltas(tmp_path):
     assert first["provisional_px"] == 56
     assert first["state"] == "active"
     assert "t_epoch" in first
-    second = next(
-        record for record in records if record.get("passes_total") == 13
-    )
+    second = next(record for record in records if record.get("passes_total") == 13)
     assert second["passes_total_delta"] == 3
     assert second["retracted_px_total_delta"] == 0
 
