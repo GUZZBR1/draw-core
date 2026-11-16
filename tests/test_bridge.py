@@ -11,6 +11,7 @@ import py_compile
 import socket
 import struct
 import threading
+import time
 from pathlib import Path
 
 HELPER = Path(__file__).resolve().parent.parent / "bridge" / "windows_helper.py"
@@ -123,3 +124,37 @@ def test_capture_timestamp_is_relative_to_process_epoch():
     )
     assert frame_id2 == 1
     assert ts2 == 1_500_000_000 // 1000
+
+def test_authenticate_enforces_total_handshake_deadline():
+    """Par lento (1 byte antes de cada timeout por-recv) nao pode
+    segurar o accept serial alem do prazo total."""
+    server_conn, client_conn = socket.socketpair()
+    message = wh.HELLO.pack(wh.HELLO_MAGIC, wh.HELLO_VERSION, len(TOKEN)) + TOKEN
+
+    def drip():
+        try:
+            for byte in message:
+                time.sleep(0.12)
+                client_conn.sendall(bytes([byte]))
+        except OSError:
+            pass
+        finally:
+            client_conn.close()
+
+    threading.Thread(target=drip, daemon=True).start()
+    start = time.monotonic()
+    result = wh.authenticate_client(server_conn, TOKEN, timeout=0.3)
+    elapsed = time.monotonic() - start
+    server_conn.close()
+    assert result is False
+    assert elapsed < 1.0
+
+
+def test_authenticate_accepts_valid_hello():
+    server_conn, client_conn = socket.socketpair()
+    client_conn.sendall(_hello(TOKEN))
+    assert wh.authenticate_client(server_conn, TOKEN, timeout=5.0) is True
+    assert client_conn.recv(4) == wh.ACCEPT
+    server_conn.close()
+    client_conn.close()
+

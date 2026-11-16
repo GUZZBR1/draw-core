@@ -318,9 +318,14 @@ def resolve_token(token=None, token_file=None):
     return token
 
 
-def _recv_exact(conn, size):
+def _recv_exact(conn, size, deadline=None, clock=time.monotonic):
     data = bytearray()
     while len(data) < size:
+        if deadline is not None:
+            remaining = deadline - clock()
+            if remaining <= 0:
+                raise TimeoutError("prazo total do handshake excedido")
+            conn.settimeout(remaining)
         chunk = conn.recv(size - len(data))
         if not chunk:
             return None
@@ -328,16 +333,19 @@ def _recv_exact(conn, size):
     return bytes(data)
 
 
-def authenticate_client(conn, token, timeout=HANDSHAKE_TIMEOUT_S):
+def authenticate_client(conn, token, timeout=HANDSHAKE_TIMEOUT_S, clock=time.monotonic):
     """Lê HELLO + token do cliente; True e ACCEPT se o token confere.
 
     Falha (magic, versão, tamanho, token errado, timeout) devolve
-    False sem responder nada; quem chamou fecha a conexão.
+    False sem responder nada; quem chamou fecha a conexão. O timeout
+    é um prazo TOTAL monotônico para o handshake inteiro — um par
+    lento que manda 1 byte antes de cada recv não pode segurar o
+    accept serial além dele.
     """
     previous = conn.gettimeout()
-    conn.settimeout(timeout)
+    deadline = clock() + timeout
     try:
-        hello = _recv_exact(conn, HELLO.size)
+        hello = _recv_exact(conn, HELLO.size, deadline, clock)
         if hello is None:
             return False
         magic, version, length = HELLO.unpack(hello)
@@ -345,9 +353,13 @@ def authenticate_client(conn, token, timeout=HANDSHAKE_TIMEOUT_S):
             return False
         if not TOKEN_MIN_LEN <= length <= TOKEN_MAX_LEN:
             return False
-        offered = _recv_exact(conn, length)
+        offered = _recv_exact(conn, length, deadline, clock)
         if offered is None or not hmac.compare_digest(offered, token):
             return False
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return False
+        conn.settimeout(remaining)
         conn.sendall(ACCEPT)
         return True
     except OSError:
