@@ -404,9 +404,7 @@ def evaluate_canvas(
         cena→canvas segue a âncora detectada. Sem âncora (ideal_page)
         ou sem mapa, o caminho é a homografia de sempre.
         """
-        if scene_map is not None and (
-            canvas_space == "scene" or matrix is not None
-        ):
+        if scene_map is not None and (canvas_space == "scene" or matrix is not None):
             scene = cv2.remap(
                 mask,
                 scene_map[0],
@@ -502,9 +500,7 @@ def evaluate_canvas(
                 for m, pm in zip(stroke_mats, stroke_page_mats, strict=True)
             ]
             yield (
-                projected[0]
-                if len(projected) == 1
-                else np.maximum.reduce(projected)
+                projected[0] if len(projected) == 1 else np.maximum.reduce(projected)
             )
 
     report = compare_masks(prediction, truth, strokes(), stroke_recall=stroke_recall)
