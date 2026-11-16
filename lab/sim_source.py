@@ -912,7 +912,11 @@ def _polyline_rect_overlap(points, rect, thickness=0) -> bool:
     if thickness <= 0:
         return False
     radius = thickness / 2.0
-    x1, y1 = x + w, y + h
+    # A regiao apagada e [x, x+w) x [y, y+h): o ultimo pixel e
+    # x+w-1/y+h-1. Medir distancia ao retangulo fechado em x+w/y+h
+    # marcava como apagado traco que so encostava na borda que NAO
+    # foi apagada.
+    x1, y1 = x + w - 1, y + h - 1
     dx = np.maximum.reduce([x - points[:, 0], points[:, 0] - x1, np.zeros(len(points))])
     dy = np.maximum.reduce([y - points[:, 1], points[:, 1] - y1, np.zeros(len(points))])
     if (np.hypot(dx, dy) <= radius).any():

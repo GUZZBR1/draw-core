@@ -5,6 +5,7 @@ import json
 import cv2
 import numpy as np
 import pytest
+from lab import sim_source
 from lab.sim_source import SyntheticCapture, export_video
 
 
@@ -560,3 +561,23 @@ def test_non_collapsing_lerp_keeps_corner_interpolation():
     expected = phase["quad_from"] + t * (phase["quad_to"] - phase["quad_from"])
     capture._step_quad_lerp(phase, local)
     np.testing.assert_allclose(capture._quad_now, expected)
+
+
+def test_polyline_rect_overlap_exclusive_border_not_erased():
+    """A regiao apagada e [x, x+w) x [y, y+h): o ultimo pixel
+    apagado e x+w-1. Um traco cuja linha central so encosta na
+    borda exclusiva nao foi apagado — o rotulo nao pode
+    contradizer a tinta restante."""
+    rect = (10, 5, 20, 10)  # apaga x 10..29, y 5..14
+    # Linha central na borda exclusiva direita: intacta.
+    edge = np.array([[30, 5], [30, 15]], dtype=np.float32)
+    assert not sim_source._polyline_rect_overlap(edge, rect, 1)
+    edge_bottom = np.array([[10, 15], [29, 15]], dtype=np.float32)
+    assert not sim_source._polyline_rect_overlap(edge_bottom, rect, 1)
+    # Invadindo a regiao por um pixel: apagado.
+    inside = np.array([[29, 5], [29, 15]], dtype=np.float32)
+    assert sim_source._polyline_rect_overlap(inside, rect, 1)
+    # So a espessura alcancando a regiao (dist == thickness/2):
+    # apagado, como na correcao anterior.
+    by_thickness = np.array([[31, 5], [31, 15]], dtype=np.float32)
+    assert sim_source._polyline_rect_overlap(by_thickness, rect, 4)
