@@ -9,7 +9,7 @@ description = "Draw: webcam + paper -> real-time digital ink. Runtime engine."
 requires-python = ">=3.11"
 dependencies = [
     "numpy>=1.26",
-    "opencv-python-headless>=4.8",
+    "opencv-contrib-python-headless>=4.8",
     "onnxruntime>=1.17",
 ]
 
