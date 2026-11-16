@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from draw import app as app_module  # noqa: E402
 from draw import config  # noqa: E402
-from draw import paper as paper_module
+from draw import paper as paper_module  # noqa: E402
 from draw.infra import manifest as manifest_module  # noqa: E402
 from draw.perception import PRESENCE_VETO_LOGIT  # noqa: E402
 
@@ -156,6 +156,9 @@ def test_check_models_falha_em_divergencia(monkeypatch, tmp_path, capsys):
         manifest_module, "load_manifest", lambda path=None: (Path("m.json"), fake)
     )
     monkeypatch.setattr(manifest_module, "DEFAULT_MODELS_DIR", tmp_path)
+    # O conftest rebaixa o strict globalmente; aqui o cenario e o
+    # padrao de producao (estrito): divergencia e FAIL.
+    monkeypatch.setattr(manifest_module, "strict_enabled", lambda: True)
     monkeypatch.setattr(
         manifest_module,
         "verify_model",
@@ -238,3 +241,75 @@ def test_main_erro_de_execucao_sai_2(monkeypatch):
     with pytest.raises(SystemExit) as error:
         app_module.main()
     assert error.value.code == 2
+
+
+def test_save_stamp_unico_por_processo():
+    stamps = {app_module._save_stamp() for _ in range(20)}
+    assert len(stamps) == 20
+
+
+def test_require_gui_backend_levanta_sem_highgui(monkeypatch):
+    def _headless(*a, **kw):
+        raise app_module.cv2.error("sem GUI")
+
+    monkeypatch.setattr(app_module.cv2, "namedWindow", _headless)
+    with pytest.raises(RuntimeError, match="draw-core\[gui\]"):
+        app_module._require_gui_backend()
+
+
+def test_require_gui_backend_ok_com_highgui(monkeypatch):
+    calls = []
+    monkeypatch.setattr(app_module.cv2, "namedWindow", lambda *a, **k: calls.append("n"))
+    monkeypatch.setattr(app_module.cv2, "destroyWindow", lambda *a, **k: calls.append("d"))
+    app_module._require_gui_backend()
+    assert calls == ["n", "d"]
+
+
+def test_check_models_divergencia_nao_estrita_vira_aviso(monkeypatch, tmp_path, capsys):
+    # --allow-unverified: mismatch vira AVISO, nunca "confere com o
+    # manifesto" — era o bug que imprimia PASS com hash errado.
+    model = tmp_path / "modelo.onnx"
+    model.write_bytes(b"binario")
+    fake = {"modelo.onnx": {"sha256": "f" * 64, "bytes": 7}}
+    monkeypatch.setattr(
+        manifest_module, "load_manifest", lambda path=None: (Path("m.json"), fake)
+    )
+    monkeypatch.setattr(manifest_module, "DEFAULT_MODELS_DIR", tmp_path)
+    monkeypatch.setattr(manifest_module, "strict_enabled", lambda: False)
+    monkeypatch.setattr(
+        manifest_module,
+        "verify_model",
+        lambda path, **kw: (_ for _ in ()).throw(RuntimeError("sha diverge")),
+    )
+    assert app_module._check_models() is True
+    out = capsys.readouterr().out
+    assert "AVISO" in out and "confere com o manifesto" not in out
+
+
+def test_run_check_fora_do_linux_degrada(monkeypatch, capsys):
+    seen = {}
+    monkeypatch.setattr(app_module.sys, "platform", "darwin")
+    monkeypatch.setattr(app_module, "_require_gui_backend", lambda: None)
+    monkeypatch.setattr(app_module, "_check_models", lambda: True)
+    monkeypatch.setattr(
+        app_module,
+        "_check_camera_open",
+        lambda source, label: seen.setdefault("open", (source, label)) or True,
+    )
+    # Sem /dev/video* e sem grp no caminho: nao deve explodir.
+    assert app_module.run_check(0) == 0
+    assert seen["open"] == (0, "camera 0")
+    assert "AVISO" in capsys.readouterr().out
+
+
+def test_run_check_avisa_sem_backend_gui(monkeypatch, capsys):
+    monkeypatch.setattr(
+        app_module,
+        "_require_gui_backend",
+        lambda: (_ for _ in ()).throw(RuntimeError("sem GUI")),
+    )
+    monkeypatch.setattr(app_module, "_check_models", lambda: True)
+    monkeypatch.setattr(app_module, "_check_camera_open", lambda *a: False)
+    monkeypatch.setattr(app_module.sys, "platform", "darwin")
+    assert app_module.run_check(0) == 1
+    assert "draw-core[gui]" in capsys.readouterr().out

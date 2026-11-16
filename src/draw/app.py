@@ -31,6 +31,7 @@ g = ligar ou desligar a captura automatica de frames, q/Esc = sair.
 
 import argparse
 import glob
+import itertools
 import os
 import sys
 import time
@@ -210,10 +211,28 @@ def run_check(source=0):
     aberta como URL.
     """
     print(f"PASS: OpenCV disponivel. Versao {cv2.__version__}.")
+    try:
+        _require_gui_backend()
+    except RuntimeError:
+        print(
+            "AVISO: backend de janela (HighGUI) indisponivel; a janela "
+            "do Draw nao abre. Correcao: pip install 'draw-core[gui]'."
+        )
+    else:
+        print("PASS: backend de janela (HighGUI) disponivel.")
     all_ok = _check_models()
 
     if not isinstance(source, int):
         return 0 if _check_remote_source(source) and all_ok else 1
+
+    if not sys.platform.startswith("linux"):
+        print(
+            "AVISO: as checagens de /dev/video* e de permissoes Unix "
+            "valem so no Linux; testando a abertura direta da camera."
+        )
+        return (
+            0 if _check_camera_open(source, f"camera {source}") and all_ok else 1
+        )
 
     nodes = _video_nodes()
     if not nodes:
@@ -272,13 +291,21 @@ def run_check(source=0):
         print('  Correcao nesta sessao: sg video -c "python -m draw".')
         all_ok = False
 
+    if not _check_camera_open(source, node):
+        all_ok = False
+
+    return 0 if all_ok else 1
+
+
+def _check_camera_open(source, label):
+    """Abre a fonte local e espera um quadro por 3 s. True/False."""
     capture = cv2.VideoCapture(source)
     if not capture.isOpened():
         print(
-            f"FAIL: nao consegui abrir {node}. Outro programa "
+            f"FAIL: nao consegui abrir {label}. Outro programa "
             "provavelmente esta usando a camera."
         )
-        return 1
+        return False
     camera_module._configure_local_capture(capture)
     frame = None
     deadline = time.time() + 3.0
@@ -291,17 +318,15 @@ def run_check(source=0):
     capture.release()
     if frame is not None:
         print(
-            f"PASS: quadro lido de {node}. "
+            f"PASS: quadro lido de {label}. "
             f"Formato (altura, largura, canais): {frame.shape}."
         )
-    else:
-        print(
-            f"FAIL: {node} abriu, mas nenhum quadro chegou em 3 "
-            "segundos. A camera pode estar ocupada ou travada."
-        )
-        all_ok = False
-
-    return 0 if all_ok else 1
+        return True
+    print(
+        f"FAIL: {label} abriu, mas nenhum quadro chegou em 3 "
+        "segundos. A camera pode estar ocupada ou travada."
+    )
+    return False
 
 
 def _check_remote_source(url):
@@ -367,10 +392,13 @@ def _check_models():
             )
             continue
         try:
-            entry = manifest_module.verify_model(path)
+            # strict=True aqui de propósito: mismatch de hash/tamanho
+            # nunca sai como "confere com o manifesto" — vira FAIL no
+            # modo estrito e AVISO com --allow-unverified.
+            entry = manifest_module.verify_model(path, strict=True)
         except RuntimeError as error:
-            print(f"FAIL: {error}")
-            ok = False
+            print(f"{'FAIL' if strict else 'AVISO'}: {error}")
+            ok = ok and not strict
             continue
         if entry is None:
             print(f"AVISO: {name} nao tem entrada no manifesto.")
@@ -386,6 +414,43 @@ def _video_nodes():
     return sorted(
         path for path in glob.glob("/dev/video*") if path[len("/dev/video") :].isdigit()
     )
+
+
+_SNAPSHOT_SEQ = itertools.count()
+
+
+def _save_stamp():
+    """Nome único por processo: epoch em ms + contador monotônico.
+
+    Segundos inteiros colidem quando o usuário salva duas vezes no
+    mesmo segundo; milissegundos ainda colidem na fila do PngWriter —
+    o contador zera a chance sem depender de resolução de relógio.
+    """
+    return f"{time.time_ns() // 1_000_000}_{next(_SNAPSHOT_SEQ)}"
+
+
+def _require_gui_backend():
+    """Falha cedo e claro quando o OpenCV instalado não tem HighGUI.
+
+    A roda headless (a dependência padrão, pensada para CI) abre
+    VideoCapture, mas cv2.imshow levanta cv2.error na primeira frame.
+    Quem desenha na tela instala o extra: pip install 'draw-core[gui]'.
+    A sonda abre e fecha uma janela: no headless o namedWindow já
+    levanta, e num build com GUI sem display acontece o mesmo — nas
+    duas situações a mensagem abaixo é a correta.
+    """
+    try:
+        probe = "draw-gui-probe"
+        cv2.namedWindow(probe, cv2.WINDOW_NORMAL)
+        cv2.destroyWindow(probe)
+    except cv2.error as error:
+        raise RuntimeError(
+            "O OpenCV instalado nao tem backend de janela (HighGUI) "
+            "utilizavel — a roda headless nao abre cv2.imshow e um "
+            "build com GUI sem display falha igual. Para desenhar na "
+            "tela: pip install 'draw-core[gui]'. Sem tela (CI/servidor), "
+            "use as ferramentas de lab/."
+        ) from error
 
 
 def _report_format_suggestion(telemetry, suggestion):
@@ -412,224 +477,262 @@ def run(
     page_clean_model=None,
 ):
     _apply_opencv_thread_cap()
+    _require_gui_backend()
 
-    neural_detector = None
-    if neural_model is None and not markers_mode and _DEFAULT_SHEET_MODEL.exists():
-        neural_model = str(_DEFAULT_SHEET_MODEL)
-    if neural_model is not None and not markers_mode:
-        neural_detector = NeuralSheetDetector(
-            neural_model, verify=manifest_module.verify_model
-        )
-        neural_detector.load()
-        print(
-            f"Detector neural ativo: {neural_model}. "
-            "O classico cobre os frames em que o neural nao ve folha."
-        )
-    elif not markers_mode:
-        print(
-            "Aviso: sem detector neural de folha (modelo nao "
-            "encontrado); usando so o detector classico, que nao "
-            "enxerga a folha em varias mesas. Baixe os modelos "
-            "oficiais pela Release do repositorio."
-        )
 
-    page_clean = None
-    if not markers_mode:
-        page_clean = PageCleanInk(page_clean_model, verify=manifest_module.verify_model)
-        try:
-            page_clean.load()
-            print(
-                f"Tinta pagina->limpa ativa: {page_clean.model_path} "
-                f"(limiar {page_clean.threshold}). Canvas por uniao "
-                "simples das mascaras."
-            )
-        except (RuntimeError, FileNotFoundError) as error:
-            raise RuntimeError(
-                f"O modelo pagina->limpa nao carregou ({error}); sem "
-                "ele nao ha tinta no caminho novo. Baixe os modelos "
-                "oficiais pela Release do repositorio."
-            ) from error
-
+    # Recursos que o finally derruba; None = ainda nao iniciado.
+    # Depois do probe de GUI, TODO o setup roda dentro do try: uma
+    # falha em qualquer ponto (pasta sem permissao, modelo, camera)
+    # desce pelo finally liberando o que ja subiu.
     ink_worker = None
     hand_masker = None
-    if page_clean is not None:
-        hand_masker = (
-            HandMasker(hand_model, verify=manifest_module.verify_model)
-            if hand_model_available(hand_model)
-            else None
-        )
-        ink_worker = PageCleanWorker(page_clean, hand_masker).start()
-        print(
-            "Tinta em thread propria: o laco principal nao espera "
-            "o modelo (passadas com cadencia de ~250 ms)."
-        )
-
-    clean_hand_presence = None
     hand_presence_worker = None
-    if page_clean is not None and not markers_mode:
-        clean_hand_presence = make_hand_presence(
-            hand_model, verify=manifest_module.verify_model
-        )
-        if clean_hand_presence is not None:
-            print(
-                "Porta de ociosidade pela mao ativa no caminho "
-                "pagina->limpa: sem mao, a tinta sonda ate a saida "
-                "confirmada assentar, descansa sem passadas e a "
-                "geometria da tinta congela."
-            )
-            # Amostragem fora do laco (T4): o laco submete e colhe.
-            hand_presence_worker = HandPresenceWorker(clean_hand_presence).start()
-
-    def detect_sheet(frame):
-        return _detect_sheet_combined_traced(frame, neural_detector)
-
-    capture = open_capture(parse_source(source))
-    frame_source = LatestFrameCapture(capture).start()
     detection_worker = None
-    if not markers_mode:
-        # coverage=True na trabalhadora: os extras da deteccao
-        # (mascara de cobertura e de mao) sempre sao publicados — a
-        # mascara de mao alimenta a oclusao semantica mesmo quando
-        # a cobertura esta desligada no pipeline.
-        detection_worker = SheetDetectionWorker(detect_sheet, coverage=True).start()
-    png_writer = PngWriter()
-    # Capturas, telemetria e relatórios são privados: a pasta ganha
-    # um .gitignore "*" qualquer que seja o --save-dir.
-    save_path = ensure_private_dir(save_dir)
-    telemetry = telemetry_module.SessionTelemetry(save_path / "telemetry.jsonl").start()
-    format_metadata = {
-        "paper_format": config.PAPER_FORMAT,
-        "page_grid": [config.PAPER_W, config.PAPER_H],
-        "mm_per_px": config.mm_per_px(),
-    }
-    telemetry.update(**format_metadata)
-    telemetry.event("session_open", **format_metadata)
-    print(
-        f"Formato da sessao: {config.PAPER_FORMAT}, "
-        f"grade {config.PAPER_W}x{config.PAPER_H}, "
-        f"{config.mm_per_px():.6f} mm/px."
-    )
-    print(
-        "Telemetria de sessao ligada: 1 registro/s em "
-        f"{save_path / 'telemetry.jsonl'} (arquivo local e rotativo)."
-    )
-
-    # Relatorio de sessao: um JSON por corrida com cabecalho
-    # (modelos com sha, abertura da camera, porta da mao) e os
-    # agregados da sessao, para uma corrida que falha deixar dito
-    # o que rodou — a telemetria bruta sozinha nao diz.
-    def _model_header(path):
-        if path is None:
-            return None
-        try:
-            return {
-                "arquivo": str(path),
-                "sha256": manifest_module.sha256_of(path),
-            }
-        except OSError:
-            return {"arquivo": str(path), "sha256": None}
-
-    session_report = session_report_module.SessionReport(
-        save_path / "session-reports",
-        {
-            "inicio_epoch": time.time(),
-            **format_metadata,
-            "fonte": str(source),
-            "modo_marcadores": bool(markers_mode),
-            "modelo_folha": _model_header(
-                neural_model if neural_detector is not None else None
-            ),
-            "modelo_tinta": _model_header(
-                page_clean.model_path if page_clean is not None else None
-            ),
-            "tinta_modo": ("page-clean" if page_clean is not None else "marcadores"),
-            "mao_disponivel": clean_hand_presence is not None,
-            "camera_abertura": camera_module._LAST_OPEN_PROBE,
-        },
-    ).start()
-    print(
-        "Relatorio de sessao ligado: resumo desta corrida em "
-        f"{session_report.path} (atualizado a cada 15 s e no fim)."
-    )
-    if markers_mode:
-        print("Draw v0 rodando. Mostre a folha-modelo para a camera.")
-    else:
-        print("Draw v0 rodando. Mostre uma folha para a camera.")
-    print(
-        "Teclas: s = salvar canvas, f = capturar frame, "
-        "g = captura automatica (desligada), q/Esc = sair."
-    )
-
-    frames_path = save_path / "frames"
-    frames_saved = 0
-    auto_capture = False
-    loop_frames = 0
-    tel_window_start = time.monotonic()
-    tel_window_frames = 0
-    tel_loop_fps = 0.0
-    tel_detect_ms = None
-    tel_sheet_present = False
-
-    def save_raw_frame(img):
-        frames_path.mkdir(parents=True, exist_ok=True)
-        out = frames_path / f"frame_{int(time.time() * 1000)}.png"
-
-        def _saved(path):
-            nonlocal frames_saved
-            frames_saved += 1
-            print(f"Frame salvo em {path} (total: {frames_saved}).")
-
-        png_writer.save(out, img, _saved)
-
-    def handle_capture_key(key, img):
-        nonlocal auto_capture
-        if key == ord("f"):
-            save_raw_frame(img)
-        elif key == ord("g"):
-            auto_capture = not auto_capture
-            if auto_capture:
-                print(
-                    "Captura automatica ligada: um frame a cada "
-                    f"10 quadros vai para {frames_path}."
-                )
-            else:
-                print("Captura automatica desligada.")
-
-    format_suggester = paper_module.FormatSuggester()
-
-    def save_page_snapshot(prefix, mask):
-        save_path.mkdir(parents=True, exist_ok=True)
-        snapshot_path = save_path / f"{prefix}_{int(time.time())}.png"
-        png_writer.save(
-            snapshot_path,
-            ink_render.render_canvas(mask),
-            lambda path: print(f"Pagina anterior salva em {path}"),
-        )
-
-    def emit_acquisition(record):
-        telemetry.event("acquisition", **record)
-
-    pipeline = None
-    tracker = None
-    if not markers_mode:
-        pipeline = Pipeline(
-            detection_worker=detection_worker,
-            ink_worker=ink_worker,
-            hand_presence_worker=hand_presence_worker,
-            hand_masker=hand_masker,
-            format_suggester=format_suggester,
-            on_format_suggestion=lambda suggestion: _report_format_suggestion(
-                telemetry, suggestion
-            ),
-            on_acquisition=emit_acquisition,
-            save_page_snapshot=save_page_snapshot,
-        )
-        tracker = pipeline.tracker
-
-    last_seq = 0
-    last_view = None
-
+    frame_source = None
+    png_writer = None
+    telemetry = None
+    session_report = None
     try:
+        neural_detector = None
+        if neural_model is None and not markers_mode and _DEFAULT_SHEET_MODEL.exists():
+            neural_model = str(_DEFAULT_SHEET_MODEL)
+        if neural_model is not None and not markers_mode:
+            neural_detector = NeuralSheetDetector(
+                neural_model, verify=manifest_module.verify_model
+            )
+            neural_detector.load()
+            print(
+                f"Detector neural ativo: {neural_model}. "
+                "O classico cobre os frames em que o neural nao ve folha."
+            )
+        elif not markers_mode:
+            print(
+                "Aviso: sem detector neural de folha (modelo nao "
+                "encontrado); usando so o detector classico, que nao "
+                "enxerga a folha em varias mesas. Baixe os modelos "
+                "oficiais pela Release do repositorio."
+            )
+
+        page_clean = None
+        if not markers_mode:
+            page_clean = PageCleanInk(page_clean_model, verify=manifest_module.verify_model)
+            try:
+                page_clean.load()
+                print(
+                    f"Tinta pagina->limpa ativa: {page_clean.model_path} "
+                    f"(limiar {page_clean.threshold}). Canvas por uniao "
+                    "simples das mascaras."
+                )
+            except (RuntimeError, FileNotFoundError) as error:
+                raise RuntimeError(
+                    f"O modelo pagina->limpa nao carregou ({error}); sem "
+                    "ele nao ha tinta no caminho novo. Baixe os modelos "
+                    "oficiais pela Release do repositorio."
+                ) from error
+
+        ink_worker = None
+        hand_masker = None
+        if page_clean is not None:
+            hand_masker = (
+                HandMasker(hand_model, verify=manifest_module.verify_model)
+                if hand_model_available(hand_model)
+                else None
+            )
+            ink_worker = PageCleanWorker(page_clean, hand_masker).start()
+            print(
+                "Tinta em thread propria: o laco principal nao espera "
+                "o modelo (passadas com cadencia de ~250 ms)."
+            )
+
+        clean_hand_presence = None
+        hand_presence_worker = None
+        if page_clean is not None and not markers_mode:
+            clean_hand_presence = make_hand_presence(
+                hand_model, verify=manifest_module.verify_model
+            )
+            if clean_hand_presence is not None:
+                print(
+                    "Porta de ociosidade pela mao ativa no caminho "
+                    "pagina->limpa: sem mao, a tinta sonda ate a saida "
+                    "confirmada assentar, descansa sem passadas e a "
+                    "geometria da tinta congela."
+                )
+                # Amostragem fora do laco (T4): o laco submete e colhe.
+                hand_presence_worker = HandPresenceWorker(clean_hand_presence).start()
+
+        def detect_sheet(frame):
+            return _detect_sheet_combined_traced(frame, neural_detector)
+
+        capture = open_capture(parse_source(source))
+        frame_source = LatestFrameCapture(capture).start()
+        detection_worker = None
+        if not markers_mode:
+            # coverage=True na trabalhadora: os extras da deteccao
+            # (mascara de cobertura e de mao) sempre sao publicados — a
+            # mascara de mao alimenta a oclusao semantica mesmo quando
+            # a cobertura esta desligada no pipeline.
+            detection_worker = SheetDetectionWorker(detect_sheet, coverage=True).start()
+        png_writer = PngWriter()
+        # Capturas, telemetria e relatórios são privados: a pasta ganha
+        # um .gitignore "*" qualquer que seja o --save-dir.
+        save_path = ensure_private_dir(save_dir)
+        telemetry = telemetry_module.SessionTelemetry(save_path / "telemetry.jsonl").start()
+        format_metadata = {
+            "paper_format": config.PAPER_FORMAT,
+            "page_grid": [config.PAPER_W, config.PAPER_H],
+            "mm_per_px": config.mm_per_px(),
+        }
+        telemetry.update(**format_metadata)
+        telemetry.event("session_open", **format_metadata)
+        print(
+            f"Formato da sessao: {config.PAPER_FORMAT}, "
+            f"grade {config.PAPER_W}x{config.PAPER_H}, "
+            f"{config.mm_per_px():.6f} mm/px."
+        )
+        print(
+            "Telemetria de sessao ligada: 1 registro/s em "
+            f"{save_path / 'telemetry.jsonl'} (arquivo local e rotativo)."
+        )
+
+        # Relatorio de sessao: um JSON por corrida com cabecalho
+        # (modelos com sha, abertura da camera, porta da mao) e os
+        # agregados da sessao, para uma corrida que falha deixar dito
+        # o que rodou — a telemetria bruta sozinha nao diz.
+        def _model_header(path):
+            if path is None:
+                return None
+            try:
+                return {
+                    "arquivo": str(path),
+                    "sha256": manifest_module.sha256_of(path),
+                }
+            except OSError:
+                return {"arquivo": str(path), "sha256": None}
+
+        session_report = session_report_module.SessionReport(
+            save_path / "session-reports",
+            {
+                "inicio_epoch": time.time(),
+                **format_metadata,
+                "fonte": str(source),
+                "modo_marcadores": bool(markers_mode),
+                "modelo_folha": _model_header(
+                    neural_model if neural_detector is not None else None
+                ),
+                "modelo_tinta": _model_header(
+                    page_clean.model_path if page_clean is not None else None
+                ),
+                "tinta_modo": ("page-clean" if page_clean is not None else "marcadores"),
+                "mao_disponivel": clean_hand_presence is not None,
+                "camera_abertura": camera_module._LAST_OPEN_PROBE,
+            },
+        ).start()
+        print(
+            "Relatorio de sessao ligado: resumo desta corrida em "
+            f"{session_report.path} (atualizado a cada 15 s e no fim)."
+        )
+        if markers_mode:
+            print("Draw v0 rodando. Mostre a folha-modelo para a camera.")
+        else:
+            print("Draw v0 rodando. Mostre uma folha para a camera.")
+        print(
+            "Teclas: s = salvar canvas, f = capturar frame, "
+            "g = captura automatica (desligada), q/Esc = sair."
+        )
+
+        frames_path = save_path / "frames"
+        frames_saved = 0
+        auto_capture = False
+        loop_frames = 0
+        tel_window_start = time.monotonic()
+        tel_window_frames = 0
+        tel_loop_fps = 0.0
+        tel_detect_ms = None
+        tel_sheet_present = False
+
+        def save_raw_frame(img):
+            frames_path.mkdir(parents=True, exist_ok=True)
+            out = frames_path / f"frame_{int(time.time() * 1000)}.png"
+
+            def _saved(path):
+                nonlocal frames_saved
+                frames_saved += 1
+                print(f"Frame salvo em {path} (total: {frames_saved}).")
+
+            png_writer.save(out, img, _saved)
+
+        def handle_capture_key(key, img):
+            nonlocal auto_capture
+            if key == ord("f"):
+                save_raw_frame(img)
+            elif key == ord("g"):
+                auto_capture = not auto_capture
+                if auto_capture:
+                    print(
+                        "Captura automatica ligada: um frame a cada "
+                        f"10 quadros vai para {frames_path}."
+                    )
+                else:
+                    print("Captura automatica desligada.")
+
+        format_suggester = paper_module.FormatSuggester()
+
+        def save_canvas_snapshot(fallback_panel=None):
+            """Salva a camada confirmada (nunca a provisoria).
+
+            Com folha em cena, `fallback_panel` e a folha retificada
+            quando ainda nao ha tinta confirmada. Sem folha, salva
+            so o canvas confirmado retido (canvas_persist) — a folha
+            em branco e a provisoria nunca viram arquivo.
+            """
+            if pipeline is not None and pipeline.clean_mask is not None:
+                # O snapshot e um consumidor de canvas: ele salva a
+                # camada confirmada, nunca o painel com a tinta
+                # provisoria.
+                save_image = ink_render.render_canvas(pipeline.clean_mask)
+            elif fallback_panel is not None:
+                save_image = fallback_panel
+            else:
+                print("Nada a salvar: sem canvas confirmado.")
+                return
+            save_path.mkdir(parents=True, exist_ok=True)
+            out = save_path / f"canvas_{_save_stamp()}.png"
+            png_writer.save(
+                out, save_image, lambda path: print(f"Canvas salvo em {path}")
+            )
+
+        def save_page_snapshot(prefix, mask):
+            save_path.mkdir(parents=True, exist_ok=True)
+            snapshot_path = save_path / f"{prefix}_{_save_stamp()}.png"
+            png_writer.save(
+                snapshot_path,
+                ink_render.render_canvas(mask),
+                lambda path: print(f"Pagina anterior salva em {path}"),
+            )
+
+        def emit_acquisition(record):
+            telemetry.event("acquisition", **record)
+
+        pipeline = None
+        tracker = None
+        if not markers_mode:
+            pipeline = Pipeline(
+                detection_worker=detection_worker,
+                ink_worker=ink_worker,
+                hand_presence_worker=hand_presence_worker,
+                hand_masker=hand_masker,
+                format_suggester=format_suggester,
+                on_format_suggestion=lambda suggestion: _report_format_suggestion(
+                    telemetry, suggestion
+                ),
+                on_acquisition=emit_acquisition,
+                save_page_snapshot=save_page_snapshot,
+            )
+            tracker = pipeline.tracker
+
+        last_seq = 0
+        last_view = None
+
         while True:
             packet = frame_source.wait_next(last_seq)
             if packet is None:
@@ -743,6 +846,14 @@ def run(
                 )
                 last_view = view_module.compose_view(status, panel)
                 cv2.imshow("Draw", last_view)
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord("s"):
+                    # Sem folha, so o canvas confirmado retido salva.
+                    save_canvas_snapshot()
+                handle_capture_key(key, frame)
+                if key in (ord("q"), 27):
+                    break
+                continue
             else:
                 if not markers_mode:
                     if tracker.verdict == "blank_maybe":
@@ -778,29 +889,11 @@ def run(
 
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("s"):
-                    save_path.mkdir(parents=True, exist_ok=True)
-                    out = save_path / f"canvas_{int(time.time())}.png"
-                    if pipeline is not None and pipeline.clean_mask is not None:
-                        # O snapshot e um consumidor de canvas: ele
-                        # salva a camada confirmada, nunca o painel
-                        # com a tinta provisoria.
-                        save_image = ink_render.render_canvas(pipeline.clean_mask)
-                    else:
-                        save_image = canvas
-                    png_writer.save(
-                        out,
-                        save_image,
-                        lambda path: print(f"Canvas salvo em {path}"),
-                    )
+                    save_canvas_snapshot(canvas)
                 handle_capture_key(key, frame)
                 if key in (ord("q"), 27):
                     break
                 continue
-
-            key = cv2.waitKey(1) & 0xFF
-            handle_capture_key(key, frame)
-            if key in (ord("q"), 27):
-                break
 
     finally:
         # Epilogo sempre roda: captura liberada, trabalhadora de
@@ -808,23 +901,27 @@ def run(
         # mesmo quando o laco morre por excecao. Sem o finally, um
         # erro no meio do laco vazava a camera aberta e a thread
         # daemon ficava lendo o dispositivo ate o processo sair.
-        frame_source.stop()
+        # Os `is not None` cobrem falha de setup antes de cada
+        # recurso subir: o try abrange do primeiro load ao ultimo loop.
+        if frame_source is not None:
+            frame_source.stop()
         if detection_worker is not None:
             detection_worker.stop()
             # Aquisicoes que nenhum quadro do rastreador consumiu
             # (latest-wins ou fim de sessao) tambem viram evento.
-            for trace in detection_worker.take_traces():
-                telemetry.event(
-                    "acquisition",
-                    **{
-                        **trace,
-                        "frame_index": None,
-                        "consumed_by_tracker": False,
-                        "tracker_before": None,
-                        "tracker_after": None,
-                        "tracker_event": None,
-                    },
-                )
+            if telemetry is not None:
+                for trace in detection_worker.take_traces():
+                    telemetry.event(
+                        "acquisition",
+                        **{
+                            **trace,
+                            "frame_index": None,
+                            "consumed_by_tracker": False,
+                            "tracker_before": None,
+                            "tracker_after": None,
+                            "tracker_event": None,
+                        },
+                    )
         if hand_presence_worker is not None:
             hand_presence_worker.stop()
         if ink_worker is not None:
@@ -833,10 +930,17 @@ def run(
             # O masker da trabalhadora fecha aqui, depois do join:
             # determinístico, nunca pelo __del__ do MediaPipe.
             hand_masker.close()
-        telemetry.close()
-        session_report.close()
-        png_writer.close()
-        cv2.destroyAllWindows()
+        if telemetry is not None:
+            telemetry.close()
+        if session_report is not None:
+            session_report.close()
+        if png_writer is not None:
+            png_writer.close()
+        try:
+            cv2.destroyAllWindows()
+        except cv2.error:
+            # Build headless ou GUI indisponivel: nao ha o que destruir.
+            pass
 
 
 def main():
