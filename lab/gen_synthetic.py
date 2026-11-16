@@ -293,13 +293,19 @@ def load_hands(hands_dir: str | Path | None) -> list[HandSource]:
         if path.parent.name == "mask":
             continue  # arquivo dentro de mask/ é máscara, não candidato a RGB
         mask_path = None
+        # O layout <nome>_rgb.png + <nome>_mask.png guarda a mascara
+        # SEM o sufixo _rgb: buscar "<stem>_mask" com o stem inteiro
+        # nunca achava alice_mask.png para alice_rgb.png.
+        mask_stem = stem[: -len("_rgb")] if stem.endswith("_rgb") else stem
         for cand in (
-            path.with_name(f"{stem}_mask.png"),
-            path.with_name(f"{stem}_mask.jpg"),
+            path.with_name(f"{mask_stem}_mask.png"),
+            path.with_name(f"{mask_stem}_mask.jpg"),
             root / "mask" / path.name,
             root / "mask" / f"{stem}.png",
             root / "mask" / f"{stem}.jpg",
-            path.with_name(f"{stem}_seg.png"),
+            root / "mask" / f"{mask_stem}.png",
+            root / "mask" / f"{mask_stem}.jpg",
+            path.with_name(f"{mask_stem}_seg.png"),
         ):
             if cand.is_file():
                 mask_path = cand

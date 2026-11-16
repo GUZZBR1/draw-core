@@ -217,6 +217,21 @@ def test_load_hands_missing_dir_fails_loudly(tmp_path):
         gs.load_hands(tmp_path / "hands")
 
 
+def test_load_hands_rgb_suffix_finds_the_mask(tmp_path):
+    """Layout alice_rgb.png + alice_mask.png: o sufixo _rgb sai do
+    stem para montar os candidatos de mascara."""
+    cv2.imwrite(
+        str(tmp_path / "alice_rgb.png"), np.full((4, 4, 3), 60, dtype=np.uint8)
+    )
+    cv2.imwrite(
+        str(tmp_path / "alice_mask.png"),
+        np.full((4, 4), 255, dtype=np.uint8),
+    )
+    hand = gs.load_hands(tmp_path)[0]
+    assert hand.source_id == "alice_rgb"
+    assert hand.mask[0, 0] == 255
+
+
 def test_load_hands_uses_documented_jpeg_threshold(tmp_path):
     (tmp_path / "rgb").mkdir()
     (tmp_path / "mask").mkdir()
