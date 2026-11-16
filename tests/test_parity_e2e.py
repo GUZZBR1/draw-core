@@ -108,8 +108,15 @@ def test_run_legacy_limpa_env_draw(monkeypatch, tmp_path):
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr(parity_e2e.subprocess, "run", fake_run)
-    parity_e2e.run_legacy(tmp_path, tmp_path, tmp_path, frames=1, fps=1.0,
-                          sheet_model="s.onnx", ink_model="i.onnx")
+    parity_e2e.run_legacy(
+        tmp_path,
+        tmp_path,
+        tmp_path,
+        frames=1,
+        fps=1.0,
+        sheet_model="s.onnx",
+        ink_model="i.onnx",
+    )
     assert "DRAW_INK_REMOVAL" not in seen["env"]
     assert "DRAW_MODEL_STRICT" not in seen["env"]
     assert seen["env"]["PYTHONPATH"] == str(tmp_path)
