@@ -96,7 +96,7 @@ def _page_clean_threads(explicit=None):
     return _default_threads()
 
 
-def _load_session(model_path, threads=None, verify=None):
+def _load_session(model_path, threads=None, *, verify):
     try:
         import onnxruntime as ort
     except ImportError as error:
@@ -109,9 +109,9 @@ def _load_session(model_path, threads=None, verify=None):
         raise FileNotFoundError(
             f"modelo ONNX nao encontrado: {path}. Passe o caminho do arquivo .onnx."
         )
-    # Integridade opcional: o pipeline injeta
-    # draw.infra.manifest.verify_model como `verify`; sem verificador,
-    # nada muda.
+    # Integridade obrigatoria como argumento: o pipeline injeta
+    # draw.infra.manifest.verify_model como `verify`; verify=None é o
+    # opt-out explicito do chamador, nada muda.
     if verify is not None:
         verify(path)
     options = ort.SessionOptions()
@@ -209,12 +209,14 @@ class PageCleanInk:
         threshold=DEFAULT_THRESHOLD,
         threads=None,
         batch_size=None,
-        verify=None,
+        *,
+        verify,
     ):
         """model_path explícito ou DEFAULT_MODEL_PATH; verify é um
-        callable Callable[[Path | str], None] | None chamado sobre o
-        arquivo antes de abrir a sessão (o pipeline injeta
-        draw.infra.manifest.verify_model)."""
+        callable Callable[[Path | str], None] | None obrigatório,
+        chamado sobre o arquivo antes de abrir a sessão (o pipeline
+        injeta draw.infra.manifest.verify_model; verify=None é o
+        opt-out explícito)."""
         self.model_path = str(model_path or DEFAULT_MODEL_PATH)
         self.threshold = float(threshold)
         self.threads = _page_clean_threads(threads)

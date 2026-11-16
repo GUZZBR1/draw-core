@@ -33,7 +33,7 @@ def _page(seed=3):
 
 def test_batched_mosaic_matches_one_tile_per_call(tmp_path):
     path = onnx_fixtures.page_clean_model(tmp_path / "pc.onnx", patch=256)
-    shared = dict(model_path=path, threshold=0.5)
+    shared = dict(model_path=path, threshold=0.5, verify=None)
 
     batched = page_clean.PageCleanInk(**shared)
     per_tile = page_clean.PageCleanInk(batch_size=1, **shared)
@@ -53,7 +53,7 @@ def test_fixed_batch_file_uses_the_per_tile_path(tmp_path):
     path = onnx_fixtures.page_clean_model(
         tmp_path / "pc_fixed.onnx", patch=256, dynamic_batch=False
     )
-    ink = page_clean.PageCleanInk(path, threshold=0.5)
+    ink = page_clean.PageCleanInk(path, threshold=0.5, verify=None)
     ink.load()
 
     mask = ink.ink_mask(_page())
@@ -66,7 +66,7 @@ def test_output_resolution_must_match_the_patch(tmp_path):
     path = onnx_fixtures.page_clean_model(
         tmp_path / "pc_bad.onnx", patch=256, output_scale=2
     )
-    ink = page_clean.PageCleanInk(path)
+    ink = page_clean.PageCleanInk(path, verify=None)
 
     with pytest.raises(RuntimeError, match="256x256"):
         ink.load()
@@ -90,7 +90,7 @@ def test_default_threads_never_exceed_the_host(monkeypatch):
     monkeypatch.delenv("DRAW_ORT_THREADS", raising=False)
     monkeypatch.setattr(page_clean.os, "cpu_count", lambda: 4)
     assert page_clean._page_clean_threads() == 4
-    assert page_clean.PageCleanInk("inexistente.onnx").threads == 4
+    assert page_clean.PageCleanInk("inexistente.onnx", verify=None).threads == 4
     monkeypatch.setattr(page_clean.os, "cpu_count", lambda: 16)
     assert page_clean._page_clean_threads() == page_clean.DEFAULT_THREADS
     monkeypatch.setattr(page_clean.os, "cpu_count", lambda: None)
@@ -102,15 +102,15 @@ def test_default_threads_never_exceed_the_host(monkeypatch):
 
 
 def test_batch_size_comes_from_the_constructor():
-    ink = page_clean.PageCleanInk("inexistente.onnx", batch_size=1)
+    ink = page_clean.PageCleanInk("inexistente.onnx", batch_size=1, verify=None)
     assert ink.batch_size == 1
-    assert page_clean.PageCleanInk("inexistente.onnx").batch_size is None
+    assert page_clean.PageCleanInk("inexistente.onnx", verify=None).batch_size is None
 
 
 def test_mosaic_covers_the_page_edges_without_seams(tmp_path):
     """Blocos de borda incompletos: a máscara cobre a página inteira."""
     path = onnx_fixtures.page_clean_model(tmp_path / "pc.onnx", patch=256)
-    ink = page_clean.PageCleanInk(path, threshold=0.5)
+    ink = page_clean.PageCleanInk(path, threshold=0.5, verify=None)
     ink.load()
 
     # página com altura e largura que não são múltiplas de 256
@@ -119,3 +119,9 @@ def test_mosaic_covers_the_page_edges_without_seams(tmp_path):
 
     assert mask.shape == (300, 220)
     assert np.all(mask == 255)
+
+
+def test_verify_is_a_required_keyword_argument():
+    """verify sai do default: esquecer de passá-lo falha na assinatura."""
+    with pytest.raises(TypeError):
+        page_clean.PageCleanInk("inexistente.onnx")
