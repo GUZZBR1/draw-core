@@ -263,3 +263,14 @@ def test_cldice_empty_prediction_against_point_scores_zero():
     gt = np.ones((2, 2), dtype=bool)
     r = seg_metrics.cldice_binary(pred, gt)
     assert r["cldice"] == 0.0
+
+
+def test_dilate_disk_and_tolerance_on_tiny_mask():
+    """Mascara menor que a tolerancia (2x2, raio 3): deslocamentos
+    maiores que a dimensao produziam fatias incompativeis e
+    quebravam a dilatacao."""
+    m = np.ones((2, 2), dtype=bool)
+    assert seg_metrics._dilate_disk(m, 3).all()
+    full_ink = np.full((2, 2), seg_metrics.INK)
+    r = seg_metrics.ink_tolerance_metrics(full_ink, full_ink, 3)
+    assert r["f1"] == 1.0

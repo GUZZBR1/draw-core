@@ -297,8 +297,13 @@ def _dilate_disk(mask, radius):
         return mask.copy()
     dilated = np.zeros_like(mask)
     for dy in range(-radius, radius + 1):
+        if abs(dy) >= mask.shape[0]:
+            # Deslocamento maior que a dimensão: a fatia fica
+            # vazia de um lado e não do outro (máscara menor que
+            # a tolerância, ex.: 2x2 com raio 3).
+            continue
         for dx in range(-radius, radius + 1):
-            if dx * dx + dy * dy > radius * radius:
+            if abs(dx) >= mask.shape[1] or dx * dx + dy * dy > radius * radius:
                 continue
             shifted = np.zeros_like(mask)
             y_src = slice(max(0, -dy), mask.shape[0] - max(0, dy))
