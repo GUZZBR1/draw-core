@@ -209,6 +209,19 @@ def test_load_hands_rgb_suffix_finds_the_mask(tmp_path):
     assert hand.mask[0, 0] == 255
 
 
+def test_load_hands_full_stem_mask_also_matches(tmp_path):
+    """Layout alice_rgb.png + alice_rgb_mask.png: a máscara pode
+    carregar o stem completo, sufixo _rgb incluso."""
+    cv2.imwrite(str(tmp_path / "alice_rgb.png"), np.full((4, 4, 3), 60, dtype=np.uint8))
+    cv2.imwrite(
+        str(tmp_path / "alice_rgb_mask.png"),
+        np.full((4, 4), 255, dtype=np.uint8),
+    )
+    hand = gs.load_hands(tmp_path)[0]
+    assert hand.source_id == "alice_rgb"
+    assert hand.mask[0, 0] == 255
+
+
 def test_load_hands_uses_documented_jpeg_threshold(tmp_path):
     (tmp_path / "rgb").mkdir()
     (tmp_path / "mask").mkdir()
