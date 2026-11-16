@@ -131,7 +131,7 @@ def _frame_to_tensor(frame, size):
     return tensor[None].astype(np.float32)
 
 
-def _load_session(model_path, verify=None):
+def _load_session(model_path, *, verify):
     try:
         import onnxruntime as ort
     except ImportError as error:
@@ -144,9 +144,9 @@ def _load_session(model_path, verify=None):
         raise FileNotFoundError(
             f"modelo ONNX nao encontrado: {path}. Passe o caminho do arquivo .onnx."
         )
-    # Integridade opcional: o pipeline injeta
-    # draw.infra.manifest.verify_model como `verify`; sem verificador,
-    # nada muda.
+    # Integridade obrigatoria como argumento: o pipeline injeta
+    # draw.infra.manifest.verify_model como `verify`; verify=None é o
+    # opt-out explicito do chamador, nada muda.
     if verify is not None:
         verify(path)
     options = ort.SessionOptions()
@@ -292,12 +292,13 @@ class NeuralSheetDetector:
     para decidir se a reserva clássica pode falar.
     """
 
-    def __init__(self, model_path, *, timing=False, verify=None):
+    def __init__(self, model_path, *, verify, timing=False):
         """model_path é obrigatório; verify é um callable
-        Callable[[Path | str], None] | None chamado sobre o arquivo
-        antes de abrir a sessão (o pipeline injeta
-        draw.infra.manifest.verify_model). timing=True liga o
-        cronômetro de fases (get_timing_stats)."""
+        Callable[[Path | str], None] | None obrigatório chamado sobre
+        o arquivo antes de abrir a sessão (o pipeline injeta
+        draw.infra.manifest.verify_model; verify=None é o opt-out
+        explícito). timing=True liga o cronômetro de fases
+        (get_timing_stats)."""
         self.model_path = str(model_path)
         self._timing_enabled = bool(timing)
         self._verify = verify

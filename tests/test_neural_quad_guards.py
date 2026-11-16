@@ -52,7 +52,7 @@ def test_predict_matches_legacy_softmax_and_normalization():
     size = 384
     logits = rng.standard_normal((1, 2, size, size)).astype(np.float32)
 
-    det = perception.NeuralSheetDetector("dummy.onnx")
+    det = perception.NeuralSheetDetector("dummy.onnx", verify=None)
     sess = _DummySession(logits, presence=9.25)
     det._session = sess
 
@@ -107,7 +107,7 @@ def test_curved_arm_with_high_coverage_does_not_poison_memory():
     )
     clean_mask = _poly_mask(shape, true_quad)
 
-    det = perception.NeuralSheetDetector("dummy.onnx")
+    det = perception.NeuralSheetDetector("dummy.onnx", verify=None)
     c0 = det._fit(clean_mask, None)
     assert _max_corner_err(c0, true_quad) <= 2.5
     saved_bottom_dir = det._edge_lines[2][0].copy()
@@ -138,7 +138,7 @@ def test_rigid_guard_vetoes_single_edge_sleeve_but_allows_real_sheet_rotation():
         dtype=np.float32,
     )
     clean_mask = _poly_mask(shape, true_quad)
-    det = perception.NeuralSheetDetector("dummy.onnx")
+    det = perception.NeuralSheetDetector("dummy.onnx", verify=None)
     assert _max_corner_err(det._fit(clean_mask, None), true_quad) <= 2.0
 
     # Caso 1: 3 arestas imóveis, mas uma manga reta entra a ~13 graus na

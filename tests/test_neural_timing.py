@@ -19,7 +19,7 @@ def _outputs(contract):
 
 @pytest.mark.parametrize("contract", ["legacy", "hybrid", "semantic"])
 def test_timing_accumulates_each_phase_without_changing_outputs(monkeypatch, contract):
-    detector = perception.NeuralSheetDetector("unused.onnx", timing=True)
+    detector = perception.NeuralSheetDetector("unused.onnx", timing=True, verify=None)
     detector._session = _Session(_outputs(contract))
     frame = np.zeros((16, 24, 3), np.uint8)
     ticks = iter((0.0, 0.001, 0.011, 0.013, 1.0, 1.003, 1.023, 1.027))
@@ -82,7 +82,7 @@ def test_timing_accumulates_each_phase_without_changing_outputs(monkeypatch, con
     assert first_mask.dtype == np.uint8
     assert detector.last_presence_logit == first_presence == second_presence
 
-    untimed = perception.NeuralSheetDetector("unused.onnx")
+    untimed = perception.NeuralSheetDetector("unused.onnx", verify=None)
     untimed._session = _Session(_outputs(contract))
     presence, mask = untimed.predict(frame)
     assert presence == first_presence
@@ -90,7 +90,7 @@ def test_timing_accumulates_each_phase_without_changing_outputs(monkeypatch, con
 
 
 def test_disabled_timing_never_reads_clock_or_logs(monkeypatch, capsys):
-    detector = perception.NeuralSheetDetector("unused.onnx", timing=False)
+    detector = perception.NeuralSheetDetector("unused.onnx", timing=False, verify=None)
     detector._session = _Session(_outputs("semantic"))
 
     def no_clock():
@@ -107,7 +107,7 @@ def test_disabled_timing_never_reads_clock_or_logs(monkeypatch, capsys):
 
 
 def test_timing_prints_only_at_periodic_boundary(monkeypatch, capsys):
-    detector = perception.NeuralSheetDetector("unused.onnx", timing=True)
+    detector = perception.NeuralSheetDetector("unused.onnx", timing=True, verify=None)
     detector._session = _Session(_outputs("semantic"))
     ticks = iter(range(perception._TIMING_LOG_EVERY * 4))
     monkeypatch.setattr(perception.time, "perf_counter", lambda: next(ticks))
@@ -124,7 +124,7 @@ def test_timing_prints_only_at_periodic_boundary(monkeypatch, capsys):
 
 
 def test_failed_prediction_and_empty_frame_do_not_count(monkeypatch):
-    detector = perception.NeuralSheetDetector("unused.onnx", timing=True)
+    detector = perception.NeuralSheetDetector("unused.onnx", timing=True, verify=None)
     detector._session = _Session({"logits": np.zeros((1, 3, 8, 8), np.float32)})
     with pytest.raises(ValueError, match="precisa ter forma"):
         detector.predict(np.zeros((16, 16, 3), np.uint8))

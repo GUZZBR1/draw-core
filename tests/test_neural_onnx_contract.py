@@ -66,7 +66,7 @@ def test_four_class_logits_use_paper_and_ink_but_exclude_hand():
     classes[2:4, 2:4] = 2
     classes[4:6, 4:6] = 3
     session = _Session({"logits": _logits_for_classes(classes)})
-    detector = NeuralSheetDetector("unused.onnx")
+    detector = NeuralSheetDetector("unused.onnx", verify=None)
     detector._session = session
 
     presence, mask = detector.predict(np.zeros((32, 48, 3), dtype=np.uint8))
@@ -82,7 +82,7 @@ def test_four_class_logits_without_page_are_a_strong_negative():
     classes = np.zeros((8, 8), dtype=np.uint8)
     classes[1:3, 1:3] = 2
     session = _Session({"logits": _logits_for_classes(classes)})
-    detector = NeuralSheetDetector("unused.onnx")
+    detector = NeuralSheetDetector("unused.onnx", verify=None)
     detector._session = session
 
     presence, mask = detector.predict(np.zeros((16, 16, 3), dtype=np.uint8))
@@ -101,7 +101,7 @@ def test_legacy_mask_and_presence_outputs_keep_their_contract():
             "presence_logit": np.array([2.5], dtype=np.float32),
         }
     )
-    detector = NeuralSheetDetector("unused.onnx")
+    detector = NeuralSheetDetector("unused.onnx", verify=None)
     detector._session = session
 
     presence, mask = detector.predict(np.zeros((16, 16, 3), dtype=np.uint8))
@@ -117,7 +117,7 @@ def test_four_class_logits_expose_hand_mask():
     classes[1:7, 1:7] = 1
     classes[2:4, 2:4] = 2
     session = _Session({"logits": _logits_for_classes(classes)})
-    detector = NeuralSheetDetector("unused.onnx")
+    detector = NeuralSheetDetector("unused.onnx", verify=None)
     detector._session = session
 
     detector.predict(np.zeros((16, 16, 3), dtype=np.uint8))
@@ -139,7 +139,7 @@ def test_two_channel_contract_has_no_hand_mask():
             "presence_logit": np.array([2.5], dtype=np.float32),
         }
     )
-    detector = NeuralSheetDetector("unused.onnx")
+    detector = NeuralSheetDetector("unused.onnx", verify=None)
     detector._session = session
 
     detector.predict(np.zeros((16, 16, 3), dtype=np.uint8))
@@ -154,7 +154,7 @@ def test_input_name_comes_from_the_file_not_from_a_literal():
         {"mask_logits": logits, "presence_logit": np.array([1.0], np.float32)},
         input_name="input",
     )
-    detector = NeuralSheetDetector("unused.onnx")
+    detector = NeuralSheetDetector("unused.onnx", verify=None)
     detector._session = session
 
     detector.predict(np.zeros((16, 16, 3), dtype=np.uint8))
@@ -166,7 +166,7 @@ def test_rectangular_input_is_refused_instead_of_squeezed():
         {"logits": _logits_for_classes(np.zeros((8, 8), np.uint8))},
         input_shape=[1, 3, 384, 640],
     )
-    detector = NeuralSheetDetector("unused.onnx")
+    detector = NeuralSheetDetector("unused.onnx", verify=None)
     detector._session = session
 
     with pytest.raises(RuntimeError, match="retangular"):
@@ -178,7 +178,7 @@ def test_dynamic_input_falls_back_to_the_measured_resolution():
         {"logits": _logits_for_classes(np.zeros((8, 8), np.uint8))},
         input_shape=["N", 3, "H", "W"],
     )
-    detector = NeuralSheetDetector("unused.onnx")
+    detector = NeuralSheetDetector("unused.onnx", verify=None)
     detector._session = session
 
     assert detector.contract().size == (384, 384)
@@ -195,7 +195,7 @@ def test_four_channel_mask_logits_with_presence_use_paper_and_ink():
             "presence_logit": np.array([6.0], np.float32),
         }
     )
-    detector = NeuralSheetDetector("unused.onnx")
+    detector = NeuralSheetDetector("unused.onnx", verify=None)
     detector._session = session
 
     presence, mask = detector.predict(np.zeros((16, 16, 3), dtype=np.uint8))
@@ -214,7 +214,7 @@ def test_mask_logits_with_three_channels_is_a_named_error():
             "presence_logit": np.array([1.0], np.float32),
         }
     )
-    detector = NeuralSheetDetector("unused.onnx")
+    detector = NeuralSheetDetector("unused.onnx", verify=None)
     detector._session = session
 
     with pytest.raises(ValueError, match="2 canais"):
@@ -226,7 +226,7 @@ def test_extra_auxiliary_output_does_not_break_the_four_class_branch():
     classes[2:6, 2:6] = 1
     logits = _logits_for_classes(classes)
     session = _Session({"logits": logits, "aux": logits})
-    detector = NeuralSheetDetector("unused.onnx")
+    detector = NeuralSheetDetector("unused.onnx", verify=None)
     detector._session = session
 
     presence, mask = detector.predict(np.zeros((16, 16, 3), dtype=np.uint8))
@@ -237,7 +237,7 @@ def test_extra_auxiliary_output_does_not_break_the_four_class_branch():
 
 def test_incompatible_outputs_are_a_named_error():
     session = _Session({"mystery": np.zeros((1, 2, 8, 8), np.float32)})
-    detector = NeuralSheetDetector("unused.onnx")
+    detector = NeuralSheetDetector("unused.onnx", verify=None)
     detector._session = session
 
     with pytest.raises(ValueError, match="saídas ONNX incompatíveis"):
@@ -272,7 +272,7 @@ onnx_fixtures = pytest.importorskip("onnx_fixtures")
 
 
 def _detector_for(path):
-    detector = NeuralSheetDetector(path)
+    detector = NeuralSheetDetector(path, verify=None)
     detector.load()
     return detector
 
@@ -300,3 +300,11 @@ def test_real_onnx_four_class_with_auxiliary_output(tmp_path):
     presence, mask = detector.predict(np.full((64, 64, 3), 230, dtype=np.uint8))
     assert presence in (1.0, -10.0)
     assert mask.shape == (64, 64)
+
+
+def test_verify_is_a_required_keyword_argument():
+    """verify sai do default: esquecer de passá-lo falha na assinatura."""
+    import pytest
+
+    with pytest.raises(TypeError):
+        NeuralSheetDetector("unused.onnx")

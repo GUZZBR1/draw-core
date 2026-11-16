@@ -121,7 +121,7 @@ def _detector(mask, kind="semantic", presence=2.0, timing=False):
             "mask_logits": logits[:, :2] if kind == "legacy" else logits,
             "presence_logit": np.array([presence], np.float32),
         }
-    detector = perception.NeuralSheetDetector("unused.onnx", timing=timing)
+    detector = perception.NeuralSheetDetector("unused.onnx", timing=timing, verify=None)
     detector._session = _Session(outputs, input_shape=[1, 3, 384, 384])
     return detector
 
@@ -294,7 +294,7 @@ def test_real_onnx_keeps_four_class_output_and_native_resolution(tmp_path, size)
     import onnx_fixtures
 
     path = onnx_fixtures.four_class_model(tmp_path / "sheet.onnx", size=size)
-    detector = perception.NeuralSheetDetector(path)
+    detector = perception.NeuralSheetDetector(path, verify=None)
     detector.load()
     assert detector.contract().size == (size, size)
     assert detector._get_session().get_outputs()[0].shape == [1, 4, size, size]
