@@ -13,3 +13,12 @@ its source record.
 | `ethernet-1976.gif` | Robert Metcalfe, Ethernet diagram, 1976 | [IEEE 802.3](https://grouper.ieee.org/groups/802/3/ethernet_diag.html), drawn by Robert Metcalfe and photographed by Dave R. Boggs. The IEEE source does not state a reuse license. |
 | `www-proposal.gif` | Tim Berners-Lee, first Web proposal, 1989 | [CERN / info.cern.ch](https://info.cern.ch/Proposal.html). Copyright and reuse terms are held by CERN; credit CERN. |
 | `iphone-patent.jpg` | Apple, original iPhone design patent, filed 2007 | [Google Patents / USPTO](https://patents.google.com/patent/USD558756S1/en), patent drawing published 2008. |
+
+## Rights status
+
+Pending a decision before this repository is made public:
+
+- `ethernet-1976.gif` — the IEEE source page records no reuse license.
+- `www-proposal.gif` — remains under CERN's copyright and reuse terms; credit CERN.
+- `sailor-moon-eyes-open.png` / `sailor-moon-eyes-closed.png` (`../vision/`) — portrait
+  derivatives with unconfirmed rights.
