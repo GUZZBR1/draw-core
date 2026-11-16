@@ -20,6 +20,7 @@ import pytest
 
 from draw import hand as hand_module
 from draw import hand_presence
+from draw.contracts import HandSample
 
 
 def _landmarks_result():
@@ -84,7 +85,7 @@ def test_presence_signature_uses_video_with_monotonic_ts(monkeypatch, tmp_path):
     masker = _masker(tmp_path)
     frame = np.zeros((80, 100, 3), dtype=np.uint8)
     signature = masker.presence_signature(frame, timestamp_ms=1000)
-    assert signature is not None and signature[0] > 0
+    assert signature is not None and signature.area > 0
     masker.presence_signature(frame, timestamp_ms=900)
     masker.presence_signature(frame)
     video_ts = [entry[1] for entry in log if entry[0] == "video"]
@@ -99,7 +100,7 @@ def test_presence_signature_video_failure_falls_back_to_image(monkeypatch, tmp_p
     masker = _masker(tmp_path)
     frame = np.zeros((80, 100, 3), dtype=np.uint8)
     signature = masker.presence_signature(frame, timestamp_ms=1000)
-    assert signature is not None and signature[0] > 0
+    assert signature is not None and signature.area > 0
     assert ("image", "image") in log
     assert not any(entry[0] == "video" for entry in log)
 
@@ -110,7 +111,7 @@ class _ScriptedPresence:
 
     def sample(self, frame, timestamp_ms=None):
         self.calls.append((frame.shape, timestamp_ms))
-        return True, len(self.calls) > 1
+        return HandSample(True, len(self.calls) > 1)
 
 
 @pytest.mark.slow
@@ -151,8 +152,8 @@ def test_adapter_forwards_timestamp():
     masker = _TimestampedMasker()
     adapter = hand_presence.MediaPipeHandPresence(masker)
     frame = np.zeros((10, 10, 3), dtype=np.uint8)
-    present, _moved = adapter.sample(frame, timestamp_ms=777)
-    assert present is True
+    sample = adapter.sample(frame, timestamp_ms=777)
+    assert sample.present is True
     assert masker.seen == [777]
 
 

@@ -15,6 +15,7 @@ import threading
 import numpy as np
 
 from . import hand as hand_module
+from .contracts import HandSample, HandSignature
 
 # Limiares de movimento da assinatura, calibrados nas mascaras
 # reais da sessao de desenho de 2026-10-29 (hand_cam_series03,
@@ -32,6 +33,18 @@ _HAND_MOVE_CENTROID_PX = 12.0
 _HAND_MOVE_AREA_FRACTION = 0.03
 
 
+def _as_hand_signature(signature):
+    """Normaliza a assinatura do masker para HandSignature.
+
+    Maskers antigos e os falsos dos testes devolvem a tupla
+    (area, centroide_x, centroide_y); o adaptador aceita os dois
+    formatos e entrega sempre o contrato.
+    """
+    if signature is None or isinstance(signature, HandSignature):
+        return signature
+    return HandSignature(*signature)
+
+
 class MediaPipeHandPresence:
     """Presenca de mao sobre o HandMasker: True, False ou None.
 
@@ -39,7 +52,8 @@ class MediaPipeHandPresence:
     quem decide a cadencia trata None como ativo: sem sinal, a
     economia nao liga e o app roda como antes.
 
-    sample() devolve (presenca, moveu): a assinatura da mascara
+    sample() devolve um contracts.HandSample (presenca, moveu): a
+    assinatura da mascara
     (area, centroide) comparada com a da amostra anterior. E o
     sinal de atividade que acorda o descanso com a mao presente;
     present() segue existindo sobre a mesma leitura.
@@ -66,8 +80,7 @@ class MediaPipeHandPresence:
         return False
 
     def present(self, frame):
-        present, _moved = self.sample(frame)
-        return present
+        return self.sample(frame).present
 
     def sample(self, frame, timestamp_ms=None):
         # Caminho preferido: a assinatura direto dos marcos
@@ -91,23 +104,24 @@ class MediaPipeHandPresence:
                 # Maskers antigos (e os falsos dos testes) so
                 # aceitam o frame: o carimbo e opcional por desenho.
                 signature = signature_fn(frame)
+            signature = _as_hand_signature(signature)
             if signature is None:
                 self._signature = None
-                return None, False
-            if signature[0] == 0:
+                return HandSample(None, False)
+            if signature.area == 0:
                 self._signature = None
-                return False, False
-            return self._update_signature(tuple(signature))
+                return HandSample(False, False)
+            return self._update_signature(signature)
         mask = self._masker.mask(frame)
         if mask is None:
             self._signature = None
-            return None, False
+            return HandSample(None, False)
         area = int(np.count_nonzero(mask))
         if area == 0:
             self._signature = None
-            return False, False
+            return HandSample(False, False)
         ys, xs = np.nonzero(mask)
-        signature = (area, float(xs.mean()), float(ys.mean()))
+        signature = HandSignature(float(area), float(xs.mean()), float(ys.mean()))
         return self._update_signature(signature)
 
     def _update_signature(self, signature):
@@ -117,19 +131,19 @@ class MediaPipeHandPresence:
             # A mao apareceu: a transicao de presenca ja acorda
             # por set_hand_presence, e marcar movimento aqui so
             # reseta o relogio de quietude da mao — conservador.
-            return True, True
+            return HandSample(True, True)
         centroid_step = float(
             np.hypot(
-                signature[1] - previous[1],
-                signature[2] - previous[2],
+                signature.centroid_x - previous.centroid_x,
+                signature.centroid_y - previous.centroid_y,
             )
         )
-        area_step = abs(signature[0] - previous[0]) / previous[0]
+        area_step = abs(signature.area - previous.area) / previous.area
         moved = (
             centroid_step > _HAND_MOVE_CENTROID_PX
             or area_step > _HAND_MOVE_AREA_FRACTION
         )
-        return True, moved
+        return HandSample(True, moved)
 
 
 def make_hand_presence(model_path, *, verify):
@@ -199,7 +213,7 @@ class HandPresenceWorker:
                 frame, timestamp_ms = self._pending
                 self._pending = None
             try:
-                present, moved = self._presence.sample(frame, timestamp_ms)
+                sample = self._presence.sample(frame, timestamp_ms)
             except Exception as error:  # noqa: BLE001 - vai para o laco
                 with self._condition:
                     self._error = error
@@ -210,7 +224,11 @@ class HandPresenceWorker:
                 if self._stopped:
                     return
                 self._result_seq += 1
-                self._result = (self._result_seq, present, moved)
+                self._result = (
+                    self._result_seq,
+                    sample.present,
+                    sample.moved,
+                )
                 self._condition.notify_all()
 
     @property

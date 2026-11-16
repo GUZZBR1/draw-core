@@ -35,6 +35,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from .contracts import HandSignature
+
 # O caminho convencional e resolvido a partir da RAIZ DO REPO, como
 # o do detector neural e o do pagina->limpa; era relativo ao CWD e
 # um app aberto de outro diretorio perdia a mascara de mao sem
@@ -383,10 +385,11 @@ class HandMasker:
     def presence_signature(self, frame, timestamp_ms=None):
         """Assinatura de presenca sem construir mascara nenhuma.
 
-        Devolve None (indisponivel), (0.0, 0.0, 0.0) (sem mao) ou
-        (area, centroide_x, centroide_y) em px do frame: a area e a
-        do casco convexo dos 21 marcos e o centroide e a media dos
-        marcos. E tudo o que o adaptador de presenca consome (ver
+        Devolve None (indisponivel), HandSignature(0.0, 0.0, 0.0)
+        (sem mao) ou o HandSignature(area, centroide_x,
+        centroide_y) em px do frame: a area e a do casco convexo
+        dos 21 marcos e o centroide e a media dos marcos. E tudo o
+        que o adaptador de presenca consome (ver
         hand_presence.MediaPipeHandPresence) — o caminho antigo
         pagava cvtColor + fillPoly + dilatacao eliptica de 31x31
         sobre o frame 720p inteiro so para contar pixels dessa
@@ -406,7 +409,7 @@ class HandMasker:
         if hands is None:
             return None
         if not hands:
-            return (0.0, 0.0, 0.0)
+            return HandSignature(0.0, 0.0, 0.0)
         area = 0.0
         centroids = []
         for points in hands:
@@ -414,4 +417,4 @@ class HandMasker:
             area += float(cv2.contourArea(hull))
             centroids.append(points.mean(axis=0))
         centroid = np.mean(centroids, axis=0)
-        return (area, float(centroid[0]), float(centroid[1]))
+        return HandSignature(area, float(centroid[0]), float(centroid[1]))
