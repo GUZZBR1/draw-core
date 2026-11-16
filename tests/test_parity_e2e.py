@@ -1,6 +1,8 @@
 """Testes do comparador de lab/parity_e2e (o laço ponta a ponta em si
 precisa do repo legado e dos binários dos modelos)."""
 
+import json
+
 import numpy as np
 from lab.parity_e2e import compare
 
@@ -67,3 +69,48 @@ def test_npz_keys_numeric_order(tmp_path):
         loaded = [z[k] for k in sorted(z.files, key=lambda k: int(k.split("_")[1]))]
     for i, m in enumerate(loaded):
         assert m[0, 0] == (i % 2)
+
+
+def test_compare_corpus_vazio_falha():
+    from lab.parity_e2e import compare
+
+    report = compare([], [], [], [], iou_min=0.999, corner_tol=0.5)
+    assert report["ok"] is False
+    assert "frames" in report["error"] or "corpus" in report["error"]
+
+
+def test_compare_shape_transposta_conta_divergencia():
+    from lab.parity_e2e import compare
+
+    new = [{"frame": 0, "present": True, "corners": None}]
+    old = [{"frame": 0, "present": True, "corners": None}]
+    nm = np.zeros((600, 800), np.uint8)
+    om = np.zeros((800, 600), np.uint8)  # mesmo size, shape transposto
+    report = compare(new, [nm], old, [om], iou_min=0.999, corner_tol=0.5)
+    assert report["ok"] is False
+    assert report["divergences"][0]["canvas_shape"]
+
+
+def test_run_legacy_limpa_env_draw(monkeypatch, tmp_path):
+    import subprocess
+
+    from lab import parity_e2e
+
+    monkeypatch.setenv("DRAW_INK_REMOVAL", "0")
+    monkeypatch.setenv("DRAW_MODEL_STRICT", "0")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    seen = {}
+
+    def fake_run(cmd, env=None, **kw):
+        seen["env"] = env
+        (tmp_path / "telemetry.json").write_text(json.dumps({"frames": []}))
+        np.savez_compressed(tmp_path / "canvas.npz")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(parity_e2e.subprocess, "run", fake_run)
+    parity_e2e.run_legacy(tmp_path, tmp_path, tmp_path, frames=1, fps=1.0,
+                          sheet_model="s.onnx", ink_model="i.onnx")
+    assert "DRAW_INK_REMOVAL" not in seen["env"]
+    assert "DRAW_MODEL_STRICT" not in seen["env"]
+    assert seen["env"]["PYTHONPATH"] == str(tmp_path)
+    assert seen["env"]["PATH"] == "/usr/bin"

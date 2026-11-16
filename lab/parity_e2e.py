@@ -157,8 +157,14 @@ def run_new(corpus, out_dir, *, frames, fps, sheet_model, ink_model, verify):
 
 
 def run_legacy(legacy_repo, corpus, out_dir, *, frames, fps, sheet_model, ink_model):
-    """Lado legado: subprocesso com PYTHONPATH=<repo legado>."""
-    env = dict(os.environ)
+    """Lado legado: subprocesso com PYTHONPATH=<repo legado>.
+
+    DRAW_* herdado NÃO passa: uma flag de Tier B/C (ou um
+    DRAW_MODEL_STRICT=0) no ambiente do chamador alteraria a linha
+    de base do legado e fabricaria paridade falsa. O driver seta as
+    8 flags validadas ele mesmo.
+    """
+    env = {k: v for k, v in os.environ.items() if not k.startswith("DRAW_")}
     env["PYTHONPATH"] = str(legacy_repo)
     driver = _REPO_ROOT / "lab" / "parity_legacy_driver.py"
     cmd = [
@@ -217,11 +223,16 @@ def compare(new_records, new_masks, old_records, old_masks, *, iou_min, corner_t
             if iou < iou_min:
                 issues["canvas_iou"] = round(iou, 6)
                 issues["canvas_px"] = {"new": int(nm.sum()), "legacy": int(om.sum())}
-        elif nm.size != om.size:
+        else:
+            # Qualquer shape divergente conta — transpostas (800,600)
+            # vs (600,800) têm o mesmo size e escapavam das duas
+            # checagens anteriores.
             issues["canvas_shape"] = {"new": list(nm.shape), "legacy": list(om.shape)}
         if issues:
             report["divergences"].append({"frame": new["frame"], **issues})
-    report["ok"] = not report["divergences"]
+    report["ok"] = bool(report["frames"]) and not report["divergences"]
+    if not report["frames"]:
+        report["error"] = "corpus sem frames legíveis — nada comparado"
     return report
 
 
@@ -269,6 +280,10 @@ def main(argv=None):
         ink_model=ink_model,
         verify=verify,
     )
+    # Corpus vazio/ilegível: falha explícita antes de gastar a
+    # passada legada — o comparador também recusa zero frames.
+    if not new_records:
+        raise SystemExit("corpus sem frames legíveis — nada a comparar")
     old_records, old_masks = run_legacy(
         legacy_repo,
         args.corpus,
