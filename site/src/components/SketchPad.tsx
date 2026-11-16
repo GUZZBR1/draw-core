@@ -172,7 +172,7 @@ export default function SketchPad() {
     if (!bounds) return;
     for (const sample of samples) {
       const point = makePoint(sample.clientX, sample.clientY, sample.pressure, bounds);
-      const previous = stroke.points[stroke.points.length - 1];
+      const previous: Point = stroke.points[stroke.points.length - 1];
       if (stroke.points.length >= POINT_LIMIT) {
         strokesRef.current.push(stroke);
         stroke = { color: stroke.color, width: stroke.width, tool: stroke.tool, points: [previous] };
