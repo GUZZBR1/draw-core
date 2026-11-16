@@ -408,14 +408,21 @@ class NeuralSheetDetector:
         if corners is not None and not _geometry.fit_plausible(corners, ref_shape):
             return None
         if lines is not None:
-            stored = (
-                list(self._edge_lines)
-                if self._edge_lines is not None
-                else [None, None, None, None]
-            )
+            # Aresta sem medida confiável neste quadro grava ausente:
+            # copiar a linha velha faria o próximo quadro tratá-la
+            # como histórico contínuo, e uma folha nova herdaria as
+            # arestas da anterior. A linha antiga só sobrevive onde
+            # a herança deste quadro foi válida (fallback presente).
+            stored = [None, None, None, None]
             for i in range(4):
                 if trusted[i]:
                     stored[i] = lines[i]
+                elif (
+                    fallback is not None
+                    and fallback[i] is not None
+                    and self._edge_lines is not None
+                ):
+                    stored[i] = self._edge_lines[i]
             self._edge_lines = stored
         self._memory_mask = mask[::_MEMORY_MASK_STRIDE, ::_MEMORY_MASK_STRIDE] > 0
         return corners
