@@ -604,7 +604,11 @@ def load_background_photos(
         img = cv2.imread(str(path))
         if img is None:
             raise ValueError(f"foto de fundo ilegível: {path}")
-        out.append((path.stem, _fit_background_photo(img)))
+        # O id é o caminho relativo sem extensão, não o basename:
+        # basename repetido entre subdiretórios colidia o id e
+        # misturava fontes diferentes no split.
+        photo_id = path.relative_to(root).with_suffix("").as_posix()
+        out.append((photo_id, _fit_background_photo(img)))
     return out
 
 

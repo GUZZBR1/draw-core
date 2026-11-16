@@ -488,3 +488,21 @@ def test_index_offset_shards_byte_identical(tmp_path):
 def test_index_offset_validation(tmp_path):
     with pytest.raises(ValueError):
         gs.generate_dataset(tmp_path / "a", index_offset=-1)
+
+
+def test_background_photo_ids_are_unique_per_subdirectory(tmp_path):
+    """Basename repetido entre subdiretorios de --bg-dir colidia o
+    id de fonte: duas fotos diferentes viravam uma so entrada no
+    pool e no split."""
+    for sub in ("mesa_a", "mesa_b"):
+        d = tmp_path / sub
+        d.mkdir()
+        cv2.imwrite(
+            str(d / "photo.png"), np.full((8, 8, 3), 100, dtype=np.uint8)
+        )
+    photos = gs.load_background_photos(tmp_path)
+    ids = [pid for pid, _ in photos]
+    assert ids == ["mesa_a/photo", "mesa_b/photo"]
+    splits = gs.split_sources(ids, seed=0)
+    assigned = splits["train"] + splits["val"] + splits["test"]
+    assert sorted(assigned) == ids
