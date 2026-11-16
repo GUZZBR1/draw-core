@@ -910,7 +910,8 @@ def _warp_to_scene(
     elif placement == "clipped":
         dst, _, _ = _sample_clipped_quad(rng, w, h, sheet_scale)
     elif placement == "clipped_wide":
-        dst, _, _ = _sample_clipped_quad(rng, w, h, sheet_scale, 18.0, rotation_max)
+        rot_min = 18.0 if rotation_max > 18.0 else 0.0
+        dst, _, _ = _sample_clipped_quad(rng, w, h, sheet_scale, rot_min, rotation_max)
     elif placement == "wide_rotation":
         dst = _sample_wide_rotation_quad(rng, w, h, rotation_max, sheet_scale)
     elif placement == "loguniform":

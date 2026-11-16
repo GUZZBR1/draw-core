@@ -506,3 +506,23 @@ def test_background_photo_ids_are_unique_per_subdirectory(tmp_path):
     splits = gs.split_sources(ids, seed=0)
     assigned = splits["train"] + splits["val"] + splits["test"]
     assert sorted(assigned) == ids
+
+
+def test_clipped_wide_respects_rotation_max_below_18():
+    """clipped_wide fixava o piso de rotacao em 18 graus: com
+    rotation_max <= 18 a magnitude amostrada saia acima do teto.
+    Com teto menor, o piso cai a 0 como em
+    _sample_wide_rotation_quad."""
+    rng = np.random.default_rng(7)
+    paper = np.full((64, 64, 3), 200, dtype=np.uint8)
+    ink = np.zeros((64, 64), dtype=np.uint8)
+    degrees = []
+    for _ in range(40):
+        _rgb, _pm, _iw, quad, _pc, _ic = gs._warp_to_scene(
+            rng, paper, ink, "clipped_wide", rotation_max=10.0
+        )
+        top = quad[1] - quad[0]
+        deg = abs(np.degrees(np.arctan2(top[1], top[0])))
+        deg = min(deg, 180.0 - deg)
+        degrees.append(deg)
+    assert max(degrees) <= 10.0
