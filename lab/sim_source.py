@@ -890,6 +890,10 @@ def _translate_specs(specs, rect, pw, ph):
     """
     if rect is None:
         raise ValueError("redesenhar exige retângulo alvo")
+    if not specs:
+        # Texto so de espacos nao gera traço nenhum: sem pontos
+        # para concatenar nem para mover.
+        return []
     all_points = np.concatenate([spec[3] for spec in specs])
     x, y, w, h = rect
     target = np.array([x + w / 2, y + h / 2])

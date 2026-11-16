@@ -493,6 +493,13 @@ def test_return_lerp_never_collapses_the_sheet():
     )
 
 
+def test_redraw_text_of_only_spaces_yields_no_specs():
+    """Texto so de espacos nao planeja traço nenhum: _translate_specs
+    chamava np.concatenate numa lista vazia."""
+    capture = scenario(erase_stroke=0, redraw_text="   ")
+    assert capture.redraw_specs == []
+
+
 def test_non_collapsing_lerp_keeps_corner_interpolation():
     """Transicao sem colapso (lift_out translada) segue no lerp de
     cantos de sempre — mesma saida de antes, bit a bit."""
