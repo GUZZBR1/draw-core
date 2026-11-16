@@ -643,8 +643,13 @@ def _dp_open(points, epsilon):
         if norm == 0:
             dists = np.hypot(seg[:, 0] - pa[0], seg[:, 1] - pa[1])
         else:
-            cross = np.abs(ab[0] * (pa[1] - seg[:, 1]) - (pa[0] - seg[:, 0]) * ab[1])
-            dists = cross / norm
+            # Distância ao SEGMENTO pa→pb, não à reta infinita: um
+            # retrocesso colinear que ultrapassa a âncora tem
+            # distância zero à reta e sumia da simplificação (o
+            # vai-e-vem do traço não chegava ao SVG/JSON).
+            t = np.clip(((seg - pa) @ ab) / (norm * norm), 0.0, 1.0)
+            closest = pa + t[:, None] * ab
+            dists = np.hypot(seg[:, 0] - closest[:, 0], seg[:, 1] - closest[:, 1])
         i = int(np.argmax(dists))
         if dists[i] > epsilon:
             keep[a + 1 + i] = True

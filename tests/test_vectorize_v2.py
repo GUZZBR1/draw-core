@@ -151,3 +151,14 @@ def main():
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def test_dp_open_keeps_collinear_backtrack_overshoot():
+    """Douglas-Peucker media distancia a reta infinita das ancoras:
+    um retrocesso colinear que ultrapassa a ancora tinha distancia
+    zero e sumia da simplificacao. Com distancia ao SEGMENTO, o
+    vai-e-vem fica."""
+    pts = np.array([[0, 0], [30, 0], [10, 0]], dtype=np.float32)
+    simplified = vectorize._dp_open(pts, epsilon=1.0)
+    assert len(simplified) == 3
+    assert (simplified[1] == [30, 0]).all()
