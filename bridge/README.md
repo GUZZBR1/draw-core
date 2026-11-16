@@ -10,9 +10,9 @@ not use it yet; nothing in the default path depends on this folder.
   consumer cannot tell the two sources apart.
 - `windows_helper.py` — an untested Windows-side sender sketch;
   capture and JPEG encoding are stubs, not a working capture fallback.
-- `tools/helper_receiver.py` — the WSL-side receiver and recorder
-  (`--selfcheck`, `--record`, `--dump`). Not migrated yet: it depends
-  on draw.safe_io (open PR) and moves later.
+- `../tools/helper_receiver.py` — the WSL-side receiver and recorder
+  (`--selfcheck`, `--record`, `--dump`). Uses `draw.infra.safe_io` for
+  bounded JPEG decoding.
 
 If the helper is not running, nothing changes: Draw captures from the
 webcam attached to WSL as usual (see
