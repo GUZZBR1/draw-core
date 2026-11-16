@@ -540,13 +540,9 @@ class SyntheticCapture:
             # translada, a folha gira em torno dele — que nunca
             # degenera. Transição sem colapso segue no lerp de
             # cantos de sempre (mesma saída de antes).
-            phase["rigid_lerp"] = _lerp_collapses(
-                phase["quad_from"], phase["quad_to"]
-            )
+            phase["rigid_lerp"] = _lerp_collapses(phase["quad_from"], phase["quad_to"])
         if phase["rigid_lerp"]:
-            self._quad_now = _rigid_pose_lerp(
-                phase["quad_from"], phase["quad_to"], t
-            )
+            self._quad_now = _rigid_pose_lerp(phase["quad_from"], phase["quad_to"], t)
         else:
             self._quad_now = phase["quad_from"] + t * (
                 phase["quad_to"] - phase["quad_from"]
@@ -917,16 +913,12 @@ def _polyline_rect_overlap(points, rect, thickness=0) -> bool:
         return False
     radius = thickness / 2.0
     x1, y1 = x + w, y + h
-    dx = np.maximum.reduce(
-        [x - points[:, 0], points[:, 0] - x1, np.zeros(len(points))]
-    )
-    dy = np.maximum.reduce(
-        [y - points[:, 1], points[:, 1] - y1, np.zeros(len(points))]
-    )
+    dx = np.maximum.reduce([x - points[:, 0], points[:, 0] - x1, np.zeros(len(points))])
+    dy = np.maximum.reduce([y - points[:, 1], points[:, 1] - y1, np.zeros(len(points))])
     if (np.hypot(dx, dy) <= radius).any():
         return True
     corners = np.float32([[x, y], [x1, y], [x1, y1], [x, y1]])
-    for a, b in zip(points[:-1], points[1:]):
+    for a, b in zip(points[:-1], points[1:], strict=False):
         for corner in corners:
             if _point_segment_distance(corner, a, b) <= radius:
                 return True

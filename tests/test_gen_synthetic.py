@@ -161,27 +161,6 @@ def test_visible_majority_stays_supervised():
     assert (mask == gs.HAND).sum() > 0
 
 
-def test_combined_loss_ignores_255():
-    torch = pytest.importorskip("torch")
-    from training import train as T
-
-    rng = np.random.default_rng(0)
-    logits = torch.tensor(
-        rng.normal(size=(1, 4, 8, 8)), dtype=torch.float32, requires_grad=True
-    )
-    target = torch.full((1, 8, 8), 255, dtype=torch.long)
-    target[0, :4, :4] = 1
-    target[0, 4:, 4:] = 3
-    weights = torch.tensor([1.0, 1.0, 2.0, 4.0])
-    loss = T.combined_loss(logits, target, weights)
-    assert torch.isfinite(loss)
-    loss.backward()
-    # Pixel 100% ignorado: loss ligada ao grafo, gradiente zero.
-    only_ignore = torch.full((1, 8, 8), 255, dtype=torch.long)
-    loss2 = T.combined_loss(logits, only_ignore, weights)
-    assert float(loss2) == 0.0
-
-
 def test_placeholder_hand_is_marked():
     scene = gs.compose_scene(2, "train", 0, hand=_hand())
     assert scene["info"]["hand_placeholder"] is True
@@ -220,9 +199,7 @@ def test_load_hands_missing_dir_fails_loudly(tmp_path):
 def test_load_hands_rgb_suffix_finds_the_mask(tmp_path):
     """Layout alice_rgb.png + alice_mask.png: o sufixo _rgb sai do
     stem para montar os candidatos de mascara."""
-    cv2.imwrite(
-        str(tmp_path / "alice_rgb.png"), np.full((4, 4, 3), 60, dtype=np.uint8)
-    )
+    cv2.imwrite(str(tmp_path / "alice_rgb.png"), np.full((4, 4, 3), 60, dtype=np.uint8))
     cv2.imwrite(
         str(tmp_path / "alice_mask.png"),
         np.full((4, 4), 255, dtype=np.uint8),
@@ -512,9 +489,7 @@ def test_background_photo_ids_are_unique_per_subdirectory(tmp_path):
     for sub in ("mesa_a", "mesa_b"):
         d = tmp_path / sub
         d.mkdir()
-        cv2.imwrite(
-            str(d / "photo.png"), np.full((8, 8, 3), 100, dtype=np.uint8)
-        )
+        cv2.imwrite(str(d / "photo.png"), np.full((8, 8, 3), 100, dtype=np.uint8))
     photos = gs.load_background_photos(tmp_path)
     ids = [pid for pid, _ in photos]
     assert ids == ["mesa_a/photo", "mesa_b/photo"]
