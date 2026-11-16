@@ -545,3 +545,22 @@ def test_det_hand_mask_reaches_occlusion_without_coverage():
     _drive(loop, 10)
     assert loop._hand_mask_det is None
     assert ink.submitted[-1][2] is None
+
+
+def test_drop_without_persist_clears_canvas_and_provisional():
+    """canvas_persist desligado: a queda some com o desenho da tela —
+    clean_mask, camada provisória e o canvas renderizado zeram
+    juntos (antes só a confirmada ia, e o canvas ficava até a
+    reabertura)."""
+    loop, _det, _ink = _make_loop(
+        _seen_then_lost(), config=PipelineConfig(canvas_persist=False)
+    )
+    _drive(loop, 8)
+    loop.clean_mask = np.ones((100, 100), np.uint8) * 255
+    loop.clean_provisional_mask = np.ones((100, 100), np.uint8) * 128
+    loop.accumulated_canvas = np.ones((100, 100, 3), np.uint8) * 200
+    _drive(loop, 80)
+    assert loop.generation_events["drop"] >= 1
+    assert loop.clean_mask is None
+    assert loop.clean_provisional_mask is None
+    assert loop.accumulated_canvas is None

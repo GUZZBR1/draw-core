@@ -380,6 +380,8 @@ class Pipeline:
             # tela.
             if not self._config.canvas_persist:
                 self.clean_mask = None
+                self.clean_provisional_mask = None
+                self.accumulated_canvas = None
             # Guarda a geracao ate a folha voltar;
             # a primeira mascara decide pela tinta se e
             # re-registro ou pagina nova.
