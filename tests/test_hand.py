@@ -25,9 +25,11 @@ def _landmarks_result():
 
 
 class _StubLandmarker:
-    def __init__(self, mode, log):
+    def __init__(self, mode, log, raise_video_detect=False, close_raises=False):
         self._mode = mode
         self._log = log
+        self._raise_video_detect = raise_video_detect
+        self._close_raises = close_raises
         self.closed = 0
 
     def detect(self, _image):
@@ -36,13 +38,19 @@ class _StubLandmarker:
 
     def detect_for_video(self, _image, timestamp_ms):
         self._log.append(("video", timestamp_ms))
+        if self._raise_video_detect:
+            raise RuntimeError("detect_for_video falhou neste stub")
         return _landmarks_result()
 
     def close(self):
         self.closed += 1
+        if self._close_raises:
+            raise RuntimeError("close falhou neste stub")
 
 
-def _install_fake_mediapipe(monkeypatch, fail_video=False):
+def _install_fake_mediapipe(
+    monkeypatch, fail_video=False, raise_video_detect=False, close_raises=False
+):
     log = []
     created = []
 
@@ -54,7 +62,12 @@ def _install_fake_mediapipe(monkeypatch, fail_video=False):
         mode = options.running_mode
         if fail_video and mode == _RunningMode.VIDEO:
             raise RuntimeError("sem video neste stub")
-        landmarker = _StubLandmarker(mode, log)
+        landmarker = _StubLandmarker(
+            mode,
+            log,
+            raise_video_detect=raise_video_detect,
+            close_raises=close_raises,
+        )
         created.append(landmarker)
         return landmarker
 
@@ -138,6 +151,29 @@ def test_close_is_idempotent_and_permanent(monkeypatch, tmp_path):
     # Depois do fechamento nao recria: mascara indisponivel.
     assert masker.mask(frame) is None
     assert len(created) == 1
+
+
+def test_failed_video_inference_closes_the_landmarker(monkeypatch, tmp_path):
+    _log, created = _install_fake_mediapipe(monkeypatch, raise_video_detect=True)
+    masker = hand_module.HandMasker(_model(tmp_path), verify=None)
+    frame = np.zeros((80, 100, 3), dtype=np.uint8)
+    signature = masker.presence_signature(frame, timestamp_ms=1000)
+    # O landmarker VIDEO falho fecha antes de ser descartado; a
+    # presenca cai para o landmarker IMAGE recem-criado.
+    assert created[0].closed == 1
+    assert len(created) == 2
+    assert signature is not None
+
+
+def test_failed_video_inference_tolerates_a_broken_close(monkeypatch, tmp_path):
+    _install_fake_mediapipe(monkeypatch, raise_video_detect=True, close_raises=True)
+    masker = hand_module.HandMasker(_model(tmp_path), verify=None)
+    frame = np.zeros((80, 100, 3), dtype=np.uint8)
+    # O close do landmarker falho levanta, mas a degradacao para o
+    # IMAGE nao pode ser derrubada por ele.
+    signature = masker.presence_signature(frame, timestamp_ms=1000)
+    assert signature is not None
+    masker.close()
 
 
 def test_close_also_closes_the_video_landmarker(monkeypatch, tmp_path):

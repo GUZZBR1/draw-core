@@ -276,7 +276,18 @@ class HandMasker:
                 self._last_video_ts = timestamp
             except Exception:
                 self._video_unavailable = True
+                # O landmarker falho fecha antes de perder a
+                # referencia: solta-lo sem close deixaria o
+                # serial_dispatcher do MediaPipe vivo ate o
+                # __del__ (que trava no GC). Um close quebrado
+                # nao pode derrubar a degradacao para o IMAGE.
+                stale = self._video_landmarker
                 self._video_landmarker = None
+                if stale is not None:
+                    try:
+                        stale.close()
+                    except Exception:
+                        pass
                 result = None
         if result is None:
             if not self._ensure():
