@@ -132,6 +132,17 @@ def _validate_masks(pred, gt, require_supervised=True):
         )
     if pred.ndim != 2 or gt.ndim != 2:
         raise ValueError("máscaras devem ser 2D (H, W) com valores de classe")
+    # Rótulos fracionários dentro do intervalo passavam na faixa e
+    # produziam métricas contraditórias: iou_per_class comparava
+    # igualdade exata (1.9 != 1 => FN silencioso) enquanto
+    # confusion_matrix truncava para a classe 1.
+    for name, mask in (("pred", pred), ("gt", gt)):
+        if mask.size and not np.all(mask == np.floor(mask)):
+            bad = np.unique(mask[mask != np.floor(mask)]).tolist()
+            raise ValueError(
+                f"{name} contém rótulos não inteiros: {bad}; "
+                "classes precisam ser inteiros exatos"
+            )
     if pred.size == 0 or pred.min() < 0 or pred.max() >= NUM_CLASSES:
         raise ValueError(
             f"pred contém classe fora de 0..{NUM_CLASSES - 1}; "
@@ -519,6 +530,67 @@ def skeletonize(mask):
             return img[1:-1, 1:-1].astype(bool)
 
 
+def _label_components(mask):
+    """Rótulos de componentes 8-conexas (union-find em NumPy puro).
+
+    O núcleo das métricas não usa OpenCV/scipy; como só precisamos
+    dos pixels do próprio ``mask``, a união varre os vizinhos já
+    visitados (cima e esquerda) em uma passada.
+    """
+    mask = np.asarray(mask, dtype=bool)
+    h, w = mask.shape
+    ys, xs = np.nonzero(mask)
+    index = np.full(mask.shape, -1, dtype=np.int64)
+    index[ys, xs] = np.arange(len(ys))
+    parent = list(range(len(ys)))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    for k in range(len(ys)):
+        y, x = int(ys[k]), int(xs[k])
+        for ny, nx in ((y - 1, x - 1), (y - 1, x), (y - 1, x + 1), (y, x - 1)):
+            if 0 <= ny < h and 0 <= nx < w:
+                j = int(index[ny, nx])
+                if j >= 0:
+                    ra, rb = find(k), find(j)
+                    if ra != rb:
+                        parent[max(ra, rb)] = min(ra, rb)
+
+    roots = np.array([find(k) for k in range(len(ys))], dtype=np.int64)
+    unique, inverse = np.unique(roots, return_inverse=True)
+    labels = np.zeros(mask.shape, dtype=np.int64)
+    labels[ys, xs] = inverse + 1
+    return labels, len(unique)
+
+
+def _skeleton_or_component_pixels(mask):
+    """Esqueleto com 1 px garantido por componente conectado não vazio.
+
+    Zhang-Suen apaga por completo componentes pequenos — um ponto 2x2
+    some inteiro. O fallback anterior só disparava quando o esqueleto
+    INTEIRO ficava vazio: um ponto ao lado de um traço sumia da conta
+    (predição sem o ponto marcava clDice 1.0) e um ponto previsto a
+    mais escapava da penalidade. Aqui cada componente apagado conserva
+    o pixel mais próximo do centroide; os que sobrevivem não mudam.
+    """
+    mask = np.asarray(mask, dtype=bool)
+    skel = skeletonize(mask)
+    labels, n = _label_components(mask)
+    for i in range(1, n + 1):
+        comp = labels == i
+        if (comp & skel).any():
+            continue
+        ys, xs = np.nonzero(comp)
+        cy, cx = float(ys.mean()), float(xs.mean())
+        pick = int(np.argmin((ys - cy) ** 2 + (xs - cx) ** 2))
+        skel[ys[pick], xs[pick]] = True
+    return skel
+
+
 def cldice_binary(pred, gt, tolerance_px=0, valid=None):
     """clDice (centerline Dice, Shit et al., CVPR 2021) entre máscaras binárias.
 
@@ -543,15 +615,8 @@ def cldice_binary(pred, gt, tolerance_px=0, valid=None):
         valid = np.asarray(valid, dtype=bool)
         pred = pred & valid
         gt = gt & valid
-    skel_pred = skeletonize(pred)
-    skel_gt = skeletonize(gt)
-    # Esqueleto vazio de máscara NÃO vazia (um ponto 2x2 some na
-    # esqueletização): a própria máscara vira o esqueleto — sem
-    # isso uma predição vazia contra GT não vazio marcava 1.0.
-    if pred.any() and not skel_pred.any():
-        skel_pred = pred
-    if gt.any() and not skel_gt.any():
-        skel_gt = gt
+    skel_pred = _skeleton_or_component_pixels(pred)
+    skel_gt = _skeleton_or_component_pixels(gt)
     if valid is not None:
         skel_pred &= valid
         skel_gt &= valid

@@ -274,3 +274,51 @@ def test_dilate_disk_and_tolerance_on_tiny_mask():
     full_ink = np.full((2, 2), seg_metrics.INK)
     r = seg_metrics.ink_tolerance_metrics(full_ink, full_ink, 3)
     assert r["f1"] == 1.0
+
+
+def test_cldice_dot_beside_stroke_counts_in_gt():
+    # Um ponto 2x2 ao lado de um traco: a esqueletizacao apaga o ponto,
+    # mas o esqueleto do traco sobrevive — o fallback por mascara
+    # inteira nao disparava e o ponto sumia da conta (score perfeito
+    # para uma predicao sem o ponto).
+    gt = np.zeros((60, 60), dtype=bool)
+    gt[30:35, 5:55] = True
+    gt[10:12, 20:22] = True
+    pred = np.zeros((60, 60), dtype=bool)
+    pred[30:35, 5:55] = True
+    r = seg_metrics.cldice_binary(pred, gt)
+    assert r["cldice"] < 1.0
+    assert r["tsens"] < 1.0  # o esqueleto do ponto do GT nao foi coberto
+
+
+def test_cldice_extra_predicted_dot_is_punished():
+    gt = np.zeros((60, 60), dtype=bool)
+    gt[30:35, 5:55] = True
+    pred = gt.copy()
+    pred[10:12, 20:22] = True  # ponto previsto a mais
+    r = seg_metrics.cldice_binary(pred, gt)
+    assert r["cldice"] < 1.0
+    assert r["tprec"] < 1.0
+
+
+def test_cldice_identical_dot_still_perfect():
+    m = np.zeros((60, 60), dtype=bool)
+    m[10:12, 20:22] = True
+    assert seg_metrics.cldice_binary(m, m)["cldice"] == 1.0
+
+
+def test_validate_masks_rejects_fractional_labels():
+    pred = np.zeros((10, 10), dtype=np.float64)
+    pred[2:4, 2:4] = 1.9
+    gt = np.zeros((10, 10), dtype=np.int64)
+    with pytest.raises(ValueError, match="inteiros"):
+        seg_metrics.iou_per_class(pred, gt)
+    pred_int = np.zeros((10, 10), dtype=np.int64)
+    gt_frac = np.zeros((10, 10), dtype=np.float64)
+    gt_frac[2:4, 2:4] = 1.9
+    with pytest.raises(ValueError, match="inteiros"):
+        seg_metrics.iou_per_class(pred_int, gt_frac)
+    # floats com valores inteiros exatos continuam aceitos
+    pred_ok = np.zeros((10, 10), dtype=np.float64)
+    pred_ok[2:4, 2:4] = 2.0
+    seg_metrics.iou_per_class(pred_ok, gt)
