@@ -84,10 +84,8 @@ def test_default_threads_never_exceed_the_host(monkeypatch):
     """O padrão de threads intra-op é o teto combinado (4)
     limitado às CPUs do host: pedir threads que o host não tem
     degrada a passada (auditoria de 2026-11-02: 2.150 ms com 8
-    threads num host de 4 vCPUs contra 721 ms com 4). Explícito e
-    env mandam no padrão, como antes."""
-    monkeypatch.delenv("DRAW_PAGE_CLEAN_THREADS", raising=False)
-    monkeypatch.delenv("DRAW_ORT_THREADS", raising=False)
+    threads num host de 4 vCPUs contra 721 ms com 4). O argumento
+    explícito manda no padrão."""
     monkeypatch.setattr(page_clean.os, "cpu_count", lambda: 4)
     assert page_clean._page_clean_threads() == 4
     assert page_clean.PageCleanInk("inexistente.onnx", verify=None).threads == 4
@@ -97,8 +95,6 @@ def test_default_threads_never_exceed_the_host(monkeypatch):
     assert page_clean._page_clean_threads() == page_clean.DEFAULT_THREADS
     monkeypatch.setattr(page_clean.os, "cpu_count", lambda: 4)
     assert page_clean._page_clean_threads(2) == 2
-    monkeypatch.setenv("DRAW_PAGE_CLEAN_THREADS", "6")
-    assert page_clean._page_clean_threads() == 6
 
 
 def test_batch_size_comes_from_the_constructor():

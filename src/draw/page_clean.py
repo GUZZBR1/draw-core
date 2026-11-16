@@ -29,7 +29,7 @@ precisa ser relida.
 
 A sessão é preguiçosa: onnxruntime importado no primeiro uso,
 erro explícito sem a dependência ou sem o arquivo. As threads
-intra-op têm env própria (DRAW_PAGE_CLEAN_THREADS), separada da
+intra-op vêm do argumento do construtor, separadas das
 do detector de folha: a passada completa mediu 205 ms com 4
 threads e 168 ms com 8 no Ryzen do Lucas (perfil em
 draw-lab/page-clean-v0/PERF_BASELINE_RYZEN.md), então o teto do
@@ -41,8 +41,6 @@ modelo w8 oficial de lote fixo: 2.150 ms com 8 threads contra
 721 ms com 4 e 481 ms com 2 — thread sobrando vira contenção no
 pool do ONNX Runtime). No Ryzen do Lucas (16 threads lógicas) o
 limite não morde: o padrão continua 8, o valor medido dele.
-DRAW_ORT_THREADS continua valendo como reserva, para as
-ferramentas de perfil varrerem as duas sessões juntas.
 """
 
 import os
@@ -51,8 +49,6 @@ from pathlib import Path
 import numpy as np
 
 _PATCH = 256
-_ENV_THREADS_VAR = "DRAW_PAGE_CLEAN_THREADS"
-_ENV_THREADS_FALLBACK_VAR = "DRAW_ORT_THREADS"
 # Blocos por chamada de session.run. O padrão é a página inteira
 # numa chamada (o arquivo com lote dinâmico aceita e é a passada
 # mais barata); batch_size no construtor permite lotes menores.
@@ -80,19 +76,10 @@ def _default_threads():
 
 
 def _page_clean_threads(explicit=None):
-    """Threads intra-op desta sessão: argumento > env própria >
-    DRAW_ORT_THREADS > padrão do host. Inválido volta ao padrão."""
+    """Threads intra-op desta sessão: o argumento manda; sem ele,
+    o padrão do host."""
     if explicit:
         return int(explicit)
-    for var in (_ENV_THREADS_VAR, _ENV_THREADS_FALLBACK_VAR):
-        raw = os.environ.get(var)
-        if raw:
-            try:
-                value = int(raw)
-            except ValueError:
-                value = 0
-            if value > 0:
-                return value
     return _default_threads()
 
 
@@ -127,11 +114,10 @@ def _disable_spin(options):
 
     Mesmo motivo de draw.perception._disable_spin: duas sessoes ORT no
     mesmo processo com spin ligado roubam CPU uma da outra entre
-    passadas (pesquisa de performance de 2026-11-03). DRAW_ORT_SPIN=1
-    religa para o A/B na mesa.
+    passadas (pesquisa de performance de 2026-11-03). O runtime
+    migrou sem o religar: a sessao sempre roda com spin
+    desabilitado, o padrao do legado.
     """
-    if os.environ.get("DRAW_ORT_SPIN", "").strip() == "1":
-        return
     options.add_session_config_entry("session.intra_op.allow_spinning", "0")
     options.add_session_config_entry("session.inter_op.allow_spinning", "0")
 
