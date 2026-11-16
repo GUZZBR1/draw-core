@@ -4,8 +4,8 @@ type Point = { x: number; y: number; pressure: number };
 type Tool = 'pen' | 'eraser';
 type Stroke = { color: string; width: number; tool: Tool; points: Point[] };
 
-const COLORS = [
-  { name: 'Grafite', value: '#22231f' },
+const COLORS: { name: string; value: string; display?: string }[] = [
+  { name: 'Grafite', value: 'graphite', display: 'var(--ink)' },
   { name: 'Terracota', value: '#c65d45' },
   { name: 'Azul', value: '#527c91' },
   { name: 'Verde', value: '#78885a' },
@@ -18,6 +18,11 @@ const SIZES = [
   { name: 'Grosso', value: 8 },
 ];
 const POINT_LIMIT = 5000;
+
+function resolveStrokeColor(color: string, element: HTMLElement) {
+  if (color !== 'graphite') return color;
+  return getComputedStyle(element).getPropertyValue('--ink').trim() || '#22231f';
+}
 
 function pressureWidth(stroke: Stroke, pressure: number) {
   return stroke.width * (0.55 + Math.max(0.1, pressure) * 0.9);
@@ -63,9 +68,10 @@ export default function SketchPad() {
   ) => {
     const points = stroke.points;
     if (!points.length) return;
+    const paintColor = resolveStrokeColor(stroke.color, context.canvas);
     context.globalCompositeOperation = stroke.tool === 'eraser' ? 'destination-out' : 'source-over';
-    context.strokeStyle = stroke.color;
-    context.fillStyle = stroke.color;
+    context.strokeStyle = paintColor;
+    context.fillStyle = paintColor;
     context.lineCap = 'round';
     context.lineJoin = 'round';
 
@@ -114,6 +120,12 @@ export default function SketchPad() {
     }
     canvas.getContext('2d')?.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
     repaint();
+  }, [repaint]);
+
+  useEffect(() => {
+    const themeObserver = new MutationObserver(repaint);
+    themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
+    return () => themeObserver.disconnect();
   }, [repaint]);
 
   useEffect(() => {
@@ -214,7 +226,7 @@ export default function SketchPad() {
               className={`sketch-swatch${color === swatch.value ? ' is-selected' : ''}`}
               key={swatch.value}
               type="button"
-              style={{ '--swatch': swatch.value } as React.CSSProperties}
+              style={{ '--swatch': swatch.display ?? swatch.value } as React.CSSProperties}
               aria-label={`${swatch.name}${color === swatch.value ? ', selecionada' : ''}`}
               aria-pressed={color === swatch.value}
               title={swatch.name}
