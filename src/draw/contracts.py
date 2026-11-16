@@ -160,6 +160,119 @@ class InkState:
 
 
 @dataclass(frozen=True, slots=True)
+class WarpedPage:
+    """Uma página retificada entregue à trabalhadora de tinta.
+
+    image é o warp: ndarray 2D ou (H, W, 3) uint8 — a saída de
+    warp_sheet sobre o quadro da câmera — guardada como visão
+    somente-leitura do buffer recebido. generation é a geração de
+    sessão da folha, >= 0. corners é o quad (4, 2) float32
+    somente-leitura que retificou ESTE warp, ou None. visible é a
+    máscara de visibilidade DESTE warp (verdadeiro onde a câmera
+    vê a página; falso sob a mão) e coverage a cobertura de folha
+    DESTE warp (verdadeiro onde a retificação cobre papel de
+    verdade): ambas 2D bool/uint8 na mesma grade (altura, largura)
+    de image, somente-leitura, ou None.
+    """
+
+    image: np.ndarray
+    generation: int
+    corners: np.ndarray | None = None
+    visible: np.ndarray | None = None
+    coverage: np.ndarray | None = None
+
+    def __post_init__(self):
+        if not isinstance(self.image, np.ndarray) or self.image.ndim not in (2, 3):
+            raise ValueError("image precisa ser um ndarray 2D ou (H, W, 3)")
+        if self.image.ndim == 3 and (
+            self.image.shape[2] != 3 or self.image.dtype != np.uint8
+        ):
+            raise ValueError(f"image (H, W, 3) precisa ser uint8: {self.image.dtype}")
+        image = self.image.view()
+        image.flags.writeable = False
+        object.__setattr__(self, "image", image)
+        if self.generation < 0:
+            raise ValueError(f"generation precisa ser >= 0: {self.generation}")
+        if self.corners is not None:
+            object.__setattr__(
+                self, "corners", _corners_float32(self.corners, "corners")
+            )
+        for name in ("visible", "coverage"):
+            mask = getattr(self, name)
+            if mask is None:
+                continue
+            if (
+                not isinstance(mask, np.ndarray)
+                or mask.ndim != 2
+                or mask.dtype not in (np.dtype(bool), np.dtype(np.uint8))
+            ):
+                raise ValueError(f"{name} precisa ser máscara 2D bool/uint8 ou None")
+            if mask.shape != self.image.shape[:2]:
+                raise ValueError(
+                    f"{name} precisa ter a grade de image: "
+                    f"{mask.shape} vs {self.image.shape[:2]}"
+                )
+            view = mask.view()
+            view.flags.writeable = False
+            object.__setattr__(self, name, view)
+
+
+@dataclass(frozen=True, slots=True)
+class InkSnapshot:
+    """Uma publicação do canvas de tinta confirmada.
+
+    version é o número da publicação dentro da geração; confirmed é
+    a máscara 2D uint8 do canvas, guardada como cópia
+    somente-leitura: mutações posteriores no buffer do produtor
+    não atravessam a fronteira.
+    """
+
+    version: int
+    confirmed: np.ndarray
+
+    def __post_init__(self):
+        mask = self.confirmed
+        if not isinstance(mask, np.ndarray) or mask.ndim != 2 or mask.dtype != np.uint8:
+            raise ValueError("confirmed precisa ser máscara 2D uint8")
+        confirmed = mask.copy()
+        confirmed.flags.writeable = False
+        object.__setattr__(self, "confirmed", confirmed)
+
+
+@dataclass(frozen=True, slots=True)
+class InkDisplaySnapshot:
+    """Uma publicação das camadas de tinta para a tela.
+
+    version é o número da publicação dentro da geração; confirmed e
+    provisional são as máscaras 2D uint8 das camadas, de mesma
+    forma, guardadas como cópias somente-leitura.
+    """
+
+    version: int
+    confirmed: np.ndarray
+    provisional: np.ndarray
+
+    def __post_init__(self):
+        shapes = []
+        for name in ("confirmed", "provisional"):
+            value = getattr(self, name)
+            if (
+                not isinstance(value, np.ndarray)
+                or value.ndim != 2
+                or value.dtype != np.uint8
+            ):
+                raise ValueError(f"{name} precisa ser máscara 2D uint8")
+            mask = value.copy()
+            mask.flags.writeable = False
+            object.__setattr__(self, name, mask)
+            shapes.append(mask.shape)
+        if shapes[0] != shapes[1]:
+            raise ValueError(
+                f"confirmed e provisional precisam ter a mesma forma: {shapes}"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class GateInfo:
     """O pacote do portão de primeira confirmação (frente 88).
 

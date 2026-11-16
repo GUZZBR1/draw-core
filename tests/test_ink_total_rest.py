@@ -21,6 +21,7 @@ import time
 import numpy as np
 import pytest
 
+from draw.contracts import WarpedPage
 from draw.ink import worker as worker_mod
 
 H, W = 40, 60
@@ -53,7 +54,7 @@ def _feed(worker, generation, seconds):
     warp = np.zeros((H, W, 3), dtype=np.uint8)
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
-        worker.submit(warp, generation)
+        worker.submit(WarpedPage(warp, generation))
         time.sleep(0.005)
 
 
@@ -69,7 +70,7 @@ class _Feeder:
     def _run(self):
         warp = np.zeros((H, W, 3), dtype=np.uint8)
         while not self._stop:
-            self._worker.submit(warp, self._generation)
+            self._worker.submit(WarpedPage(warp, self._generation))
             time.sleep(0.005)
 
     def __enter__(self):

@@ -26,6 +26,7 @@ import time
 import numpy as np
 import pytest
 
+from draw.contracts import WarpedPage
 from draw.ink import worker as worker_mod
 
 H, W = 40, 60
@@ -63,7 +64,7 @@ def _feed(worker, generation, seconds):
     warp = np.zeros((H, W, 3), dtype=np.uint8)
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
-        worker.submit(warp, generation)
+        worker.submit(WarpedPage(warp, generation))
         time.sleep(0.005)
 
 
@@ -79,7 +80,7 @@ def test_stale_generation_pass_skips_model(monkeypatch):
     worker = worker_mod.PageCleanWorker(fake)
     generation = worker.new_generation()
     warp = np.zeros((H, W, 3), dtype=np.uint8)
-    worker.submit(warp, generation)
+    worker.submit(WarpedPage(warp, generation))
     with worker._condition:
         job = worker._take_pending_locked()
     worker.new_generation()
@@ -99,9 +100,9 @@ def test_telemetry_record_carries_interval_and_hand_state(monkeypatch):
     generation = worker.new_generation()
     warp = np.zeros((H, W, 3), dtype=np.uint8)
 
-    worker.submit(warp, generation)
+    worker.submit(WarpedPage(warp, generation))
     assert worker.pump() is True
-    worker.submit(warp, generation)
+    worker.submit(WarpedPage(warp, generation))
     now[0] += 0.10
     assert worker.pump() is False, "a cadencia segura a segunda passada"
     now[0] += 0.20

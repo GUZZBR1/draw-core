@@ -22,6 +22,7 @@ import numpy as np
 import pytest
 
 import rr
+from draw.contracts import WarpedPage
 from draw.ink import registration as registration_mod
 from draw.ink import worker as worker_mod
 from draw.ink.config import InkConfig
@@ -84,7 +85,7 @@ def _shifted(dx, dy=0.0, corner=0):
 def _drive(worker, generation, sequence):
     for prob, corners in sequence:
         before = worker.stats()["passes_total"]
-        worker.submit(prob, generation, corners)
+        worker.submit(WarpedPage(prob, generation, corners))
         deadline = time.monotonic() + 5.0
         while worker.stats()["passes_total"] <= before:
             assert time.monotonic() < deadline, "a passada nao executou"
@@ -96,7 +97,12 @@ def _run(sequence, config=None):
     try:
         generation = worker.new_generation()
         _drive(worker, generation, sequence)
-        _version, confirmed, provisional = worker.poll_display(generation, 0)
+        _disp = worker.poll_display(generation, 0)
+        _version, confirmed, provisional = (
+            _disp.version,
+            _disp.confirmed,
+            _disp.provisional,
+        )
         return worker, confirmed, provisional
     finally:
         worker.stop()

@@ -26,6 +26,7 @@ import time
 
 import numpy as np
 
+from draw.contracts import WarpedPage
 from draw.ink import accumulator as accumulator_mod
 from draw.ink import worker as worker_mod
 
@@ -121,7 +122,7 @@ class _HalfInk:
 def _drive_visible(worker, generation, visible):
     dummy = np.zeros((H, W, 3), dtype=np.uint8)
     before = worker.stats()["passes_total"]
-    worker.submit(dummy, generation, Q0, visible)
+    worker.submit(WarpedPage(dummy, generation, Q0, visible))
     deadline = time.monotonic() + 5.0
     while worker.stats()["passes_total"] <= before:
         if time.monotonic() > deadline:
@@ -135,7 +136,7 @@ def _confirm_first_generation(worker, ink):
         _drive_visible(worker, generation, _all_visible())
     original = worker.poll(generation, 0)
     assert original is not None
-    canvas = original[1].copy()
+    canvas = original.confirmed.copy()
     assert np.count_nonzero(canvas) == 100
     return generation, canvas
 
@@ -178,7 +179,7 @@ def test_identity_recall_ignores_occluded_prior_ink(monkeypatch):
         assert event["visible_reference_px"] == 50
         recovered = worker.poll(generation, 0)
         assert recovered is not None
-        assert np.array_equal(recovered[1], canvas_before)
+        assert np.array_equal(recovered.confirmed, canvas_before)
 
         # Controle: sem a mascara, o mesmo retorno e pagina nova
         # (recall 0,5 < 0,65) — o defeito que esta mascara corrige.
@@ -230,7 +231,7 @@ def test_identity_decision_deferred_when_prior_mostly_occluded(
         assert record["page_identity_decision"] == "deferred_occlusion"
         still = worker.poll(generation, 0)
         assert still is not None
-        assert np.array_equal(still[1], canvas_before)
+        assert np.array_equal(still.confirmed, canvas_before)
 
         # A mao sai: a mesma pagina decide same_page com recall 1.
         ink.content = _prob()
@@ -240,6 +241,6 @@ def test_identity_decision_deferred_when_prior_mostly_occluded(
         assert event["recall"] == 1.0
         recovered = worker.poll(generation, 0)
         assert recovered is not None
-        assert np.array_equal(recovered[1], canvas_before)
+        assert np.array_equal(recovered.confirmed, canvas_before)
     finally:
         worker.stop()

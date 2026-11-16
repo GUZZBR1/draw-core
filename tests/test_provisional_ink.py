@@ -17,6 +17,7 @@ import time
 import numpy as np
 import pytest
 
+from draw.contracts import WarpedPage
 from draw.ink import accumulator as accumulator_mod
 from draw.ink import worker as worker_mod
 
@@ -97,11 +98,11 @@ def _drive_until(worker, generation, predicate, timeout=5.0):
     deadline = time.monotonic() + timeout
     display_version = 0
     while time.monotonic() < deadline:
-        worker.submit(warp, generation)
+        worker.submit(WarpedPage(warp, generation))
         got = worker.poll_display(generation, display_version)
         if got is not None:
-            display_version = got[0]
-            if predicate(got[1], got[2]):
+            display_version = got.version
+            if predicate(got.confirmed, got.provisional):
                 return got
         time.sleep(0.005)
     raise AssertionError("a condição nunca chegou na exibição")
@@ -122,15 +123,16 @@ def test_worker_display_shows_provisional_before_poll_confirms(
             generation,
             lambda confirmed, provisional: _px(provisional, STRONG) == 200,
         )
-        assert _px(got[1], STRONG) == 0
+        assert _px(got.confirmed, STRONG) == 0
         confirmed_poll = worker.poll(generation, 0)
-        assert confirmed_poll is None or _px(confirmed_poll[1], STRONG) == 0
+        assert confirmed_poll is None or _px(confirmed_poll.confirmed, STRONG) == 0
         _drive_until(
             worker,
             generation,
             lambda confirmed, provisional: _px(confirmed, STRONG) == 200,
         )
-        version, canvas = worker.poll(generation, 0)
+        _snap = worker.poll(generation, 0)
+        _version, canvas = _snap.version, _snap.confirmed
         assert _px(canvas, STRONG) == 200
     finally:
         worker.stop()

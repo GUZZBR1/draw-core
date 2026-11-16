@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 import rr
+from draw.contracts import WarpedPage
 from draw.ink import accumulator as accumulator_mod
 from draw.ink import registration as registration_mod
 from draw.ink.config import InkConfig
@@ -85,7 +86,7 @@ def drive(sequence, config=None):
     gen = worker.new_generation()
     for prob, corners in sequence:
         clock.now += 1
-        worker.submit(prob, gen, corners, np.ones(prob.shape, bool))
+        worker.submit(WarpedPage(prob, gen, corners, np.ones(prob.shape, bool)))
         assert worker.pump()
         assert worker.error is None
     return worker

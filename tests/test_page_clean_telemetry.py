@@ -12,6 +12,7 @@ import time
 import numpy as np
 import pytest
 
+from draw.contracts import WarpedPage
 from draw.ink import worker as worker_mod
 
 H, W = 40, 60
@@ -41,12 +42,12 @@ def test_telemetry_counts_replaced_pending_and_stamps_stages(monkeypatch):
     try:
         warp = np.zeros((H, W, 3), dtype=np.uint8)
         generation = worker.new_generation()
-        worker.submit(warp, generation)
+        worker.submit(WarpedPage(warp, generation))
         assert fake.entered.wait(timeout=5.0)
         # A trabalhadora esta dentro da passada 1: o segundo submit
         # fica pendente e o terceiro o substitui (latest-wins).
-        worker.submit(warp, generation)
-        worker.submit(warp, generation)
+        worker.submit(WarpedPage(warp, generation))
+        worker.submit(WarpedPage(warp, generation))
         fake.release.set()
 
         version = 0
@@ -55,7 +56,7 @@ def test_telemetry_counts_replaced_pending_and_stamps_stages(monkeypatch):
         while time.monotonic() < deadline:
             got = worker.poll(generation, version)
             if got is not None:
-                version, _mask = got
+                version, _mask = got.version, got.confirmed
             snapshot = worker.telemetry_snapshot()
             if snapshot["passes"] >= 2:
                 break
@@ -99,7 +100,7 @@ def test_telemetry_snapshot_is_a_copy(monkeypatch):
     try:
         warp = np.zeros((H, W, 3), dtype=np.uint8)
         generation = worker.new_generation()
-        worker.submit(warp, generation)
+        worker.submit(WarpedPage(warp, generation))
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
             if worker.telemetry_snapshot()["passes"] >= 1:

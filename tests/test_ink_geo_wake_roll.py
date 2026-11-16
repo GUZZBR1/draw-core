@@ -10,6 +10,7 @@ repouso (o _quiet_passes zera a cada submit).
 
 import numpy as np
 
+from draw.contracts import WarpedPage
 from draw.ink import worker as worker_mod
 
 H, W = 40, 60
@@ -42,11 +43,11 @@ def test_stationary_sheet_after_rotated_landing_is_not_away():
     warp = np.zeros((H, W, 3), dtype=np.uint8)
     # A folha segue no mesmo lugar: o quad posicional e o mesmo
     # que gerou a ancora. O roll dos rotulos nao e deslocamento.
-    worker.submit(warp, 0, QUAD)
+    worker.submit(WarpedPage(warp, 0, QUAD))
     assert worker._geo_away is False
     # Nem a quietude pode ser zerada pela permutacao de rotulos.
     worker._quiet_passes = 3
-    worker.submit(warp, 0, QUAD)
+    worker.submit(WarpedPage(warp, 0, QUAD))
     assert worker._quiet_passes == 3
 
 
@@ -54,5 +55,5 @@ def test_real_movement_after_rotated_landing_is_still_away():
     worker = _worker_with_rolled_anchor(roll=1)
     warp = np.zeros((H, W, 3), dtype=np.uint8)
     moved = QUAD + np.array([[40.0, 0.0]], dtype=np.float32)
-    worker.submit(warp, 0, moved)
+    worker.submit(WarpedPage(warp, 0, moved))
     assert worker._geo_away is True

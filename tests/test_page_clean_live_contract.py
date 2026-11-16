@@ -17,6 +17,7 @@ import time
 import numpy as np
 import pytest
 
+from draw.contracts import WarpedPage
 from draw.ink import worker as worker_mod
 
 H, W = 120, 160
@@ -58,10 +59,10 @@ def test_new_ink_reaches_published_canvas_within_3_passes(monkeypatch):
         mask = None
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline:
-            worker.submit(warp, generation)
+            worker.submit(WarpedPage(warp, generation))
             got = worker.poll(generation, version)
             if got is not None:
-                version, mask = got
+                version, mask = got.version, got.confirmed
                 if int(np.count_nonzero(mask)) == 300:
                     break
             time.sleep(0.005)
@@ -72,10 +73,10 @@ def test_new_ink_reaches_published_canvas_within_3_passes(monkeypatch):
         new_ref = _mask([NEW_RECT]) > 0
         entered = False
         while time.monotonic() < deadline:
-            worker.submit(warp, generation)
+            worker.submit(WarpedPage(warp, generation))
             got = worker.poll(generation, version)
             if got is not None:
-                version, mask = got
+                version, mask = got.version, got.confirmed
                 hit = int(np.count_nonzero((mask > 0) & new_ref))
                 if hit >= 0.9 * int(np.count_nonzero(new_ref)):
                     entered = True

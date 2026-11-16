@@ -33,6 +33,7 @@ import cv2
 import numpy as np
 import pytest
 
+from draw.contracts import WarpedPage
 from draw.ink import accumulator as accumulator_mod
 from draw.ink import registration as registration_mod
 from draw.ink import worker as worker_mod
@@ -105,9 +106,9 @@ def _drive(worker, generation, ink, offsets, with_corners=True):
         before = worker.stats()["passes_total"]
         if with_corners:
             corners = Q0 - np.array(off, dtype=np.float32)
-            worker.submit(dummy, generation, corners)
+            worker.submit(WarpedPage(dummy, generation, corners))
         else:
-            worker.submit(dummy, generation)
+            worker.submit(WarpedPage(dummy, generation))
         deadline = time.monotonic() + 5.0
         while worker.stats()["passes_total"] <= before:
             if time.monotonic() > deadline:
@@ -163,7 +164,7 @@ def test_settled_ink_not_reprinted_under_wandering_geometry(
         _drive(worker, generation, ink, WANDER)
         got = worker.poll(generation, 0)
         assert got is not None
-        _version, canvas = got
+        _version, canvas = got.version, got.confirmed
         expected = _static_confirmed(len(WANDER))
         assert int(np.count_nonzero(canvas)) == int(np.count_nonzero(expected))
         assert np.array_equal(canvas > 0, expected > 0)
@@ -184,14 +185,14 @@ def test_new_ink_confirms_fast_under_wandering_geometry(
         _drive(worker, generation, ink, WANDER[:12])
         settled = worker.poll(generation, 0)
         assert settled is not None
-        assert np.count_nonzero(settled[1][BLOCK_B]) == 0
+        assert np.count_nonzero(settled.confirmed[BLOCK_B]) == 0
 
         # Tinta nova entra no mundo com a geometria andando.
         ink.with_b = True
         _drive(worker, generation, ink, WANDER[12:13])
         shown = worker.poll_display(generation, 0)
         assert shown is not None
-        _v, confirmed, provisional = shown
+        _v, confirmed, provisional = shown.version, shown.confirmed, shown.provisional
         assert (
             np.count_nonzero(confirmed[BLOCK_B])
             + np.count_nonzero(provisional[BLOCK_B])
@@ -199,11 +200,11 @@ def test_new_ink_confirms_fast_under_wandering_geometry(
         _drive(worker, generation, ink, WANDER[13:15])
         got = worker.poll(generation, 0)
         assert got is not None
-        assert np.count_nonzero(got[1][BLOCK_B]) == 100, (
+        assert np.count_nonzero(got.confirmed[BLOCK_B]) == 100, (
             "a tinta nova confirma pelo voto em ate 3 passadas"
         )
         # E o bloco assentado nao engordou com a viagem.
-        assert np.count_nonzero(got[1][BLOCK_A]) == 100
+        assert np.count_nonzero(got.confirmed[BLOCK_A]) == 100
     finally:
         worker.stop()
 
@@ -220,7 +221,7 @@ def test_moved_page_recovery_reuses_identical_canvas(monkeypatch):
         _drive(worker, generation, ink, WANDER)
         original = worker.poll(generation, 0)
         assert original is not None
-        canvas_before = original[1].copy()
+        canvas_before = original.confirmed.copy()
         assert np.count_nonzero(canvas_before) == 100
 
         # A folha desaparece do tracker e volta deslocada. A nova
@@ -231,7 +232,7 @@ def test_moved_page_recovery_reuses_identical_canvas(monkeypatch):
         _drive(worker, generation, ink, [(2, -1)])
         recovered = worker.poll(generation, 0)
         assert recovered is not None
-        assert np.array_equal(recovered[1], canvas_before), (
+        assert np.array_equal(recovered.confirmed, canvas_before), (
             "mover a mesma página deve reusar o canvas sem acumular uma cópia deslocada"
         )
         identity = next(
@@ -275,7 +276,7 @@ def test_changed_page_content_starts_a_clean_canvas(monkeypatch):
         _drive(worker, generation, ink, [(0, 0), (0, 0)])
         original = worker.poll(generation, 0)
         assert original is not None
-        assert np.count_nonzero(original[1][BLOCK_A]) == 100
+        assert np.count_nonzero(original.confirmed[BLOCK_A]) == 100
 
         generation = worker.new_generation(preserve_identity=True)
         ink.next_page = True
@@ -284,11 +285,17 @@ def test_changed_page_content_starts_a_clean_canvas(monkeypatch):
             assert (
                 worker._identity_events[-1]["decision"] == "deferred_switch_consensus"
             )
-            np.testing.assert_array_equal(worker.poll(generation, 0)[1], original[1])
+            np.testing.assert_array_equal(
+                worker.poll(generation, 0).confirmed, original.confirmed
+            )
         _drive(worker, generation, ink, [(0, 0)])
         shown = worker.poll_display(generation, 0)
         assert shown is not None
-        _version, confirmed, provisional = shown
+        _version, confirmed, provisional = (
+            shown.version,
+            shown.confirmed,
+            shown.provisional,
+        )
         assert np.count_nonzero(confirmed[BLOCK_A]) == 0
         assert np.count_nonzero(provisional[BLOCK_A]) == 0
         assert np.count_nonzero(provisional[BLOCK_B]) == 100
@@ -321,7 +328,7 @@ def test_without_corners_evidence_stays_unregistered(monkeypatch):
         _drive(worker, generation, ink, WANDER, with_corners=False)
         got = worker.poll(generation, 0)
         assert got is not None
-        grown = int(np.count_nonzero(got[1]))
+        grown = int(np.count_nonzero(got.confirmed))
         assert grown > int(np.count_nonzero(_static_confirmed(len(WANDER))))
     finally:
         worker.stop()
@@ -336,8 +343,11 @@ def test_malformed_corners_are_ignored(monkeypatch):
     try:
         generation = worker.new_generation()
         dummy = np.zeros((H, W, 3), dtype=np.uint8)
-        worker.submit(dummy, generation, np.zeros((3, 2)))
-        worker.submit(dummy, generation, "nao-e-quad")
+        with pytest.raises(ValueError):
+            WarpedPage(dummy, generation, np.zeros((3, 2)))
+        with pytest.raises(ValueError):
+            WarpedPage(dummy, generation, "nao-e-quad")
+        worker.submit(WarpedPage(dummy, generation))
         deadline = time.monotonic() + 5.0
         while worker.stats()["passes_total"] < 1:
             if time.monotonic() > deadline:

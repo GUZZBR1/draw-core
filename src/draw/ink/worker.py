@@ -7,6 +7,7 @@ from collections import deque
 import cv2
 import numpy as np
 
+from ..contracts import InkDisplaySnapshot, InkSnapshot
 from . import accumulator, identity, registration
 from . import anchor as anchor_mod
 from .config import InkConfig
@@ -324,10 +325,12 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._condition.notify_all()
             return self._generation
 
-    def submit(self, warped, generation, corners=None, visible=None, coverage=None):
-        """Entrega o warp mais recente (latest-wins).
+    def submit(self, page):
+        """Entrega a página retificada mais recente (latest-wins).
 
-        corners e o quad que retificou ESTE warp (os mesmos
+        page é o contracts.WarpedPage da passada: image é o warp,
+        generation a geração de sessão da folha. corners e o quad
+        que retificou ESTE warp (os mesmos
         cantos que o chamador passou ao warp_sheet): a
         trabalhadora registra a evidencia da passada na
         geometria ancora da geracao antes do voto. Cantos fora
@@ -353,6 +356,11 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         pose nova) nao congela a tinta real — ela ja e tinta —
         e a banda de mesa, que nunca foi tinta, segue vedada.
         """
+        warped = page.image
+        generation = page.generation
+        corners = page.corners
+        visible = page.visible
+        coverage = page.coverage
         if corners is not None:
             try:
                 corners = np.asarray(corners, dtype=np.float32)
@@ -554,8 +562,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             return snapshot
 
     def poll(self, generation, after_version):
-        """(versao, copia do canvas confirmado) se ha publicado
-        novo da geracao depois de after_version; senao None.
+        """InkSnapshot se ha publicado novo da geracao depois de
+        after_version; senao None.
 
         Este e o canal dos consumidores de canvas (snapshot,
         cursor, Paint, ponte): so tinta confirmada passa por aqui.
@@ -569,10 +577,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 or published[1] <= after_version
             ):
                 return None
-            return published[1], published[2].copy()
+            return InkSnapshot(version=published[1], confirmed=published[2])
 
     def poll_display(self, generation, after_version):
-        """(versao, confirmado, provisorio) para a tela, ou None.
+        """InkDisplaySnapshot para a tela, ou None.
 
         As camadas vao separadas para a exibicao pintar a
         provisoria em estilo distinto. Este canal e so de
@@ -586,10 +594,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 or published[1] <= after_version
             ):
                 return None
-            return (
-                published[1],
-                published[2].copy(),
-                published[3].copy(),
+            return InkDisplaySnapshot(
+                version=published[1],
+                confirmed=published[2],
+                provisional=published[3],
             )
 
     def _work(self):

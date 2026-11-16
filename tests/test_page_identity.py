@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 
+from draw.contracts import WarpedPage
 from draw.ink import identity as identity_mod
 from draw.ink import worker as worker_mod
 
@@ -39,7 +40,9 @@ def worker(monkeypatch):
 def drive(worker, generation, prob=None, corners=QUAD, visible=None):
     with worker._condition:
         before = worker._passes_total
-        worker.submit(page() if prob is None else prob, generation, corners, visible)
+        worker.submit(
+            WarpedPage(page() if prob is None else prob, generation, corners, visible)
+        )
         assert worker._condition.wait_for(
             lambda: worker._passes_total > before or worker._stopped, timeout=5
         ), "a passada nao executou"
@@ -52,7 +55,7 @@ def settle(worker):
     generation = worker.new_generation()
     for _ in range(4):
         drive(worker, generation)
-    canvas = worker.poll(generation, 0)[1]
+    canvas = worker.poll(generation, 0).confirmed
     np.testing.assert_array_equal(canvas > 0, page() > 0.7)
     return canvas
 
@@ -85,7 +88,7 @@ def test_occlusion_defers_and_preserves_canvas(worker):
         np.testing.assert_array_equal(worker._anchor_corners, anchor)
         np.testing.assert_array_equal(worker._identity_reference_corners, anchor)
         np.testing.assert_array_equal(worker._accumulator._confirmed, canvas)
-        np.testing.assert_array_equal(worker.poll(generation, 0)[1], canvas)
+        np.testing.assert_array_equal(worker.poll(generation, 0).confirmed, canvas)
 
     drive(worker, generation)
     event = last_event(worker)
@@ -97,7 +100,7 @@ def test_occlusion_defers_and_preserves_canvas(worker):
     assert worker._identity_reference_corners is None
     assert not worker._identity_recovery_requested
     np.testing.assert_array_equal(worker._anchor_corners, anchor)
-    np.testing.assert_array_equal(worker.poll(generation, 0)[1], canvas)
+    np.testing.assert_array_equal(worker.poll(generation, 0).confirmed, canvas)
 
 
 def test_deferral_fields_declared_in_all_states(worker):
@@ -141,7 +144,7 @@ def test_legitimate_page_turn_commits(worker):
         assert worker._identity_reference is reference
         np.testing.assert_array_equal(worker._identity_reference_corners, anchor)
         np.testing.assert_array_equal(worker._anchor_corners, anchor)
-        np.testing.assert_array_equal(worker.poll(generation, 0)[1], canvas)
+        np.testing.assert_array_equal(worker.poll(generation, 0).confirmed, canvas)
     drive(worker, generation, page(other=True))
     event = last_event(worker)
     assert event["decision"] == "new_page"
@@ -155,7 +158,7 @@ def test_legitimate_page_turn_commits(worker):
     for _ in range(3):
         drive(worker, generation, page(other=True))
     np.testing.assert_array_equal(
-        worker.poll(generation, 0)[1] > 0, page(other=True) > 0.7
+        worker.poll(generation, 0).confirmed > 0, page(other=True) > 0.7
     )
 
 
@@ -176,7 +179,7 @@ def test_switch_consensus_preserves_state_and_abstains(worker):
         np.testing.assert_array_equal(worker._identity_reference_corners, anchor)
         np.testing.assert_array_equal(worker._anchor_corners, anchor)
         np.testing.assert_array_equal(worker._accumulator._confirmed, canvas)
-        np.testing.assert_array_equal(worker.poll(generation, 0)[1], canvas)
+        np.testing.assert_array_equal(worker.poll(generation, 0).confirmed, canvas)
         assert not np.any(worker._accumulator._window[-1])
         with worker._condition:
             worker._generation_passes = worker_mod._REST_MIN_GENERATION_PASSES
@@ -197,8 +200,8 @@ def test_switch_consensus_publishes_reset_canvas(worker, blank):
     candidate = np.zeros(SHAPE, np.float32) if blank else page(other=True)
     for _ in range(2):
         drive(worker, generation, candidate)
-    version = worker.poll(generation, 0)[0]
-    display_version = worker.poll_display(generation, 0)[0]
+    version = worker.poll(generation, 0).version
+    display_version = worker.poll_display(generation, 0).version
     publishes = worker.telemetry_snapshot()["publishes"]
     drive(worker, generation, candidate)
     assert last_event(worker)["decision"] == "new_page"
@@ -206,9 +209,9 @@ def test_switch_consensus_publishes_reset_canvas(worker, blank):
     display = worker.poll_display(generation, display_version)
     assert published is not None
     assert display is not None
-    assert not np.any(published[1])
-    assert not np.any(display[1])
-    np.testing.assert_array_equal(display[2] > 0, candidate > 0.7)
+    assert not np.any(published.confirmed)
+    assert not np.any(display.confirmed)
+    np.testing.assert_array_equal(display.provisional > 0, candidate > 0.7)
     assert worker.telemetry_snapshot()["publishes"] == publishes + 1
 
 
@@ -252,7 +255,7 @@ def test_same_page_ends_pending_switch_without_consensus(worker):
     assert worker._identity_switch_votes == 0
     assert worker._identity_reference is None
     np.testing.assert_array_equal(worker._anchor_corners, anchor)
-    np.testing.assert_array_equal(worker.poll(generation, 0)[1], canvas)
+    np.testing.assert_array_equal(worker.poll(generation, 0).confirmed, canvas)
 
 
 def test_switch_consensus_telemetry_declares_deferral_fields(worker):
@@ -297,7 +300,7 @@ def test_switch_consensus_does_not_spend_or_reset_quarantine_budget(worker):
             drive(worker, generation, page(other=True))
             assert last_event(worker)["decision"] == "deferred_switch_consensus"
             assert worker._identity_defer_count == count - 1
-            np.testing.assert_array_equal(worker.poll(generation, 0)[1], canvas)
+            np.testing.assert_array_equal(worker.poll(generation, 0).confirmed, canvas)
         drive(
             worker,
             generation,
@@ -339,7 +342,8 @@ def test_quarantine_timeout(worker, monkeypatch, limit):
         assert event["deferred"] is True
         if count <= maximum:
             assert worker._identity_reference is not None
-            version, published = worker.poll(generation, 0)
+            _snap = worker.poll(generation, 0)
+            version, published = _snap.version, _snap.confirmed
             np.testing.assert_array_equal(published, canvas)
     assert last_event(worker)["decision"] == "quarantine_timeout"
     assert worker._identity_reference is None
@@ -349,17 +353,17 @@ def test_quarantine_timeout(worker, monkeypatch, limit):
     assert worker._anchor_corners is None
     lost_lock = worker.poll(generation, version)
     assert lost_lock is not None
-    assert not np.any(lost_lock[1])
+    assert not np.any(lost_lock.confirmed)
     display = worker.poll_display(generation, 0)
     assert display is not None
-    assert not np.any(display[1])
-    assert not np.any(display[2])
+    assert not np.any(display.confirmed)
+    assert not np.any(display.provisional)
     assert worker.error is None
     for _ in range(4):
         drive(worker, generation, page(other=True))
     np.testing.assert_array_equal(worker._anchor_corners, QUAD)
     np.testing.assert_array_equal(
-        worker.poll(generation, 0)[1] > 0, page(other=True) > 0.7
+        worker.poll(generation, 0).confirmed > 0, page(other=True) > 0.7
     )
     assert last_event(worker)["decision"] == "quarantine_timeout"
 

@@ -23,6 +23,7 @@ import time
 import numpy as np
 import pytest
 
+from draw.contracts import WarpedPage
 from draw.ink import worker as worker_mod
 
 H, W = 40, 60
@@ -49,7 +50,7 @@ def _feed(worker, generation, seconds):
     warp = np.zeros((H, W, 3), dtype=np.uint8)
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
-        worker.submit(warp, generation)
+        worker.submit(WarpedPage(warp, generation))
         time.sleep(0.005)
 
 
@@ -87,7 +88,7 @@ def test_total_rest_with_hand_present_and_still(monkeypatch):
         def feeder():
             warp = np.zeros((H, W, 3), dtype=np.uint8)
             while not stop.is_set():
-                worker.submit(warp, generation)
+                worker.submit(WarpedPage(warp, generation))
                 time.sleep(0.005)
 
         thread = threading.Thread(target=feeder, daemon=True)
@@ -154,13 +155,13 @@ def test_active_drawing_never_rests_even_without_motion_reports(monkeypatch):
         # reporte de movimento: a saida mudando segura acordado.
         deadline = time.monotonic() + 1.2
         while time.monotonic() < deadline:
-            worker.submit(warp, generation)
+            worker.submit(WarpedPage(warp, generation))
             time.sleep(0.005)
         assert not worker.stats()["resting"], "descansou no meio do desenho ativo"
         before = fake.calls
         deadline = time.monotonic() + 0.3
         while time.monotonic() < deadline:
-            worker.submit(warp, generation)
+            worker.submit(WarpedPage(warp, generation))
             time.sleep(0.005)
         assert fake.calls - before >= 4, "a cadencia ativa caiu desenhando"
     finally:
@@ -177,7 +178,7 @@ def test_motion_reports_block_rest_with_frozen_ink(monkeypatch):
         # de movimento a cada ~0,1 s por 1 s inteiro.
         deadline = time.monotonic() + 1.0
         while time.monotonic() < deadline:
-            worker.submit(warp, generation)
+            worker.submit(WarpedPage(warp, generation))
             worker.set_hand_presence(True, moved=True)
             time.sleep(0.1)
         assert not worker.stats()["resting"], "descansou com a mao em atividade"

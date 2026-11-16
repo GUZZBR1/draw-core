@@ -44,6 +44,7 @@ import numpy as np
 import pytest
 
 import rr
+from draw.contracts import WarpedPage
 from draw.ink import anchor as anchor_mod
 from draw.ink import registration as registration_mod
 from draw.ink import worker as worker_mod
@@ -90,7 +91,7 @@ def _content():
 def _drive(worker, generation, sequence):
     for prob, corners in sequence:
         before = worker.stats()["passes_total"]
-        worker.submit(prob, generation, corners)
+        worker.submit(WarpedPage(prob, generation, corners))
         deadline = time.monotonic() + 5.0
         while worker.stats()["passes_total"] <= before:
             assert time.monotonic() < deadline, "a passada nao executou"
@@ -101,7 +102,12 @@ def _run(sequence, stop=True, config=None):
     worker = worker_mod.PageCleanWorker(_ProbIsWarp(), config=config).start()
     generation = worker.new_generation()
     _drive(worker, generation, sequence)
-    _version, confirmed, _provisional = worker.poll_display(generation, 0)
+    _disp = worker.poll_display(generation, 0)
+    _version, confirmed, _provisional = (
+        _disp.version,
+        _disp.confirmed,
+        _disp.provisional,
+    )
     if stop:
         worker.stop()
     return worker, generation, confirmed
@@ -140,7 +146,8 @@ def test_settled_divergence_reanchors_once_state_untouched(fast):
     try:
         generation = worker.new_generation()
         _drive(worker, generation, sequence[:7])
-        version_mid, canvas_mid = worker.poll(generation, 0)
+        _snap = worker.poll(generation, 0)
+        version_mid, canvas_mid = _snap.version, _snap.confirmed
         # Salto (indice 4, nao conta) + assentadas 5 e 6 (streak
         # 1, 2): na 3a assentada (indice 7) o FOLLOW dispara — e
         # a publicacao e forcada nela.
@@ -149,7 +156,12 @@ def test_settled_divergence_reanchors_once_state_untouched(fast):
         _drive(worker, generation, sequence[8:])
         snapshot = worker.telemetry_snapshot()
         anchor = worker._anchor_corners.copy()
-        _version, confirmed, _provisional = worker.poll_display(generation, 0)
+        _disp = worker.poll_display(generation, 0)
+        _version, confirmed, _provisional = (
+            _disp.version,
+            _disp.confirmed,
+            _disp.provisional,
+        )
     finally:
         worker.stop()
     assert snapshot["anchor_reanchors"] == 1
@@ -164,7 +176,7 @@ def test_settled_divergence_reanchors_once_state_untouched(fast):
     assert reanchored == [False] * 7 + [True] + [False] * 2
     assert [r["follow_streak"] for r in snapshot["records"]][4:9] == [0, 1, 2, 0, 0]
     assert got is not None, "poll() nao publicou na passada da re-ancoragem"
-    _v, canvas_fire = got
+    _v, canvas_fire = got.version, got.confirmed
     assert np.array_equal(canvas_fire, canvas_mid), (
         "a troca de ancora nao pode deformar o canvas (carry = folha)"
     )
@@ -364,7 +376,7 @@ def _drive_hidden(worker, generation, prob, corners, count):
     hidden = np.zeros(prob.shape, bool)
     for _ in range(count):
         before = worker.stats()["passes_total"]
-        worker.submit(prob, generation, corners, hidden)
+        worker.submit(WarpedPage(prob, generation, corners, hidden))
         deadline = time.monotonic() + 5.0
         while worker.stats()["passes_total"] <= before:
             assert time.monotonic() < deadline, "a passada nao executou"

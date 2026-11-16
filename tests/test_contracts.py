@@ -11,9 +11,12 @@ from draw.contracts import (
     DetectionResult,
     FramePacket,
     GateInfo,
+    InkDisplaySnapshot,
+    InkSnapshot,
     InkState,
     PageIdentity,
     SheetQuad,
+    WarpedPage,
 )
 
 QUAD = np.array(
@@ -251,6 +254,97 @@ def test_ink_state_masks_and_anchor_are_read_only():
     with pytest.raises(ValueError):
         state.anchor_corners[0, 0] = 0.0
     confirmed[0, 0] = 255  # a fonte segue gravável
+
+
+# --- WarpedPage / InkSnapshot / InkDisplaySnapshot -------------------------
+
+
+def _warped_page(**overrides):
+    fields = {
+        "image": np.zeros((8, 8, 3), dtype=np.uint8),
+        "generation": 2,
+    }
+    fields.update(overrides)
+    return WarpedPage(**fields)
+
+
+def test_warped_page_read_only_fields():
+    image = np.zeros((8, 8, 3), dtype=np.uint8)
+    corners = QUAD.copy()
+    visible = np.ones((8, 8), dtype=bool)
+    coverage = np.zeros((8, 8), dtype=np.uint8)
+    page = _warped_page(
+        image=image, corners=corners, visible=visible, coverage=coverage
+    )
+    assert page.generation == 2
+    np.testing.assert_array_equal(page.corners, QUAD)
+    for field in (page.image, page.corners, page.visible, page.coverage):
+        assert not field.flags.writeable
+    with pytest.raises(ValueError):
+        page.visible[0, 0] = False
+    image[0, 0, 0] = 9  # a fonte segue gravável
+
+
+def test_warped_page_rejects_bad_fields():
+    with pytest.raises(ValueError):
+        _warped_page(image=np.zeros((8, 8, 4), dtype=np.uint8))
+    with pytest.raises(ValueError):
+        _warped_page(image=np.zeros((8, 8, 3), dtype=np.float32))
+    with pytest.raises(ValueError):
+        _warped_page(generation=-1)
+    with pytest.raises(ValueError):
+        _warped_page(corners=np.zeros((3, 2), dtype=np.float32))
+    with pytest.raises(ValueError):
+        _warped_page(visible=np.ones((8, 8), dtype=np.float32))
+    with pytest.raises(ValueError):
+        _warped_page(visible=np.ones((9, 9), dtype=bool))
+    with pytest.raises(ValueError):
+        _warped_page(coverage=np.ones((8, 8, 3), dtype=bool))
+
+
+def test_warped_page_accepts_2d_and_float_maps():
+    """image 2D aceita qualquer dtype (mapa de probabilidade
+    float32 dos page_clean falsos e warps de canal único)."""
+    page = _warped_page(image=np.zeros((8, 8), dtype=np.float32))
+    assert page.image.dtype == np.float32
+    assert page.corners is None and page.visible is None
+
+
+def test_warped_page_is_frozen():
+    page = _warped_page()
+    with pytest.raises(FrozenInstanceError):
+        page.generation = 3
+
+
+def test_ink_snapshot_copies_and_freezes():
+    source = np.zeros((4, 4), dtype=np.uint8)
+    snap = InkSnapshot(version=7, confirmed=source)
+    assert snap.version == 7
+    assert not snap.confirmed.flags.writeable
+    source[0, 0] = 255  # mutação posterior não atravessa a fronteira
+    assert snap.confirmed[0, 0] == 0
+    with pytest.raises(FrozenInstanceError):
+        snap.version = 8
+    with pytest.raises(ValueError):
+        InkSnapshot(version=1, confirmed=np.zeros((4, 4, 3), dtype=np.uint8))
+    with pytest.raises(ValueError):
+        InkSnapshot(version=1, confirmed=np.zeros((4, 4), dtype=np.float32))
+
+
+def test_ink_display_snapshot_same_shape_read_only():
+    confirmed = np.ones((4, 4), dtype=np.uint8)
+    provisional = np.zeros((4, 4), dtype=np.uint8)
+    snap = InkDisplaySnapshot(version=3, confirmed=confirmed, provisional=provisional)
+    assert not snap.confirmed.flags.writeable
+    assert not snap.provisional.flags.writeable
+    with pytest.raises(ValueError):
+        InkDisplaySnapshot(
+            version=3,
+            confirmed=np.zeros((5, 5), dtype=np.uint8),
+            provisional=provisional,
+        )
+    with pytest.raises(ValueError):
+        snap.confirmed[0, 0] = 0
 
 
 # --- fronteira de dependências --------------------------------------------
