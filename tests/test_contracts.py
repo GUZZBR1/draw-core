@@ -7,7 +7,14 @@ from dataclasses import FrozenInstanceError
 import numpy as np
 import pytest
 
-from draw.contracts import FramePacket, InkState, PageIdentity, SheetQuad
+from draw.contracts import (
+    DetectionResult,
+    FramePacket,
+    GateInfo,
+    InkState,
+    PageIdentity,
+    SheetQuad,
+)
 
 QUAD = np.array(
     [[100.0, 100.0], [500.0, 100.0], [500.0, 400.0], [100.0, 400.0]],
@@ -256,3 +263,74 @@ def test_contracts_import_leaves_out_heavy_dependencies():
         text=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+# --- DetectionResult ----------------------------------------------------
+
+
+def _detection_result(**overrides):
+    fields = {
+        "sequence": 1,
+        "corners": QUAD.copy(),
+        "verdict": "paper",
+        "captured_at": 12.5,
+        "detect_ms": 36.7,
+    }
+    fields.update(overrides)
+    return DetectionResult(**fields)
+
+
+def test_detection_result_corners_read_only_copy():
+    source = QUAD.copy()
+    result = _detection_result(corners=source)
+    np.testing.assert_array_equal(result.corners, QUAD)
+    assert not result.corners.flags.writeable
+    assert result.corners.dtype == np.float32
+    with pytest.raises(ValueError):
+        result.corners[0, 0] = 99.0
+    source[0, 0] = 99.0  # a fonte segue gravável
+    assert result.corners[0, 0] == QUAD[0, 0]
+
+
+def test_detection_result_rejects_bad_corners_shape():
+    with pytest.raises(ValueError):
+        _detection_result(corners=np.zeros((3, 2), dtype=np.float32))
+
+
+def test_detection_result_allows_paper_without_quad():
+    """'paper' sem quadrilátero é legítimo (presença sem posição):
+    diferente de SheetQuad, aqui os dois não precisam vir juntos."""
+    result = _detection_result(corners=None, verdict="paper")
+    assert result.corners is None and result.verdict == "paper"
+
+
+def test_detection_result_rejects_bad_verdict_and_negative_ms():
+    with pytest.raises(ValueError):
+        _detection_result(corners=None, verdict="maybe")
+    with pytest.raises(ValueError):
+        _detection_result(detect_ms=-1.0)
+    with pytest.raises(ValueError):
+        _detection_result(sequence=-1)
+
+
+def test_detection_result_masks_are_read_only_views():
+    coverage = np.zeros((8, 8), dtype=np.uint8)
+    hand = np.ones((8, 8), dtype=np.uint8)
+    result = _detection_result(coverage_mask=coverage, hand_mask=hand)
+    assert not result.coverage_mask.flags.writeable
+    assert not result.hand_mask.flags.writeable
+    with pytest.raises(ValueError):
+        result.coverage_mask[0, 0] = 1
+    coverage[0, 0] = 1  # a fonte segue gravável
+    with pytest.raises(ValueError):
+        _detection_result(coverage_mask=np.zeros((8, 8, 3), dtype=np.uint8))
+    with pytest.raises(ValueError):
+        _detection_result(hand_mask=np.zeros((8, 8), dtype=np.float32))
+
+
+def test_detection_result_gate_info_and_frozen():
+    gate = GateInfo(source="neural", presence_logit=0.32, edge_in=0.001)
+    result = _detection_result(gate_info=gate)
+    assert result.gate_info is gate
+    with pytest.raises(FrozenInstanceError):
+        result.detect_ms = 1.0

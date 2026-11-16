@@ -9,9 +9,9 @@ O contrato, com um detector falso que bloqueia de propósito:
 3. O resultado carrega o carimbo de captura do quadro que foi
    detectado, não o instante em que a detecção terminou.
 
-Cobre também o formato da tupla de resultado (5/6/7 elementos:
-rastro, portão e extras de cobertura) e o parâmetro coverage da
-trabalhadora, que decide se os extras da detecção são publicados.
+Cobre também o formato do DetectionResult publicado (campos
+opcionais de portão e cobertura) e o parâmetro coverage da
+trabalhadora, que decide se as máscaras da detecção são publicadas.
 """
 
 import threading
@@ -20,6 +20,7 @@ import time
 import numpy as np
 import pytest
 
+from draw.contracts import GateInfo
 from draw.tracker import SheetDetectionWorker, _gate_info_from_trace
 
 CORNERS = np.array([[0, 0], [10, 0], [10, 10], [0, 10]], dtype=np.float32)
@@ -80,17 +81,17 @@ def test_submit_never_blocks_and_latest_wins():
         assert time.monotonic() - started < 0.5
         detector.release.set()
         result = _wait_result(worker)
-        _seq, corners, verdict, captured_at, _ms = result
-        assert verdict == "paper"
-        assert np.array_equal(corners, CORNERS)
+        assert result.verdict == "paper"
+        assert np.array_equal(result.corners, CORNERS)
         # O poll devolve o resultado mais novo: o do terceiro
         # quadro, com o carimbo dele, nao o do primeiro.
+        captured_at = result.captured_at
         deadline = time.monotonic() + 5.0
         while captured_at != 100.2 and time.monotonic() < deadline:
-            newer = worker.poll(result[0])
+            newer = worker.poll(result.sequence)
             if newer is not None:
                 result = newer
-                captured_at = result[3]
+                captured_at = result.captured_at
             time.sleep(0.005)
         assert captured_at == 100.2
         stats = worker.stats()
@@ -127,10 +128,12 @@ def test_gate_info_from_trace():
     assert _gate_info_from_trace(None) is None
     assert _gate_info_from_trace({}) is None
     trace = {"source": "neural", "presence_logit": 0.32, "edge_in": 0.001}
-    assert _gate_info_from_trace(trace) == trace
+    assert _gate_info_from_trace(trace) == GateInfo(
+        source="neural", presence_logit=0.32, edge_in=0.001
+    )
 
 
-def test_worker_result_arity_with_and_without_trace():
+def test_worker_result_fields_with_and_without_trace():
     def detect_plain(_frame):
         return QUAD.copy(), "paper"
 
@@ -138,7 +141,9 @@ def test_worker_result_arity_with_and_without_trace():
     try:
         worker.submit(np.zeros((8, 8, 3), np.uint8), 1.0, 0)
         result = _poll_until(worker, 0)
-        assert len(result) == 5
+        assert result.gate_info is None
+        assert result.coverage_mask is None
+        assert result.hand_mask is None
     finally:
         worker.stop()
 
@@ -149,8 +154,9 @@ def test_worker_result_arity_with_and_without_trace():
     try:
         worker.submit(np.zeros((8, 8, 3), np.uint8), 1.0, 0)
         result = _poll_until(worker, 0)
-        assert len(result) == 6
-        assert result[5] == WEAK
+        assert result.gate_info == GateInfo(
+            source="neural", presence_logit=0.32, edge_in=0.001
+        )
     finally:
         worker.stop()
 
@@ -168,9 +174,8 @@ def test_worker_forwards_extras_with_coverage_on():
     try:
         worker.submit(np.zeros((8, 8, 3), np.uint8), 1.0, 0)
         result = _poll_until(worker, 0)
-        assert len(result) == 7
-        assert result[5] is None, "sem rastro de portão, a posição 5 fica vazia"
-        assert result[6] == {"coverage_mask": mask}
+        assert result.gate_info is None, "sem rastro de portão não há pacote"
+        np.testing.assert_array_equal(result.coverage_mask, mask)
     finally:
         worker.stop()
 
@@ -183,6 +188,7 @@ def test_worker_drops_extras_with_coverage_off():
     try:
         worker.submit(np.zeros((8, 8, 3), np.uint8), 1.0, 0)
         result = _poll_until(worker, 0)
-        assert len(result) == 5, "sem cobertura o resultado é a tupla de sempre"
+        assert result.coverage_mask is None
+        assert result.hand_mask is None
     finally:
         worker.stop()

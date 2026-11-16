@@ -19,6 +19,8 @@ from collections import deque
 import cv2
 import numpy as np
 
+from .contracts import DetectionResult, GateInfo
+
 _SHEET_NEAR_LIMIT_PX = 40.0
 
 
@@ -497,11 +499,11 @@ def _gate_info_from_trace(trace):
     # pacote — o logit sozinho é observabilidade antiga, não portão.
     if "edge_in" not in trace:
         return None
-    return {
-        "source": trace.get("source"),
-        "presence_logit": trace.get("presence_logit"),
-        "edge_in": trace.get("edge_in"),
-    }
+    return GateInfo(
+        source=trace.get("source"),
+        presence_logit=trace.get("presence_logit"),
+        edge_in=trace.get("edge_in"),
+    )
 
 
 # Teto da espera pela thread de deteccao na saida do app. Uma
@@ -582,9 +584,9 @@ class SheetDetectionWorker:
             self._condition.notify_all()
 
     def poll(self, after_seq):
-        """Resultado mais novo que after_seq, ou None. Nunca bloqueia."""
+        """DetectionResult mais novo que after_seq, ou None. Nao bloqueia."""
         with self._condition:
-            if self._result is None or self._result[0] <= after_seq:
+            if self._result is None or self._result.sequence <= after_seq:
                 return None
             return self._result
 
@@ -631,28 +633,18 @@ class SheetDetectionWorker:
                 self._completed += 1
                 self._last_detect_ms = detect_ms
                 self._result_seq += 1
-                result = (
-                    self._result_seq,
-                    corners,
-                    verdict,
-                    captured_at,
-                    detect_ms,
+                self._result = DetectionResult(
+                    sequence=self._result_seq,
+                    corners=corners,
+                    verdict=verdict,
+                    captured_at=captured_at,
+                    detect_ms=detect_ms,
+                    gate_info=_gate_info_from_trace(trace),
+                    coverage_mask=(
+                        extras.get("coverage_mask") if extras is not None else None
+                    ),
+                    hand_mask=extras.get("hand_mask") if extras is not None else None,
                 )
-                # Sexto elemento SÓ quando há rastro com os campos
-                # do portão (frente 88): sem rastro, o resultado é a
-                # tupla de 5 de sempre, byte a byte.
-                gate_info = _gate_info_from_trace(trace)
-                if gate_info is not None:
-                    result = result + (gate_info,)
-                # Sétimo elemento: extras da detecção (a máscara de
-                # cobertura, coverage=True). Se chega sem
-                # portão, a posição 5 é preenchida com None para a
-                # posição do extra não depender do rastro.
-                if extras is not None:
-                    if gate_info is None:
-                        result = result + (None,)
-                    result = result + (extras,)
-                self._result = result
                 self._condition.notify_all()
 
     def take_traces(self, upto_result_seq=None):
