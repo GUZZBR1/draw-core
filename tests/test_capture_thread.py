@@ -161,7 +161,17 @@ def test_latest_only_and_no_reprocess():
     time.sleep(0.3)
     item = source.wait_next(0, timeout=2.0)
     check("consumidor recebe quadro", item is not None)
-    _, _, seq = item
+    check(
+        "o retorno e um FramePacket do contrato",
+        item.image.shape == (48, 64, 3)
+        and item.image.dtype == np.uint8
+        and item.captured_at <= time.monotonic(),
+    )
+    check(
+        "imagem do pacote e somente-leitura",
+        not item.image.flags.writeable,
+    )
+    seq = item.sequence
     check(
         "quadro consumido e o mais novo, nao o primeiro da fila",
         seq >= capture.produced - 1,
@@ -175,7 +185,7 @@ def test_latest_only_and_no_reprocess():
     newer = source.wait_next(seq, timeout=2.0)
     check(
         "sequencia seguinte chega",
-        newer is not None and newer[2] > seq,
+        newer is not None and newer.sequence > seq,
     )
     source.stop()
     check("stop libera a captura", capture.released)
@@ -188,7 +198,7 @@ def test_no_reprocess_without_new_frame():
     time.sleep(0.2)
     item = source.wait_next(0, timeout=2.0)
     check("rajada consumida ate o ultimo quadro", item is not None)
-    _, _, seq = item
+    seq = item.sequence
     check("ultimo da rajada tem a sequencia da rajada", seq == 3, f"seq={seq}")
     again = source.wait_next(seq, timeout=0.3)
     check("sem quadro novo, a mesma sequencia nao volta", again is None)
@@ -316,8 +326,8 @@ def _run_latest(total_frames, period_s):
         item = source.wait_next(last_seq, timeout=10.0)
         if item is None:
             break
-        _frame, capture_ms, last_seq = item
-        ages.append(_now_ms() - capture_ms)
+        last_seq = item.sequence
+        ages.append(_now_ms() - item.captured_at * 1000)
         time.sleep(_process_seconds(consumed))
         consumed += 1
         if last_seq >= total_frames:

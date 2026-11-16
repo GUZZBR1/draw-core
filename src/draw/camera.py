@@ -22,6 +22,8 @@ from pathlib import Path
 
 import cv2
 
+from .contracts import FramePacket
+
 # Limite de falhas seguidas de leitura que declara a fonte morta.
 # Era a contagem do laco principal (15 read() falhos seguidos e o app
 # avisava e saia); com a leitura numa thread propria, a contagem mora
@@ -42,9 +44,10 @@ _PNG_DRAIN_SECONDS = 5.0
 class LatestFrameCapture:
     """Captura em thread separada que guarda so o quadro mais novo.
 
-    Uma thread le da captura sem parar e publica cada quadro com o
-    instante de captura (ms monotonicos, tirado logo que o read()
-    retorna), um numero de sequencia e a contagem de quadros
+    Uma thread le da captura sem parar e publica cada quadro como
+    contracts.FramePacket: imagem, instante de captura (monotonico,
+    tirado na thread logo que o read() retorna), numero de sequencia
+    e a contagem de quadros
     descartados (publicados e substituidos antes de alguem consumir).
     Quem consome espera por sequencia nova numa Condition: nao gira
     em vazio e nunca reprocessa o mesmo quadro. Os quadros que o
@@ -74,7 +77,7 @@ class LatestFrameCapture:
         self._frame = None
         self._seq = 0
         self._taken_seq = 0
-        self._capture_ms = 0
+        self._captured_at = 0.0
         self._dropped = 0
         self._failures = 0
         self._dead = False
@@ -109,7 +112,10 @@ class LatestFrameCapture:
                     return
             ok, frame = self._capture.read()
             if ok and frame is not None:
-                capture_ms = int(time.monotonic() * 1000)
+                # Carimbo da thread de captura, tirado assim que o
+                # read() retorna — o consumidor ve o instante de
+                # publicacao, nao o do proprio relogio.
+                captured_at = time.monotonic()
                 with self._condition:
                     if self._stopped:
                         return
@@ -117,7 +123,7 @@ class LatestFrameCapture:
                         self._dropped += 1
                     self._seq += 1
                     self._frame = frame
-                    self._capture_ms = capture_ms
+                    self._captured_at = captured_at
                     self._failures = 0
                     self._condition.notify_all()
             else:
@@ -134,9 +140,10 @@ class LatestFrameCapture:
     def wait_next(self, after_seq, timeout=None):
         """Espera um quadro com sequencia maior que after_seq.
 
-        Devolve (frame, capture_ms, seq). Devolve None quando a
-        fonte morreu, quando stop() foi chamado ou quando o timeout
-        vence sem quadro novo; quem chama distingue por dead.
+        Devolve um contracts.FramePacket (image, captured_at,
+        sequence) em sucesso. Devolve None quando a fonte morreu,
+        quando stop() foi chamado ou quando o timeout vence sem
+        quadro novo; quem chama distingue por dead.
         """
         with self._condition:
             self._condition.wait_for(
@@ -145,7 +152,11 @@ class LatestFrameCapture:
             )
             if self._seq > after_seq:
                 self._taken_seq = self._seq
-                return self._frame, self._capture_ms, self._seq
+                return FramePacket(
+                    image=self._frame,
+                    captured_at=self._captured_at,
+                    sequence=self._seq,
+                )
             return None
 
     @property
