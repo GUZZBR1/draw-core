@@ -53,11 +53,12 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
   const [webcamCardHovered, setWebcamCardHovered] = useState(false);
   const [webcamFocused, setWebcamFocused] = useState(false);
   const [webcamPinned, setWebcamPinned] = useState(false);
+  const [webcamDismissed, setWebcamDismissed] = useState(false);
   const [dark, setDark] = useState(readSavedTheme);
   const [, setViewportRevision] = useState(0);
   const hoverCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const webcamAnchorRef = useRef<HTMLDivElement>(null);
-  const showWebcamCard = isHome && !isScrolled && (webcamHovered || webcamCardHovered || webcamFocused || webcamPinned);
+  const showWebcamCard = isHome && !isScrolled && (webcamPinned || (!webcamDismissed && (webcamHovered || webcamCardHovered || webcamFocused)));
   const showDefinition = (brandHovered || cardHovered || brandFocused) && !showWebcamCard;
 
   function cancelHoverClose() {
@@ -72,6 +73,7 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
       setCardHovered(false);
       setWebcamHovered(false);
       setWebcamCardHovered(false);
+      setWebcamDismissed(false);
     }, 160);
   }
 
@@ -136,6 +138,7 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
     setWebcamCardHovered(false);
     setWebcamFocused(false);
     setWebcamPinned(false);
+    setWebcamDismissed(false);
   }, [isHome, location.pathname]);
 
   useEffect(() => {
@@ -144,6 +147,7 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
     setWebcamCardHovered(false);
     setWebcamFocused(false);
     setWebcamPinned(false);
+    setWebcamDismissed(false);
   }, [isScrolled]);
 
   useEffect(() => {
@@ -186,6 +190,7 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
         setWebcamCardHovered(false);
         setWebcamFocused(false);
         setWebcamPinned(false);
+        setWebcamDismissed(false);
       }
     };
     window.addEventListener('keydown', closeOnEscape);
@@ -298,8 +303,14 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
                     setBrandFocused(false);
                     setWebcamFocused(true);
                   }}
-                  onBlur={() => setWebcamFocused(false)}
-                  onClick={() => setWebcamPinned((pinned) => !pinned)}
+                  onBlur={() => {
+                    setWebcamFocused(false);
+                    setWebcamDismissed(false);
+                  }}
+                  onClick={() => {
+                    if (webcamPinned) setWebcamDismissed(true);
+                    setWebcamPinned(!webcamPinned);
+                  }}
                   whileHover={{ y: -1 }}
                   transition={{ duration: 0.18, ease: 'easeOut' }}
                 >
