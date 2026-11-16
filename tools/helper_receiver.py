@@ -414,9 +414,7 @@ def _selfcheck():
     with tempfile.TemporaryDirectory() as tmp:
         rec_path = Path(tmp) / "socket.drawcap"
         try:
-            recorded = record(
-                "127.0.0.1", port, rec_path, timeout=10, token=token
-            )
+            recorded = record("127.0.0.1", port, rec_path, timeout=10, token=token)
         except Exception as error:  # noqa: BLE001 - selfcheck reporta, nao levanta
             failures.append(f"record (socket->arquivo): {error}")
             print(f"FAIL record (socket->arquivo): {error}")
@@ -428,9 +426,7 @@ def _selfcheck():
             if not ok:
                 failures.append(message)
             if recorded != n:
-                failures.append(
-                    f"record gravou {recorded} frames, esperados {n}"
-                )
+                failures.append(f"record gravou {recorded} frames, esperados {n}")
                 print(f"FAIL record: {recorded} frames gravados, esperados {n}")
     thread.join(timeout=10)
 
