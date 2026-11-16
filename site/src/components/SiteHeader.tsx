@@ -11,8 +11,7 @@ import { Link, useLocation } from 'react-router-dom';
 
 const MORPH_DISTANCE = 180;
 
-function scrollProgress(value: number, reduceMotion: boolean | null) {
-  if (reduceMotion) return 0;
+function scrollProgress(value: number) {
   return Math.min(1, Math.max(0, value / MORPH_DISTANCE));
 }
 
@@ -77,7 +76,7 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
   }
 
   const progress = useTransform(scrollY, (value) =>
-    isHome ? scrollProgress(value, reduceMotion) : 1,
+    isHome ? scrollProgress(value) : 1,
   );
   const brandScale = useTransform(progress, (amount) => {
     const ratio = compactFontSize() / startFontSize();
