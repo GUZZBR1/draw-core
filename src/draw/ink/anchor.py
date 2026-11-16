@@ -1,33 +1,22 @@
 """Ancora da folha: migracao, arbitragem e follow da geometria."""
 
-import os
-
 import cv2
 import numpy as np
 
 from . import registration
 
-# Migracao de ancora intra-geracao (decisao A do Lucas, 2026-11-10;
-# draw-lab/live-audit-2026-11-10/12-estudo-pouso.md): quando a folha
-# se move de verdade e assenta em pose nova no meio da geracao (pouso
-# sustentado), o registro na ancora velha projeta a tinta nova como
-# segunda copia. Atras de DRAW_ANCHOR_MIGRATION (padrao 0): passadas
-# seguidas com deslocamento medio da grade sob a matriz de registro >
-# _ANCHOR_MIGRATION_DISPLACEMENT_PX contam; na
-# _ANCHOR_MIGRATION_PASSES-esima, todo o estado do acumulador e
-# re-projetado para a grade nova (substituicao, nunca acumulo) e a
-# ancora passa a ser a mediana dos quads do streak. O tremor do
+# Limiares de assentamento da geometria (medidos na frente 12,
+# draw-lab/live-audit-2026-11-10/12-estudo-pouso.md): passadas
+# seguidas com deslocamento medio da grade sob a matriz de registro
+# > _ANCHOR_MIGRATION_DISPLACEMENT_PX abrem evento; o evento fecha
+# na _ANCHOR_MIGRATION_PASSES-esima passada assentada. O tremor do
 # regime de registro (<= ~3 px) fica abaixo do limiar e spike de 1
-# passada nao sustenta.
-_ANCHOR_MIGRATION_ENV = "DRAW_ANCHOR_MIGRATION"
+# passada nao sustenta. A migracao v1 que estes limiares nomeavam
+# foi removida com a flag dela (veredito da propria prova, FALHAS
+# M2); os valores seguem como os limites da arbitragem e do follow.
 _ANCHOR_MIGRATION_DISPLACEMENT_PX = 8.0
 _ANCHOR_MIGRATION_PASSES = 3
 _ANCHOR_MIGRATION_GRID = 16
-
-
-def _anchor_migration_enabled():
-    value = os.environ.get(_ANCHOR_MIGRATION_ENV, "0").strip().lower()
-    return value in {"1", "true", "yes", "on"}
 
 
 # Arbitragem de ancora por conteudo (v3; frente 19, 2026-11-10;
@@ -45,18 +34,12 @@ def _anchor_migration_enabled():
 # POUSO troca a ancora SEM mover o estado; ESPURIO nao faz nada.
 # Enquanto o evento esta aberto, a passada NAO vota (visible=0): a
 # copia deslocada confirmava pelo voto antes de qualquer veredito
-# (mecanismo que reprovou a v2 sem abstencao). Atras de
-# DRAW_ANCHOR_ARBITRATION (padrao 0); a flag da v1 segue vetada.
-_ANCHOR_ARBITRATION_ENV = "DRAW_ANCHOR_ARBITRATION"
+# (mecanismo que reprovou a v2 sem abstencao). Ligado pelo
+# InkConfig.anchor_arbitration do preset de producao.
 _ARB_SETTLE_PX = 6.0
 _ARB_DELTA = 0.05
 _ARB_MIN_CANVAS_PX = 200
 _ARB_MIN_PASS_PX = 200
-
-
-def _anchor_arbitration_enabled():
-    value = os.environ.get(_ANCHOR_ARBITRATION_ENV, "0").strip().lower()
-    return value in {"1", "true", "yes", "on"}
 
 
 # Mobilidade da ancora por divergencia assentada (frente 34,
@@ -82,17 +65,11 @@ def _anchor_arbitration_enabled():
 # decisivo com acao pre-empta; spurious retem o FOLLOW pelo
 # episodio inteiro; indeterminate ou ausencia de veredito
 # (creep: a consistencia par-a-par nunca fecha) deixam a
-# geometria decidir. Atras de DRAW_ANCHOR_FOLLOW (padrao 0);
-# com ele ligado, o passo da migracao v1 nao roda.
-_ANCHOR_FOLLOW_ENV = "DRAW_ANCHOR_FOLLOW"
+# geometria decidir. Ligado pelo InkConfig.anchor_follow do
+# preset de producao.
 _FOLLOW_DISPLACEMENT_PX = _ANCHOR_MIGRATION_DISPLACEMENT_PX
 _FOLLOW_PASSES = _ANCHOR_MIGRATION_PASSES
 _FOLLOW_SETTLE_PX = 6.0
-
-
-def _anchor_follow_enabled():
-    value = os.environ.get(_ANCHOR_FOLLOW_ENV, "0").strip().lower()
-    return value in {"1", "true", "yes", "on"}
 
 
 def _matrix_grid_displacement(matrix, shape):
@@ -108,138 +85,11 @@ def _matrix_grid_displacement(matrix, shape):
 class _AnchorSteps:
     """Passos de ancora do worker: migracao, arbitragem, follow."""
 
-    def _anchor_migration_step(
-        self,
-        generation,
-        corners,
-        shape,
-        identity_owned,
-        reg_anchor_median,
-        reg_deadband,
-    ):
-        """Avanca o streak do pouso; migra na passada que o completa.
-
-        Chamado sob a Condition, com a flag ligada. Presenca perdida
-        (sem quad valido) e julgamento de identidade em curso nao sao
-        pouso: zeram o streak — a fronteira de geracao/identidade e a
-        dona desses eventos. Devolve o evento da migracao ou None.
-        """
-        old_anchor = self._anchor_corners
-        if identity_owned or corners is None or old_anchor is None:
-            self._migration_streak = 0
-            self._migration_quads = []
-            return None
-        matrix = registration._registration_matrix(old_anchor, corners, shape)
-        displacement = _matrix_grid_displacement(matrix, shape)
-        if displacement <= _ANCHOR_MIGRATION_DISPLACEMENT_PX:
-            self._migration_streak = 0
-            self._migration_quads = []
-            return None
-        self._migration_streak += 1
-        self._migration_quads.append(corners.copy())
-        if self._migration_streak < _ANCHOR_MIGRATION_PASSES:
-            return None
-        new_anchor = registration._median_anchor(self._migration_quads)
-        # Inversa do registro ancora-nova -> ancora-velha: leva o
-        # estado da grade velha para a nova.
-        migration = np.linalg.inv(
-            registration._registration_matrix(old_anchor, new_anchor, shape)
-        )
-        self._accumulator.migrate(migration)
-        self._anchor_corners = new_anchor
-        if reg_anchor_median:
-            self._anchor_samples = [quad.copy() for quad in self._migration_quads]
-        if reg_deadband:
-            self._reg_frozen_corners = new_anchor.copy()
-            self._reg_deadband_over = 0
-        self._anchor_migrations += 1
-        event = {
-            "generation": generation,
-            "pass_index": self._generation_passes,
-            "displacement_px": displacement,
-            "streak": self._migration_streak,
-            "anchor_delta_px": float(
-                np.max(np.linalg.norm(new_anchor - old_anchor, axis=1))
-            ),
-            "anchor_delta_mean_px": _matrix_grid_displacement(migration, shape),
-        }
-        self._migration_events.append(event)
-        self._migration_streak = 0
-        self._migration_quads = []
-        return event
-
     def _arb_close_event(self):
         self._arb_event_open = False
         self._arb_streak_quads = []
         self._arb_scores = []
         self._arb_snapshot = None
-
-    def _content_registration_guard(
-        self, raw, registered, visible, registered_visible, corners, identity_owned
-    ):
-        """Identidade de conteúdo vence reprojeção só com suporte positivo.
-
-        Enquanto a pose não assenta, não há voto. No pouso, só a âncora
-        muda: confirmado e janela continuam nas coordenadas da página.
-        """
-        info = {"reg_content_guard": True, "reg_content_blocked": False}
-        confirmed = self._accumulator._confirmed
-        if (
-            identity_owned
-            or corners is None
-            or self._anchor_corners is None
-            or self._anchor_roll
-            or confirmed is None
-        ):
-            self._content_guard_quads = []
-            return registered, registered_visible, info
-        displacement = _matrix_grid_displacement(
-            registration._registration_matrix(self._anchor_corners, corners, raw.shape),
-            raw.shape,
-        )
-        if displacement <= _ANCHOR_MIGRATION_DISPLACEMENT_PX:
-            self._content_guard_quads = []
-            return registered, registered_visible, info
-        snapshot = confirmed > 0
-        raw_evidence = raw if visible is None else np.where(visible, raw, 0.0)
-        reg_evidence = (
-            registered
-            if registered_visible is None
-            else np.where(registered_visible, registered, 0.0)
-        )
-        raw_mass, reg_mass = float(np.sum(raw_evidence)), float(np.sum(reg_evidence))
-        sp = float(np.sum(raw_evidence * snapshot)) / max(raw_mass, 1e-9)
-        sc = float(np.sum(reg_evidence * snapshot)) / max(reg_mass, 1e-9)
-        info.update(
-            reg_content_score_identity=sp,
-            reg_content_score_projected=sc,
-            reg_content_displacement_px=displacement,
-        )
-        enough = (
-            np.count_nonzero(snapshot) >= _ARB_MIN_CANVAS_PX
-            and np.count_nonzero(raw_evidence > self._accumulator.threshold)
-            >= _ARB_MIN_PASS_PX
-        )
-        if not enough or sp <= sc + _ARB_DELTA:
-            self._content_guard_quads = []
-            return registered, registered_visible, info
-        if any(
-            np.max(np.linalg.norm(corners - q, axis=1)) > _ARB_SETTLE_PX
-            for q in self._content_guard_quads
-        ):
-            self._content_guard_quads = []
-        self._content_guard_quads.append(corners.copy())
-        info["reg_content_streak"] = len(self._content_guard_quads)
-        if len(self._content_guard_quads) < _ANCHOR_MIGRATION_PASSES:
-            info["reg_content_blocked"] = True
-            return registered, np.zeros(raw.shape, dtype=bool), info
-        self._anchor_corners = registration._median_anchor(self._content_guard_quads)
-        self._anchor_samples = [q.copy() for q in self._content_guard_quads]
-        self._reg_frozen_corners = self._anchor_corners.copy()
-        self._reg_deadband_over = 0
-        self._content_guard_quads = []
-        info["reg_content_identity_won"] = True
-        return raw, visible, info
 
     def _follow_close_event(self):
         self._follow_event_open = False
@@ -261,7 +111,7 @@ class _AnchorSteps:
     ):
         """Avanca o evento de arbitragem; arbitra no fecho do streak.
 
-        Chamado sob a Condition, com DRAW_ANCHOR_ARBITRATION ligada.
+        Chamado sob a Condition, com a arbitragem ligada.
         Devolve (status, evento): "closed" (sem evento; a passada
         vota), "open" (evento aberto sem veredito; a passada NAO
         vota — a copia deslocada nao pode confirmar pelo voto
@@ -449,7 +299,7 @@ class _AnchorSteps:
         """Avanca o evento de divergencia assentada; re-ancora no
         fecho do streak.
 
-        Chamado sob a Condition, com DRAW_ANCHOR_FOLLOW ligada, DEPOIS
+        Chamado sob a Condition, com o follow ligado, DEPOIS
         do passo da arbitragem (arb_event e o veredito dela nesta
         passada, ou None). Devolve (status, evento): "closed" (sem
         evento; a passada vota), "open" (divergencia assentada em
@@ -524,10 +374,6 @@ class _AnchorSteps:
         if reg_deadband:
             self._reg_frozen_corners = new_anchor.copy()
             self._reg_deadband_over = 0
-        # A geometria sob a vigia mudou: a sequencia dela recomeca
-        # (o recall por passada segue valido; a ancora nova e o
-        # referencial corrente que o portao dela pressupoe).
-        self._identity_watch_streak = 0
         self._anchor_reanchors += 1
         event = {
             "generation": generation,

@@ -6,7 +6,7 @@ dizendo "sem mao", _pass_interval devolvia _IDLE_PROBE_SECONDS em
 93 de 102 intervalos — 1 passada/s — enquanto a confirmada crescia
 em quase toda passada. A sonda pressupoe "sem mao, sem tinta
 nova"; a saida desmentia o pressuposto e o escalonador nao ouvia a
-saida. Atras de DRAW_INK_ACTIVE_CADENCE (default OFF):
+saida.
 
 1. Flag desligada: sem mao, tinta mudando ou nao, a cadencia e a
    da sonda — comportamento de sempre, byte a byte.
@@ -74,116 +74,7 @@ def _patched(monkeypatch):
 
 
 @pytest.mark.slow
-def test_activity_cadence_off_keeps_probe_without_hand(monkeypatch):
-    monkeypatch.delenv("DRAW_INK_ACTIVE_CADENCE", raising=False)
-    _patched(monkeypatch)
-    fake = _ShiftingInk()
-    worker = worker_mod.PageCleanWorker(fake).start()
-    try:
-        generation = worker.new_generation()
-        worker.set_hand_presence(False)
-        # A confirmacao da saida da mao roda; depois, mesmo com a
-        # tinta mudando a cada passada, a cadencia e a da sonda.
-        _feed(worker, generation, 0.25)
-        before = fake.calls
-        _feed(worker, generation, 0.65)
-        probed = fake.calls - before
-        assert probed <= 3, (
-            f"flag desligada: {probed} passadas em 0,65 s sem mao; "
-            "a sonda (0,30 s) admite no maximo 3"
-        )
-    finally:
-        worker.stop()
-
-
-@pytest.mark.slow
-def test_activity_cadence_on_runs_active_while_output_changes(monkeypatch):
-    monkeypatch.setenv("DRAW_INK_ACTIVE_CADENCE", "1")
-    _patched(monkeypatch)
-    fake = _ShiftingInk()
-    worker = worker_mod.PageCleanWorker(fake).start()
-    try:
-        generation = worker.new_generation()
-        worker.set_hand_presence(False)
-        _feed(worker, generation, 0.25)
-        before = fake.calls
-        _feed(worker, generation, 0.65)
-        active = fake.calls - before
-        assert active >= 6, (
-            f"flag ligada, sem mao e com a saida mudando: {active} "
-            "passadas em 0,65 s; a cadencia ativa (0,02 s) pede >= 6"
-        )
-    finally:
-        worker.stop()
-
-
-@pytest.mark.slow
-def test_activity_cadence_on_settles_back_to_probe(monkeypatch):
-    monkeypatch.setenv("DRAW_INK_ACTIVE_CADENCE", "1")
-    _patched(monkeypatch)
-    fake = _ShiftingInk()
-    worker = worker_mod.PageCleanWorker(fake).start()
-    try:
-        generation = worker.new_generation()
-        worker.set_hand_presence(False)
-        _feed(worker, generation, 0.4)
-        # A tinta para de mudar, mas a pagina NAO assenta para o
-        # descanso total (a provisoria segue presente e o voto nao
-        # fecha quietude de confirmada neste material): esgotada a
-        # janela de atividade, a sonda ociosa volta a governar.
-        fake.moving = False
-        _feed(worker, generation, 0.5)
-        before = fake.calls
-        _feed(worker, generation, 0.65)
-        probed = fake.calls - before
-        assert probed <= 3, (
-            f"saida assentada: {probed} passadas em 0,65 s; a sonda "
-            "deveria ter voltado (maximo 3)"
-        )
-    finally:
-        worker.stop()
-
-
-def test_activity_cadence_rest_waits_for_provisional_quiet(monkeypatch):
-    monkeypatch.setenv("DRAW_INK_ACTIVE_CADENCE", "1")
-    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.25)
-    monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 1.0)
-    now = [2000.0]
-    fake = _ShiftingInk()
-    worker = worker_mod.PageCleanWorker(fake, clock=lambda: now[0])
-    generation = worker.new_generation()
-    worker.set_hand_presence(False)
-    warp = np.zeros((H, W, 3), dtype=np.uint8)
-
-    # Desenhando: a confirmada pode ate aquietar entre um traco e
-    # outro, mas a provisoria muda a cada passada — nada de
-    # descanso no meio do desenho.
-    for _ in range(14):
-        worker.submit(warp, generation)
-        now[0] += 0.30
-        worker.pump()
-    assert fake.calls >= 8
-    assert not worker.stats()["resting"], (
-        "com a provisoria viva, o descanso total nao pode fechar"
-    )
-
-    # Congelou: as duas camadas aquietam, a janela de atividade
-    # esgota e o descanso total volta a valer.
-    fake.moving = False
-    for _ in range(16):
-        worker.submit(warp, generation)
-        now[0] += 0.30
-        worker.pump()
-    assert worker.stats()["resting"], "pagina assentada deve descansar"
-    calls = fake.calls
-    worker.submit(warp, generation)
-    now[0] += 2.0
-    assert worker.pump() is False
-    assert fake.calls == calls, "em descanso, submit nao vira passada"
-
-
 def test_stale_generation_pass_skips_model(monkeypatch):
-    monkeypatch.delenv("DRAW_INK_ACTIVE_CADENCE", raising=False)
     fake = _ShiftingInk()
     worker = worker_mod.PageCleanWorker(fake)
     generation = worker.new_generation()

@@ -1,8 +1,5 @@
 """Registro da evidencia na geometria ancora e limites do voto."""
 
-import os
-import time
-
 import cv2
 import numpy as np
 
@@ -35,14 +32,6 @@ import numpy as np
 # ~168 ms da passada do modelo; geometria igual a da ancora (o
 # caso assentado, com o quad congelado) pula o warp.
 _REGISTRATION_IDENTITY_TOL = 1e-4
-
-
-_ECC_REFINE_ENV = "DRAW_ECC_REFINE"
-
-
-def _ecc_refinement_enabled():
-    value = os.environ.get(_ECC_REFINE_ENV, "0").strip().lower()
-    return value in {"1", "true", "yes", "on"}
 
 
 def _corners_page_matrix(corners, width, height):
@@ -102,10 +91,6 @@ def _registration_is_identity(matrix):
     )
 
 
-def _experimental_enabled(name):
-    return os.environ.get(name, "0").strip().lower() in ("1", "true", "yes", "on")
-
-
 # Protocolo inicial F-10: ausência forte, visível e persistente, com
 # testemunho positivo da mesma página. Não confundir apagar tudo com virada.
 _REMOVAL_LOW_PROB = 0.1
@@ -128,15 +113,15 @@ _REMOVAL_WITNESS_FLOOR_PX = 4000
 # live-audit-2026-11-10/, provas P2/P3a/P3b): o voto de tinta e
 # destruido pelo jitter do quad de registro, e o jitter real e
 # evento discreto (flip de modo do detector, pouso de salto), nao
-# ruido. Duas correcoes aprovadas em replay, ambas atras de flag e
+# ruido. Duas correcoes aprovadas em replay, ambas opt-in via InkConfig e
 # so sobre o quad que alimenta _registration_matrix (warp do app,
 # rastreador e exibicao intocados):
-# - DRAW_REG_ANCHOR_MEDIAN3: a ancora da geracao e a mediana por
+# - InkConfig.reg_anchor_median: a ancora da geracao e a mediana por
 #   componente dos cantos das _REG_ANCHOR_MEDIAN_SAMPLES primeiras
 #   passadas com quad valido (mediana das que houver antes disso),
 #   nao a 1a amostra — um quad espurio na passada 0 nao projeta a
 #   pagina inteira no quadro errado.
-# - DRAW_REG_DEADBAND: o registro usa um quad congelado por geracao
+# - InkConfig.reg_deadband: o registro usa um quad congelado por geracao
 #   enquanto o deslocamento maximo de canto contra ele for
 #   < _REG_DEADBAND_TAU_PX; >= tau por _REG_DEADBAND_RELEASE_PASSES
 #   passadas seguidas libera (o congelado salta para o quad da
@@ -144,21 +129,9 @@ _REMOVAL_WITNESS_FLOOR_PX = 4000
 #   diametro do jitter assentado: tau=3 foi medido e reprovado
 #   (libera no ruido). EMA/One Euro foram reprovados na P3b (a tinta
 #   fica para tras quando a pagina anda de verdade).
-_REG_ANCHOR_MEDIAN_ENV = "DRAW_REG_ANCHOR_MEDIAN3"
 _REG_ANCHOR_MEDIAN_SAMPLES = 3
-_REG_DEADBAND_ENV = "DRAW_REG_DEADBAND"
 _REG_DEADBAND_TAU_PX = 10
 _REG_DEADBAND_RELEASE_PASSES = 2
-
-
-def _reg_anchor_median_enabled():
-    value = os.environ.get(_REG_ANCHOR_MEDIAN_ENV, "0").strip().lower()
-    return value in {"1", "true", "yes", "on"}
-
-
-def _reg_deadband_enabled():
-    value = os.environ.get(_REG_DEADBAND_ENV, "0").strip().lower()
-    return value in {"1", "true", "yes", "on"}
 
 
 def _median_anchor(samples):
@@ -182,131 +155,32 @@ def _deadband_step(frozen, corners, over):
     return frozen, frozen, over, False, shift
 
 
-# Fonte fixada pelos hashes da pre-inscricao do replay v2.
-# fmt: off
-def _refine_ink_ecc(reference, observed, hand_mask=None):
-    """Refina somente o residuo na grade da ancora; devolve mapa, H e custo."""
-    started = time.perf_counter()
-    identity = np.eye(3, dtype=np.float64)
-    info = {
-        "ecc_rejected": False,
-        "ecc_converged": False,
-        "ecc_mode": "bypass",
-    }
-
-    def finish(aligned, matrix):
-        info["ecc_ms"] = (time.perf_counter() - started) * 1000.0
-        return aligned, matrix, info
-
-    if reference is None or reference.shape != observed.shape:
-        return finish(observed, identity)
-    ref = np.asarray(reference, dtype=np.float32)
-    obs = np.asarray(observed, dtype=np.float32)
-    if hand_mask is not None:
-        ref = ref.copy()
-        obs = obs.copy()
-        ref[hand_mask > 0] = 0.0
-        obs[hand_mask > 0] = 0.0
-    if np.array_equal(ref, obs):
-        return finish(obs, identity)
-    if (not np.isfinite(ref).all() or not np.isfinite(obs).all()
-            or np.count_nonzero(ref > 0.7) < 500
-            or np.count_nonzero(obs > 0.7) < 500):
-        return finish(obs, identity)
-    height, width = obs.shape
-    half_size = (width // 2, height // 2)
-    if min(half_size) < 2:
-        return finish(obs, identity)
-    ref_half = cv2.resize(ref, half_size, interpolation=cv2.INTER_AREA)
-    obs_half = cv2.resize(obs, half_size, interpolation=cv2.INTER_AREA)
-    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 100, 1e-5)
-    info["ecc_mode"] = "homography"
-    try:
-        _, estimated = cv2.findTransformECC(
-            ref_half, obs_half, np.eye(3, dtype=np.float32),
-            cv2.MOTION_HOMOGRAPHY, criteria, None, 5,
-        )
-        info["ecc_converged"] = True
-    except cv2.error:
-        info["ecc_mode"] = "affine"
-        try:
-            _, affine = cv2.findTransformECC(
-                ref_half, obs_half, np.eye(2, 3, dtype=np.float32),
-                cv2.MOTION_AFFINE, criteria, None, 5,
-            )
-            info["ecc_converged"] = True
-            estimated = np.vstack((affine, [0.0, 0.0, 1.0]))
-        except cv2.error:
-            info["ecc_rejected"] = True
-            return finish(obs, identity)
-    scale = np.diag([half_size[0] / width, half_size[1] / height, 1.0])
-    try:
-        full = np.linalg.inv(scale) @ estimated @ scale
-        align = np.linalg.inv(full)
-        if not np.isfinite(align).all() or abs(align[2, 2]) < 1e-12:
-            raise ValueError("homografia nao normalizavel")
-        align /= align[2, 2]
-        corners = np.array(
-            [[0, 0, 1], [width, 0, 1], [width, height, 1], [0, height, 1]],
-            dtype=np.float64,
-        )
-        projected = corners @ align.T
-        if (not np.isfinite(align).all() or np.linalg.det(align) <= 1e-6
-                or np.any(projected[:, 2] <= 1e-6)):
-            raise ValueError("homografia degenerada")
-        projected = projected[:, :2] / projected[:, 2:]
-        # A margem e medida na grade titular 850x1200, inclusive
-        # quando ferramentas/testes usam uma pagina reduzida.
-        displacement = np.linalg.norm(
-            (projected - corners[:, :2]) * [850.0 / width, 1200.0 / height],
-            axis=1,
-        )
-        if not np.isfinite(displacement).all() or displacement.max() > 55.0:
-            raise ValueError("residuo fora da margem")
-    except (np.linalg.LinAlgError, ValueError):
-        info["ecc_rejected"] = True
-        return finish(obs, identity)
-    aligned = cv2.warpPerspective(
-        obs, align, (width, height), flags=cv2.INTER_LINEAR,
-        borderValue=0.0,
-    )
-    return finish(aligned, align)
-
-
-def _register_ink_probability(prob, anchor, corners, reference, visible=None):
-    """Registra na ancora; o refinamento ECC fica opt-in via ambiente."""
-    info = {
-        "ecc_ms": 0.0,
-        "ecc_rejected": False,
-        "ecc_converged": False,
-        "ecc_mode": "bypass",
-    }
+def _register_ink_probability(prob, anchor, corners, visible=None):
+    """Registra a passada na geometria ancora; devolve (prob, visible)."""
     if visible is not None:
         prob = prob.copy()
         prob[~visible] = 0.0
     if anchor is None or corners is None:
-        return prob, visible, info
+        return prob, visible
     matrix = _registration_matrix(anchor, corners, prob.shape)
     if not _registration_is_identity(matrix):
         size = (prob.shape[1], prob.shape[0])
         prob = cv2.warpPerspective(
-            prob, matrix, size, flags=cv2.INTER_LINEAR, borderValue=0.0,
+            prob,
+            matrix,
+            size,
+            flags=cv2.INTER_LINEAR,
+            borderValue=0.0,
         )
         if visible is not None:
-            visible = cv2.warpPerspective(
-                visible.astype(np.uint8), matrix, size,
-                flags=cv2.INTER_NEAREST, borderValue=0,
-            ) > 0
-    hand_mask = None if visible is None else ~visible
-    if not _ecc_refinement_enabled():
-        info["ecc_mode"] = "disabled"
-        return prob, visible, info
-    prob, align, info = _refine_ink_ecc(reference, prob, hand_mask)
-    if visible is not None and not _registration_is_identity(align):
-        visible = cv2.warpPerspective(
-            visible.astype(np.uint8), align, (prob.shape[1], prob.shape[0]),
-            flags=cv2.INTER_NEAREST, borderValue=0,
-        ) > 0
-    return prob, visible, info
-
-# fmt: on
+            visible = (
+                cv2.warpPerspective(
+                    visible.astype(np.uint8),
+                    matrix,
+                    size,
+                    flags=cv2.INTER_NEAREST,
+                    borderValue=0,
+                )
+                > 0
+            )
+    return prob, visible

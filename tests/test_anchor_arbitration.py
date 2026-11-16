@@ -32,16 +32,10 @@ import pytest
 import rr
 from draw.ink import registration as registration_mod
 from draw.ink import worker as worker_mod
+from draw.ink.config import InkConfig
 
 SHAPE = (120, 85)
 BASE = rr.base_quad(SHAPE)
-FLAGS = (
-    "DRAW_ANCHOR_ARBITRATION",
-    "DRAW_ANCHOR_MIGRATION",
-    "DRAW_REG_ANCHOR_MEDIAN3",
-    "DRAW_REG_DEADBAND",
-    "DRAW_ECC_REFINE",
-)
 STEP = BASE + np.float32([120.0, 0.0])
 
 
@@ -58,9 +52,6 @@ class _ProbIsWarp:
 def fast(monkeypatch):
     monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.005)
     monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0.005)
-    for name in FLAGS:
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("DRAW_ANCHOR_ARBITRATION", "1")
     return monkeypatch
 
 
@@ -79,8 +70,8 @@ def _drive(worker, generation, sequence):
             time.sleep(0.001)
 
 
-def _run(sequence):
-    worker = worker_mod.PageCleanWorker(_ProbIsWarp()).start()
+def _run(sequence, config=None):
+    worker = worker_mod.PageCleanWorker(_ProbIsWarp(), config=config).start()
     try:
         generation = worker.new_generation()
         _drive(worker, generation, sequence)
@@ -296,16 +287,18 @@ def test_no_mass_defaults_to_anchor_swap(fast):
 
 
 @pytest.mark.slow
-def test_flag_off_is_byte_identical(fast):
-    fast.delenv("DRAW_ANCHOR_ARBITRATION", raising=False)
+def test_arbitration_off_is_byte_identical(fast):
     content = _content()
     sequence = _settled(content) + [(content, STEP.copy()) for _ in range(3)]
-    _worker, confirmed, _provisional = _run(sequence)
+    _worker, confirmed, _provisional = _run(
+        sequence, config=InkConfig(anchor_arbitration=False, anchor_follow=False)
+    )
     snapshot = _worker.telemetry_snapshot()
     assert "anchor_arbitration_actions" not in snapshot
-    # Sem a flag, o pouso segue o comportamento de hoje (a tinta
-    # nova entra registrada na ancora velha): canvas diferente do
-    # assentado puro, e nenhuma chave de arbitragem na telemetria.
+    # Sem a arbitragem, o pouso segue o comportamento de hoje (a
+    # tinta nova entra registrada na ancora velha): canvas
+    # diferente do assentado puro, e nenhuma chave de arbitragem
+    # na telemetria.
     _w2, truth, _p2 = _run(_settled(content))
     assert not np.array_equal(confirmed, truth)
     assert all("arb_verdict" not in r for r in snapshot["records"])

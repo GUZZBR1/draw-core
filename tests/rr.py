@@ -208,8 +208,8 @@ class ScenePageClean:
 class CountingAccumulator(LayeredInkAccumulator):
     """O acumulador real; só conta os sinais de virada e guarda o resultado."""
 
-    def __init__(self, threshold=0.7):
-        super().__init__(threshold)
+    def __init__(self, threshold=0.7, config=None):
+        super().__init__(threshold, config=config)
         self.turn_signals = 0
         self.last_result = None
 
@@ -243,11 +243,13 @@ class ReplayInkWorker(PageCleanWorker):
         return clone
 
 
-def make_ink_worker(page_clean, clock):
+def make_ink_worker(page_clean, clock, config=None):
     """`PageCleanWorker` real em modo síncrono, com histórico completo."""
-    worker = ReplayInkWorker(page_clean, clock=clock, history=(None, None))
+    worker = ReplayInkWorker(
+        page_clean, clock=clock, history=(None, None), config=config
+    )
     worker._accumulator = CountingAccumulator(
-        threshold=getattr(page_clean, "threshold", 0.7)
+        threshold=getattr(page_clean, "threshold", 0.7), config=worker._config
     )
     bind = getattr(page_clean, "bind", None)
     if bind is not None:

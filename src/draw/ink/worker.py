@@ -1,6 +1,5 @@
 """Trabalhadora pagina->tinta: fila, passadas, cadencia e voto."""
 
-import os
 import threading
 import time
 from collections import deque
@@ -10,6 +9,7 @@ import numpy as np
 
 from . import accumulator, identity, registration
 from . import anchor as anchor_mod
+from .config import InkConfig
 
 # Porta de ociosidade sem mao: no maximo uma sonda a cada
 # _IDLE_PROBE_SECONDS. A porta e a presenca da mao, nao um
@@ -73,7 +73,7 @@ _HAND_REST_STILL_SECONDS = 1.0
 
 
 # Evento geometrico que acorda o descanso (frente do cenario E3,
-# atras de DRAW_INK_FOLLOW_MOVE, default desligado): a premissa do
+# InkConfig.follow_move do preset de producao): a premissa do
 # descanso sem mao e "a pagina nao muda" — mas a folha que desliza
 # sem mao na cena mostra exatamente o contrario (medido em
 # 2026-11-12: o warp congelado seguiu vendo mesa e a trabalhadora
@@ -97,17 +97,6 @@ _PAGE_CLEAN_INTERVAL_SECONDS = 0.25
 
 # Teto da espera pela trabalhadora de tinta na saida do app.
 _PAGE_CLEAN_STOP_TIMEOUT_SECONDS = 5.0
-
-
-# Cadencia ativa por atividade (frente 92): com a flag ligada, a
-# sonda ociosa de _IDLE_PROBE_SECONDS nao governa enquanto a
-# saida do acumulador esta mudando — ver PageCleanWorker.
-_INK_ACTIVE_CADENCE_ENV = "DRAW_INK_ACTIVE_CADENCE"
-
-
-def _ink_active_cadence_enabled():
-    value = os.environ.get(_INK_ACTIVE_CADENCE_ENV, "0").strip().lower()
-    return value in {"1", "true", "yes", "on"}
 
 
 # Tamanho dos historicos de telemetria da trabalhadora: registros
@@ -164,8 +153,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         hand_masker=None,
         clock=time.monotonic,
         history=_WORKER_HISTORY,
+        config=None,
     ):
         self._page_clean = page_clean
+        self._config = config if config is not None else InkConfig()
         # Relogio monotonico injetavel: o padrao e o do processo;
         # replays com pump() passam o relogio da cena.
         self._clock = clock
@@ -189,21 +180,14 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         # chamadores que nao informam cantos (ferramentas, testes
         # antigos) seguem com a evidencia na propria geometria.
         self._anchor_corners = None
-        self._content_guard_quads = []
-        # Disciplina de registro (flags DRAW_REG_*, desligadas por
+        # Disciplina de registro (InkConfig.reg_*, desligadas por
         # padrao): amostras de cantos da ancora-mediana e o quad
         # congelado da banda morta, ambos por geracao.
         self._anchor_samples = []
         self._reg_frozen_corners = None
         self._reg_deadband_over = 0
         self._reg_deadband_releases = 0
-        # Migracao de ancora (flag DRAW_ANCHOR_MIGRATION): streak de
-        # passadas deslocadas e os quads delas, por geracao.
-        self._migration_streak = 0
-        self._migration_quads = []
-        self._anchor_migrations = 0
-        self._migration_events = deque(maxlen=128)
-        # Arbitragem de ancora (flag DRAW_ANCHOR_ARBITRATION): o
+        # Arbitragem de ancora (InkConfig.anchor_arbitration): o
         # evento aberto, o streak de assentamento com seus escores
         # por passada e o snapshot do canvas pre-evento.
         self._arb_event_open = False
@@ -212,7 +196,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._arb_snapshot = None
         self._arb_actions = 0
         self._arb_events = deque(maxlen=128)
-        # Mobilidade da ancora (flag DRAW_ANCHOR_FOLLOW): o evento
+        # Mobilidade da ancora (InkConfig.anchor_follow): o evento
         # de divergencia assentada, o streak de quads assentados e
         # a retencao por veredito spurious da arbitragem.
         self._follow_event_open = False
@@ -230,15 +214,11 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._identity_recovery_requested = False
         self._identity_defer_count = 0
         self._identity_switch_votes = 0
-        # Vigia de identidade (frente 28): armamento no meio da
-        # geracao + evento de divisao para o app colher.
-        self._identity_armed_mid_generation = False
-        self._identity_arm_reason = None
-        self._identity_split_event = None
-        self._identity_watch_streak = 0
-        self._identity_watch_prev_corners = None
+        # Degrau entre quads consecutivos (a entrada de cadencia
+        # geometrica do follow e do portao de remocao).
+        self._previous_corners = None
         self._accumulator = accumulator.LayeredInkAccumulator(
-            threshold=getattr(page_clean, "threshold", 0.7)
+            threshold=getattr(page_clean, "threshold", 0.7), config=self._config
         )
         self._last_pass_start = None
         self._passes_total = 0
@@ -274,8 +254,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         # _HAND_REST_STILL_SECONDS. None = nenhum movimento
         # reportado ainda — nao conta como parada.
         self._hand_motion_at = None
-        # Estado do evento geometrico (frente do cenario E3, atras
-        # de DRAW_INK_FOLLOW_MOVE): True enquanto o quad submetido
+        # Estado do evento geometrico (frente do cenario E3,
+        # InkConfig.follow_move): True enquanto o quad submetido
         # segue fora da moldura da ancora — o periodo em que o
         # descanso nao pode fechar.
         self._geo_away = False
@@ -291,9 +271,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._previous_pass_started_at = None
         self._telemetry_records = deque(maxlen=history[0])
         self._identity_events = deque(maxlen=history[1])
-        # Evento de virada (desligado por padrao): pendente
-        # (geracao, canvas confirmado anterior).
-        self._turn_event = None
 
     def start(self):
         self._thread.start()
@@ -310,11 +287,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._identity_recovery_requested = bool(preserve_identity)
             self._identity_defer_count = 0
             self._identity_switch_votes = 0
-            self._identity_armed_mid_generation = False
-            self._identity_arm_reason = None
-            self._identity_split_event = None
-            self._identity_watch_streak = 0
-            self._identity_watch_prev_corners = None
+            self._previous_corners = None
             if preserve_identity:
                 reference = self._accumulator._confirmed
                 self._identity_reference = (
@@ -330,11 +303,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 self._identity_reference_corners = None
             self._generation += 1
             self._anchor_samples = []
-            self._content_guard_quads = []
             self._reg_frozen_corners = None
             self._reg_deadband_over = 0
-            self._migration_streak = 0
-            self._migration_quads = []
             self._arb_event_open = False
             self._arb_streak_quads = []
             self._arb_scores = []
@@ -351,7 +321,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._pending = None
             self._published = None
             self._published_display = None
-            self._turn_event = None
             self._condition.notify_all()
             return self._generation
 
@@ -409,7 +378,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             if self._stopped or generation != self._generation:
                 return
             if (
-                registration._experimental_enabled("DRAW_INK_FOLLOW_MOVE")
+                self._config.follow_move
                 and corners is not None
                 and self._anchor_corners is not None
             ):
@@ -497,29 +466,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         Ver _REST_MIN_GENERATION_PASSES/_REST_QUIET_PASSES.
         """
         if (
-            registration._experimental_enabled("DRAW_INK_REMOVAL")
+            self._config.removal
             and self._accumulator._removal_streak is not None
             and np.any(self._accumulator._removal_streak)
         ):
-            return False
-        if (
-            registration._experimental_enabled("DRAW_REG_CONTENT_GUARD")
-            and self._content_guard_quads
-        ):
-            return False
-        if (
-            _ink_active_cadence_enabled()
-            and self._activity_quiet_passes < _NO_HAND_REST_AFTER_STILL_PASSES
-        ):
-            # Com a cadencia por atividade (frente 92), a
-            # quietude so da confirmada nao basta para descansar:
-            # o criterio conta PASSADAS, nao tempo — a 4
-            # passadas/s, 2 passadas quietas sao 0,5 s de cena e
-            # a trabalhadora descansava no meio do desenho lento,
-            # sem evento que a acordasse (submit nao acorda o
-            # descanso). Enquanto a camada provisoria — a tinta
-            # que o usuario ve chegando — mudou dentro da janela
-            # de atividade, a pagina nao assentou.
             return False
         if self._identity_recovery_requested and self._identity_reference is not None:
             return False
@@ -537,28 +487,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
     def _pass_interval(self):
         if self._at_rest():
             return None
-        if (
-            _ink_active_cadence_enabled()
-            and self._hand_state is False
-            and not self._confirm_once
-            and self._activity_quiet_passes < _NO_HAND_REST_AFTER_STILL_PASSES
-        ):
-            # Cadencia por atividade (frente 92, atras de
-            # DRAW_INK_ACTIVE_CADENCE, default OFF): a sonda
-            # ociosa pressupoe "sem mao, sem tinta nova" — mas
-            # quem desmente o pressuposto e a propria saida: na
-            # sessao viva 1794443693 a confirmada cresceu em
-            # quase toda pasada por geracoes inteiras com o
-            # intervalo travado em 1,0 s (93 de 102 intervalos),
-            # porque o sinal de presenca dizia "sem mao" enquanto
-            # o conteudo mudava. Enquanto a saida mudou nas
-            # ultimas _NO_HAND_REST_AFTER_STILL_PASSES passadas,
-            # a cadencia e a ativa; assentou, a sonda volta. O
-            # sinal e o do acumulador (a mesma familia que o
-            # descanso total usa), nunca diff de quadro. O regime
-            # sem sinal (None) ja tem a regra gemea via
-            # _still_passes, mais abaixo, e nao muda.
-            return _PAGE_CLEAN_INTERVAL_SECONDS
         if self._hand_state is False and not self._confirm_once:
             return _IDLE_PROBE_SECONDS
         if (
@@ -591,7 +519,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         """
         with self._condition:
             snapshot = {
-                "anchor_arbitration_enabled": anchor_mod._anchor_arbitration_enabled(),
+                "anchor_arbitration_enabled": self._config.anchor_arbitration,
                 "submits": self._telemetry_submits,
                 "submits_replaced": self._telemetry_replaced,
                 "passes": self._telemetry_passes,
@@ -602,19 +530,14 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     dict(event) for event in self._identity_events
                 ],
             }
-            if registration._reg_deadband_enabled() or self._reg_deadband_releases:
+            if self._config.reg_deadband or self._reg_deadband_releases:
                 snapshot["reg_deadband_releases"] = self._reg_deadband_releases
-            if anchor_mod._anchor_migration_enabled() or self._anchor_migrations:
-                snapshot["anchor_migrations"] = self._anchor_migrations
-                snapshot["anchor_migration_events"] = [
-                    dict(event) for event in self._migration_events
-                ]
-            if anchor_mod._anchor_arbitration_enabled() or self._arb_actions:
+            if self._config.anchor_arbitration or self._arb_actions:
                 snapshot["anchor_arbitration_actions"] = self._arb_actions
                 snapshot["anchor_arbitration_events"] = [
                     dict(event) for event in self._arb_events
                 ]
-            if anchor_mod._anchor_follow_enabled() or self._anchor_reanchors:
+            if self._config.anchor_follow or self._anchor_reanchors:
                 snapshot["anchor_reanchors"] = self._anchor_reanchors
                 snapshot["anchor_reanchor_events"] = [
                     dict(event) for event in self._follow_events
@@ -659,165 +582,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 published[2].copy(),
                 published[3].copy(),
             )
-
-    def take_turn_event(self, generation):
-        """Canvas anterior se a virada (U3) disparou nesta geracao.
-
-        Devolve a copia do canvas da pagina que acabou e limpa o
-        evento; None se nao ha evento pendente pra esta geracao.
-        Quem chama (o laco) salva o snapshot e abre geracao nova.
-        So dispara com DRAW_PAGE_TURN_EVENT=1 (ver o portao acima).
-        """
-        with self._condition:
-            if self._turn_event is None or self._turn_event[0] != generation:
-                return None
-            _gen, canvas = self._turn_event
-            self._turn_event = None
-            return canvas
-
-    def arm_identity_check(self, reason):
-        """Arma o juiz de identidade no meio da geracao corrente.
-
-        A referencia do julgamento e o canvas confirmado ate aqui:
-        se as proximas passadas casarem com ele (recall/containment
-        do juiz existente), era a mesma pagina; se o consenso disser
-        pagina nova, o canvas atual fecha como pagina terminada
-        (ver take_identity_split) e a geracao recomeca do zero sem
-        trocar de geracao no app ate ele colher o evento. Devolve
-        True se armou. Sem efeito com a vigia desligada, com um
-        julgamento ja em curso, ou com canvas confirmado abaixo do
-        piso (pagina quase vazia nao tem identidade a defender —
-        o caso degenerado das decisoes contra reference_px = 0).
-        """
-        with self._condition:
-            return self._arm_identity_check_locked(reason)
-
-    def _arm_identity_check_locked(self, reason, seed_votes=0):
-        if not identity._identity_watch_enabled():
-            return False
-        if self._identity_reference is not None:
-            return False
-        confirmed = self._accumulator._confirmed
-        if confirmed is None:
-            return False
-        reference_px = int(np.count_nonzero(confirmed > 0))
-        if reference_px < identity._IDENTITY_WATCH_MIN_CANVAS_PX:
-            return False
-        self._identity_reference = confirmed.copy()
-        self._identity_reference_corners = (
-            None if self._anchor_corners is None else self._anchor_corners.copy()
-        )
-        self._identity_recovery_requested = True
-        self._identity_defer_count = 0
-        self._identity_switch_votes = int(seed_votes)
-        self._identity_armed_mid_generation = True
-        self._identity_arm_reason = reason
-        self._identity_events.append(
-            {
-                "generation": self._generation,
-                "decision": "armed",
-                "reason": reason,
-                "recall": None,
-                "containment": None,
-                "reference_px": reference_px,
-                "visible_reference_px": None,
-                "geometry_registered": False,
-                "threshold": identity._PAGE_IDENTITY_MIN_RECALL,
-                "containment_threshold": identity._PAGE_IDENTITY_MIN_CONTAINMENT,
-                "ecc_refine_enabled": registration._ecc_refinement_enabled(),
-                "quarantine_reason": None,
-                "quarantine_frames": 0,
-                "deferred": False,
-            }
-        )
-        return True
-
-    def take_identity_split(self, generation):
-        """(canvas, motivo) se o juiz dividiu a geracao no meio.
-
-        Veredito new_page de um julgamento ARMADO no meio da
-        geracao: o canvas devolvido e a pagina que acabou (copia,
-        feita antes do reset do acumulador); quem chama salva o
-        snapshot e abre geracao nova, como no evento de virada.
-        None se nao ha divisao pendente pra esta geracao. O timeout
-        de quarentena NAO divide: segue a semantica existente
-        (perda de lock, sem veredito) e nada e guardado aqui.
-        """
-        with self._condition:
-            if (
-                self._identity_split_event is None
-                or self._identity_split_event[0] != generation
-            ):
-                return None
-            _gen, canvas, reason = self._identity_split_event
-            self._identity_split_event = None
-            return canvas, reason
-
-    def _identity_watch_step(
-        self, registered_prob, registered_visible, corners, step_px
-    ):
-        """Um passo da vigia de conteudo (lock ja segurado).
-
-        Mede o recall dilatado do canvas confirmado na passada
-        registrada — a mesma metrica do juiz, contra o canvas VIVO.
-        Devolve (recall, suspeita): recall None quando a passada
-        nao conta (oclusao da tinta anterior: nao conta e nao zera;
-        os demais casos zeram a sequencia); suspeita True quando a
-        passada mediu ruptura ou o juiz acabou de ser armado — a
-        passada suspeita NAO vota, para a tinta da pagina nova nao
-        confirmar no canvas da antiga antes do veredito (a medicao
-        acontece antes do voto, na mesma passada). Ruptura
-        sustentada arma o juiz via _arm_identity_check_locked; a
-        vigia nunca decide.
-        """
-        confirmed = self._accumulator._confirmed
-        if confirmed is None or corners is None or self._anchor_corners is None:
-            self._identity_watch_streak = 0
-            return None, False
-        prior = confirmed > 0
-        prior_px = int(np.count_nonzero(prior))
-        if prior_px < identity._IDENTITY_WATCH_MIN_CANVAS_PX:
-            self._identity_watch_streak = 0
-            return None, False
-        displacement = float(
-            np.max(np.linalg.norm(corners - self._anchor_corners, axis=1))
-        )
-        if displacement > identity._IDENTITY_WATCH_MAX_DISPLACEMENT_PX:
-            self._identity_watch_streak = 0
-            return None, False
-        if step_px is None or step_px > identity._IDENTITY_WATCH_MAX_STEP_PX:
-            # Geometria nao assentada (a folha ainda esta mexendo
-            # entre passadas): conteudo nao e decidivel neste
-            # material — nem conta, nem arma.
-            self._identity_watch_streak = 0
-            return None, False
-        seen = registered_prob > self._accumulator.threshold
-        if int(np.count_nonzero(seen)) < identity._IDENTITY_WATCH_MIN_SEEN_PX:
-            self._identity_watch_streak = 0
-            return None, False
-        if registered_visible is not None:
-            prior_visible = prior & registered_visible
-            prior_visible_px = int(np.count_nonzero(prior_visible))
-            if prior_visible_px < max(
-                identity._IDENTITY_MIN_VISIBLE_PX,
-                int(identity._IDENTITY_MIN_VISIBLE_FRACTION * prior_px),
-            ):
-                return None, False
-            prior = prior_visible
-            prior_px = prior_visible_px
-        kernel = np.ones((identity._IDENTITY_DILATION_KERNEL,) * 2, np.uint8)
-        seen_d = cv2.dilate(seen.astype(np.uint8), kernel) > 0
-        recall = float(np.count_nonzero(prior & seen_d) / prior_px)
-        if recall <= identity._IDENTITY_WATCH_MAX_RECALL:
-            self._identity_watch_streak += 1
-        else:
-            self._identity_watch_streak = 0
-        if self._identity_watch_streak >= identity._IDENTITY_WATCH_PASSES:
-            self._identity_watch_streak = 0
-            return recall, self._arm_identity_check_locked(
-                "content_rupture", seed_votes=identity._IDENTITY_WATCH_SEED_VOTES
-            )
-        return recall, self._identity_watch_streak >= 1
 
     def _work(self):
         while True:
@@ -959,22 +723,13 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         identity_switch_pending = False
         quarantine_reason = None
         quarantine_frames = 0
-        ecc_refine_enabled = int(registration._ecc_refinement_enabled())
         identity_geometry_registered = False
-        identity_chamfer = {}
-        reg_anchor_median = registration._reg_anchor_median_enabled()
-        reg_deadband = registration._reg_deadband_enabled()
-        anchor_migration = anchor_mod._anchor_migration_enabled()
-        anchor_arbitration = anchor_mod._anchor_arbitration_enabled()
-        anchor_follow = anchor_mod._anchor_follow_enabled()
+        reg_anchor_median = self._config.reg_anchor_median
+        reg_deadband = self._config.reg_deadband
+        anchor_arbitration = self._config.anchor_arbitration
+        anchor_follow = self._config.anchor_follow
         force_publish = False
         reg_info = {}
-        ecc_info = {
-            "ecc_ms": 0.0,
-            "ecc_rejected": False,
-            "ecc_converged": False,
-            "ecc_mode": "bypass",
-        }
         try:
             if visible is None and self._hand_masker is not None:
                 hand_mask = self._hand_masker.mask(warped)
@@ -985,7 +740,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 prob = ink_prob(warped)
             else:
                 prob = (self._page_clean.ink_mask(warped) > 0).astype(np.float32)
-            # Cobertura de folha (DRAW_SHEET_COVERAGE) viaja em
+            # Cobertura de folha (cobertura de folha do loop) viaja em
             # canal proprio ate depois do registro: o veto nao e
             # cego nem se confunde com oclusao de mao — ver o
             # gate de re-confirmacao abaixo, no espaco da ancora.
@@ -1088,23 +843,13 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     if confirmed is not None and confirmed.shape == prob.shape
                     else None
                 )
-                ecc_reference = (
-                    confirmed.astype(np.float32) / 255.0
-                    if (
-                        confirmed is not None
-                        and ink_prob is not None
-                        and (not first_pass or recovering)
-                    )
-                    else None
-                )
-            # ECC nao segura o lock que submit/poll/new_generation usam.
-            registered_prob, registered_visible, ecc_info = (
+            registered_prob, registered_visible = (
                 registration._register_ink_probability(
-                    prob, anchor, registration_corners, ecc_reference, visible
+                    prob, anchor, registration_corners, visible
                 )
             )
             if coverage is not None and coverage.shape == prob.shape:
-                # Gate de re-confirmacao (DRAW_SHEET_COVERAGE): onde
+                # Gate de re-confirmacao (cobertura de folha do loop): onde
                 # o warp nao e folha, so a tinta que a ancora JA
                 # conhece vota — re-confirmar e retrair o que
                 # existe, sim; tinta nova nascendo na mesa, nunca.
@@ -1168,19 +913,20 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 self._generation_passes = 0
                 self._quiet_passes = 0
             # Degrau geometrico entre passadas consecutivas
-            # (a vigia v3 so conta passada assentada).
+            # (o follow so conta passada assentada; o portao de
+            # remocao exige a mesma quietude).
             watch_step_px = None
             if corners is not None:
-                if self._identity_watch_prev_corners is not None:
+                if self._previous_corners is not None:
                     watch_step_px = float(
                         np.max(
                             np.linalg.norm(
-                                corners - self._identity_watch_prev_corners,
+                                corners - self._previous_corners,
                                 axis=1,
                             )
                         )
                     )
-                self._identity_watch_prev_corners = corners.copy()
+                self._previous_corners = corners.copy()
             # A decisao de identidade roda na primeira passada e,
             # enquanto estiver em quarentena, nas seguintes
             # — a referencia so e consumida quando a decisao sai.
@@ -1268,13 +1014,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                                 and identity_containment
                                 >= identity._PAGE_IDENTITY_MIN_CONTAINMENT
                             )
-                if (
-                    identity_reference is not None
-                    and ecc_refine_enabled
-                    and ecc_info.get("ecc_rejected")
-                ):
-                    identity_deferred = True
-                    quarantine_reason = "ecc_rejected"
                 if identity_deferred:
                     self._identity_defer_count += 1
                     quarantine_frames = self._identity_defer_count
@@ -1294,29 +1033,12 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 if identity_recovery_requested:
                     if identity_timed_out:
                         identity_decision = "quarantine_timeout"
-                    elif quarantine_reason == "ecc_rejected":
-                        identity_decision = "deferred_ecc_rejected"
                     elif identity_deferred:
                         identity_decision = "deferred_occlusion"
                     elif identity_switch_pending:
                         identity_decision = "deferred_switch_consensus"
                     else:
                         identity_decision = "same_page" if keep_page else "new_page"
-                    if identity._identity_chamfer_enabled():
-                        metric_seen = metric_reference = None
-                        if identity_reference is not None:
-                            metric_seen = candidate > self._accumulator.threshold
-                            metric_reference = (
-                                prior
-                                if identity_visible is None
-                                else prior & identity_visible
-                            )
-                        identity_chamfer = identity._identity_chamfer_fields(
-                            metric_seen,
-                            metric_reference,
-                            identity_decision,
-                            ecc_info,
-                        )
                     self._identity_events.append(
                         {
                             "generation": generation,
@@ -1330,9 +1052,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                             "containment_threshold": (
                                 identity._PAGE_IDENTITY_MIN_CONTAINMENT
                             ),
-                            **ecc_info,
-                            **identity_chamfer,
-                            "ecc_refine_enabled": ecc_refine_enabled,
                             "quarantine_reason": quarantine_reason,
                             "quarantine_frames": quarantine_frames,
                             "deferred": identity_deferred,
@@ -1354,8 +1073,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         self._anchor_samples = []
                         self._reg_frozen_corners = None
                         self._reg_deadband_over = 0
-                        self._migration_streak = 0
-                        self._migration_quads = []
                         self._arb_event_open = False
                         self._arb_streak_quads = []
                         self._arb_scores = []
@@ -1369,20 +1086,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         self._quiet_passes = 0
                         self._still_passes = 0
                     elif not keep_page:
-                        if (
-                            self._identity_armed_mid_generation
-                            and self._accumulator._confirmed is not None
-                        ):
-                            # Divisao no meio da geracao (vigia,
-                            # frente 28): a pagina que acabou sai
-                            # como evento pro app salvar ANTES do
-                            # reset — sem isto o canvas terminado
-                            # se perdia com o reset do veredito.
-                            self._identity_split_event = (
-                                generation,
-                                self._accumulator._confirmed.copy(),
-                                self._identity_arm_reason,
-                            )
                         self._accumulator.reset()
                         self._anchor_corners = corners
                         self._anchor_samples = (
@@ -1397,8 +1100,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     self._identity_recovery_requested = False
                     self._identity_defer_count = 0
                     self._identity_switch_votes = 0
-                    self._identity_armed_mid_generation = False
-                    self._identity_arm_reason = None
             identity_owned = (
                 first_pass
                 or identity_pending
@@ -1441,55 +1142,16 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 ):
                     # Pouso: a passada corrente entra ja
                     # registrada na ancora nova, por cima do
-                    # estado INTOCADO (a v3 nao move o estado;
-                    # com ECC ligado, a referencia e o canvas
-                    # como esta).
-                    arb_reference = (
-                        None
-                        if ecc_reference is None
-                        else self._accumulator._confirmed.astype(np.float32) / 255.0
-                    )
-                    registered_prob, registered_visible, ecc_info = (
+                    # estado INTOCADO (a v3 nao move o estado).
+                    registered_prob, registered_visible = (
                         registration._register_ink_probability(
                             prob,
                             self._anchor_corners,
                             (self._reg_frozen_corners if reg_deadband else corners),
-                            arb_reference,
                             visible,
                         )
                     )
                     force_publish = True
-            elif anchor_migration and not anchor_follow:
-                migration = self._anchor_migration_step(
-                    generation,
-                    corners,
-                    prob.shape,
-                    first_pass or identity_pending,
-                    reg_anchor_median,
-                    reg_deadband,
-                )
-                if migration is not None:
-                    # A passada corrente entra por cima do estado
-                    # migrado, ja registrada na ancora nova (com ECC
-                    # contra o canvas migrado, se ligado). Raro: uma
-                    # vez por pouso, entao pode segurar o lock.
-                    migrated_reference = (
-                        None
-                        if ecc_reference is None
-                        else self._accumulator._confirmed.astype(np.float32) / 255.0
-                    )
-                    registered_prob, registered_visible, ecc_info = (
-                        registration._register_ink_probability(
-                            prob,
-                            self._anchor_corners,
-                            (self._reg_frozen_corners if reg_deadband else corners),
-                            migrated_reference,
-                            visible,
-                        )
-                    )
-                    force_publish = True
-                reg_info["anchor_migration_streak"] = self._migration_streak
-                reg_info["anchor_migrated"] = migration is not None
             follow_abstain = False
             if anchor_follow:
                 # Mobilidade da ancora (frente 34): roda DEPOIS
@@ -1520,64 +1182,19 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         reg_info["arb_event_open"] = False
                     # A passada corrente entra ja registrada na
                     # ancora nova, por cima do estado INTOCADO
-                    # (a troca e so de ancora; com ECC ligado, a
-                    # referencia e o canvas como esta) — e o
-                    # evento de arbitragem que a abstinha foi
-                    # fechado pela re-ancoragem.
-                    follow_reference = (
-                        None
-                        if ecc_reference is None
-                        else self._accumulator._confirmed.astype(np.float32) / 255.0
-                    )
-                    registered_prob, registered_visible, ecc_info = (
+                    # (a troca e so de ancora) — e o evento de
+                    # arbitragem que a abstinha foi fechado pela
+                    # re-ancoragem.
+                    registered_prob, registered_visible = (
                         registration._register_ink_probability(
                             prob,
                             self._anchor_corners,
                             (self._reg_frozen_corners if reg_deadband else corners),
-                            follow_reference,
                             visible,
                         )
                     )
                     arbitration_abstain = False
                     force_publish = True
-            identity_watch_suspect = False
-            if (
-                identity._identity_watch_enabled()
-                and not identity_pending
-                and not first_pass
-                and not self._arb_event_open
-            ):
-                # Vigia de conteudo (frente 28): sem julgamento
-                # em curso, ruptura sustentada com geometria
-                # quieta arma o juiz de identidade. A passada
-                # corrente ainda nao votou neste ponto.
-                (
-                    reg_info["identity_watch_recall"],
-                    identity_watch_suspect,
-                ) = self._identity_watch_step(
-                    registered_prob, registered_visible, corners, watch_step_px
-                )
-                reg_info["identity_watch_streak"] = self._identity_watch_streak
-            content_blocked = False
-            if registration._experimental_enabled("DRAW_REG_CONTENT_GUARD"):
-                registered_prob, registered_visible, content_info = (
-                    self._content_registration_guard(
-                        prob,
-                        registered_prob,
-                        visible,
-                        registered_visible,
-                        corners,
-                        identity_owned
-                        or arbitration_abstain
-                        or follow_abstain
-                        or identity_watch_suspect,
-                    )
-                )
-                content_blocked = content_info["reg_content_blocked"]
-                force_publish = force_publish or content_info.get(
-                    "reg_content_identity_won", False
-                )
-                reg_info.update(content_info)
             if (
                 (first_pass or identity_pending)
                 and not identity_deferred
@@ -1589,10 +1206,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             else:
                 prob = registered_prob
                 visible = registered_visible
-            if identity_switch_pending or (
-                identity_deferred
-                and (quarantine_reason == "ecc_rejected" or identity_timed_out)
-            ):
+            if identity_switch_pending or (identity_deferred and identity_timed_out):
                 visible = np.zeros(prob.shape, dtype=bool)
             if arbitration_abstain:
                 # Evento de arbitragem aberto: a passada e
@@ -1605,23 +1219,13 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 # deslocada que a re-ancoragem existe para
                 # nao fabricar.
                 visible = np.zeros(prob.shape, dtype=bool)
-            if identity_watch_suspect:
-                # Suspeita de ruptura (vigia): a passada mediu o
-                # colapso do recall ou armou o juiz; ela nao
-                # vota, para a tinta da pagina nova nao
-                # confirmar no canvas da antiga antes do
-                # veredito de identidade.
-                visible = np.zeros(prob.shape, dtype=bool)
             result = self._accumulator.add(
                 prob,
                 visible,
                 removal_allowed=(
                     not identity_owned
-                    and not identity_watch_suspect
                     and not arbitration_abstain
                     and not follow_abstain
-                    and not content_blocked
-                    and not ecc_info.get("ecc_rejected")
                     and corners is not None
                     and watch_step_px is not None
                     and watch_step_px <= anchor_mod._ARB_SETTLE_PX
@@ -1629,29 +1233,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     <= anchor_mod._ANCHOR_MIGRATION_DISPLACEMENT_PX
                 ),
             )
-            if result.get("ink_vote_e3"):
-                # Telemetria da regra E3 (so com DRAW_INK_VOTE_E3
-                # ligada): fase da geracao e trilhas abertas.
-                reg_info["ink_vote_e3_passes"] = result["ink_vote_e3_passes"]
-                reg_info["ink_vote_e3_tracks_big"] = result["ink_vote_e3_tracks_big"]
-                reg_info["ink_vote_e3_tracks_small"] = result[
-                    "ink_vote_e3_tracks_small"
-                ]
-            if result.get("ink_vote_e4"):
-                # Telemetria da regra E5-S (so com
-                # DRAW_INK_VOTE_E4 ligada): fase e trilhas.
-                reg_info["ink_vote_e4_passes"] = result["ink_vote_e4_passes"]
-                reg_info["ink_vote_e4_tracks_big"] = result["ink_vote_e4_tracks_big"]
-                reg_info["ink_vote_e4_tracks_small"] = result[
-                    "ink_vote_e4_tracks_small"
-                ]
-                reg_info["ink_vote_e4_tracks_slow"] = result["ink_vote_e4_tracks_slow"]
-                reg_info["ink_vote_e4_tracks_thin"] = result["ink_vote_e4_tracks_thin"]
-                reg_info["ink_vote_e4_tracks_sub"] = result["ink_vote_e4_tracks_sub"]
-            if result.get("ink_vote_fast"):
-                # Telemetria do corte de latencia (so com
-                # DRAW_INK_VOTE_FAST ligada).
-                reg_info["ink_vote_fast"] = True
             if (
                 result["confirmed_changed"]
                 or result["provisional_changed"]
@@ -1675,19 +1256,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._provisional_px = result["provisional_px"]
             self._confirmed_px = result["confirmed_px"]
             self._retracted_px_total = result["retracted_px_total"]
-            # Virada: o acumulador detecta a cobertura sobre o
-            # canvas confirmado; o evento so e guardado atras
-            # de identity._page_turn_event_enabled(), desligado por
-            # padrao (hotfix 2026-11-01).
-            if (
-                result["turn"]
-                and identity._page_turn_event_enabled()
-                and self._turn_event is None
-            ):
-                self._turn_event = (
-                    generation,
-                    result["confirmed"],
-                )
             publish_confirmed = (
                 first_pass
                 or identity_timed_out
@@ -1723,10 +1291,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 self._telemetry_publishes += 1
             self._telemetry_records.append(
                 {
-                    **ecc_info,
-                    **identity_chamfer,
                     **reg_info,
-                    "ecc_refine_enabled": ecc_refine_enabled,
                     "anchor_arbitration_enabled": anchor_arbitration,
                     "sequence": self._telemetry_passes,
                     "pass_gap_s": None

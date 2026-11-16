@@ -1,4 +1,4 @@
-"""Mobilidade de ancora por divergencia assentada (DRAW_ANCHOR_FOLLOW).
+"""Mobilidade de ancora por divergencia assentada (InkConfig.anchor_follow).
 
 Frente 34 (2026-11-10; 34-desenho-ancora-movel.md): a vigia v3
 fechou o split errado do puxao e expos a pergunta sem dono — quem
@@ -47,6 +47,7 @@ import rr
 from draw.ink import anchor as anchor_mod
 from draw.ink import registration as registration_mod
 from draw.ink import worker as worker_mod
+from draw.ink.config import InkConfig
 
 
 def _load(name, path):
@@ -65,15 +66,6 @@ SHAPE = (120, 85)
 BASE = rr.base_quad(SHAPE)
 # Deslocamento sustentado: ~120 px de camera (~30 px da grade).
 STEP = BASE + np.float32([120.0, 0.0])
-FLAGS = (
-    "DRAW_ANCHOR_FOLLOW",
-    "DRAW_ANCHOR_ARBITRATION",
-    "DRAW_ANCHOR_MIGRATION",
-    "DRAW_REG_ANCHOR_MEDIAN3",
-    "DRAW_REG_DEADBAND",
-    "DRAW_ECC_REFINE",
-    "DRAW_IDENTITY_WATCH",
-)
 
 
 class _ProbIsWarp:
@@ -87,8 +79,6 @@ class _ProbIsWarp:
 def fast(monkeypatch):
     monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.005)
     monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0.005)
-    for name in FLAGS:
-        monkeypatch.delenv(name, raising=False)
     return monkeypatch
 
 
@@ -107,8 +97,8 @@ def _drive(worker, generation, sequence):
             time.sleep(0.001)
 
 
-def _run(sequence, stop=True):
-    worker = worker_mod.PageCleanWorker(_ProbIsWarp()).start()
+def _run(sequence, stop=True, config=None):
+    worker = worker_mod.PageCleanWorker(_ProbIsWarp(), config=config).start()
     generation = worker.new_generation()
     _drive(worker, generation, sequence)
     _version, confirmed, _provisional = worker.poll_display(generation, 0)
@@ -119,14 +109,6 @@ def _run(sequence, stop=True):
 
 def _settled(content, passes=4):
     return [(content, BASE.copy()) for _ in range(passes)]
-
-
-def test_flag_is_explicit_opt_in(monkeypatch):
-    for value, expected in ((None, False), ("0", False), ("1", True), ("on", True)):
-        monkeypatch.delenv("DRAW_ANCHOR_FOLLOW", raising=False)
-        if value is not None:
-            monkeypatch.setenv("DRAW_ANCHOR_FOLLOW", value)
-        assert anchor_mod._anchor_follow_enabled() is expected
 
 
 def test_constants_reuse_the_migration_and_settled_specs():
@@ -144,7 +126,6 @@ def test_constants_reuse_the_migration_and_settled_specs():
 
 @pytest.mark.slow
 def test_settled_divergence_reanchors_once_state_untouched(fast):
-    fast.setenv("DRAW_ANCHOR_FOLLOW", "1")
     content = _content()
     # settle 4 + salto (degrau grande: abre o evento, nao conta) +
     # 3 assentadas no destino (streak) + 2 de regime.
@@ -153,7 +134,9 @@ def test_settled_divergence_reanchors_once_state_untouched(fast):
         + [(content, STEP.copy()) for _ in range(4)]
         + [(content, STEP.copy()) for _ in range(2)]
     )
-    worker = worker_mod.PageCleanWorker(_ProbIsWarp()).start()
+    worker = worker_mod.PageCleanWorker(
+        _ProbIsWarp(), config=InkConfig(anchor_arbitration=False)
+    ).start()
     try:
         generation = worker.new_generation()
         _drive(worker, generation, sequence[:7])
@@ -196,7 +179,6 @@ def test_settled_divergence_reanchors_once_state_untouched(fast):
 
 @pytest.mark.slow
 def test_jitter_and_single_pass_spikes_never_reanchor(fast):
-    fast.setenv("DRAW_ANCHOR_FOLLOW", "1")
     content = _content()
     rng = np.random.default_rng(1)
     quads = []
@@ -226,7 +208,6 @@ def test_jitter_and_single_pass_spikes_never_reanchor(fast):
 
 @pytest.mark.slow
 def test_open_event_births_no_confirmation(fast):
-    fast.setenv("DRAW_ANCHOR_FOLLOW", "1")
     content = _content()
     other = np.zeros(SHAPE, np.float32)
     other[10:14, 10:40] = 1.0  # tinta nova, fora do canvas confirmado
@@ -252,7 +233,6 @@ def _creep_sequence(content, steps=10):
 
 @pytest.mark.slow
 def test_slow_creep_reanchors(fast):
-    fast.setenv("DRAW_ANCHOR_FOLLOW", "1")
     content = _content()
     worker, _generation, confirmed = _run(_creep_sequence(content), stop=False)
     try:
@@ -271,15 +251,14 @@ def test_slow_creep_reanchors(fast):
     # sequencia mancha 703 px; o FOLLOW nao pode manchar mais.
     _w2, _g2, truth = _run(_settled(content))
     assert np.count_nonzero(truth & ~confirmed) == 0
-    fast.delenv("DRAW_ANCHOR_FOLLOW", raising=False)
-    _w3, _g3, off = _run(_creep_sequence(content))
+    _w3, _g3, off = _run(
+        _creep_sequence(content), config=InkConfig(anchor_follow=False)
+    )
     assert np.count_nonzero(confirmed & ~truth) <= np.count_nonzero(off & ~truth)
 
 
 @pytest.mark.slow
 def test_slow_creep_with_arbitration_verdictless_follow_unlocks(fast):
-    fast.setenv("DRAW_ANCHOR_FOLLOW", "1")
-    fast.setenv("DRAW_ANCHOR_ARBITRATION", "1")
     content = _content()
     worker, _generation, _confirmed = _run(_creep_sequence(content), stop=False)
     try:
@@ -298,8 +277,6 @@ def test_slow_creep_with_arbitration_verdictless_follow_unlocks(fast):
 
 @pytest.mark.slow
 def test_decisive_landing_preempts_follow(fast):
-    fast.setenv("DRAW_ANCHOR_FOLLOW", "1")
-    fast.setenv("DRAW_ANCHOR_ARBITRATION", "1")
     content = _content()
     # O pouso da bancada de arbitragem: o veredito landing sai na
     # 3a passada deslocada e a ancora anda pelo conteudo.
@@ -318,8 +295,6 @@ def test_decisive_landing_preempts_follow(fast):
 
 @pytest.mark.slow
 def test_spurious_verdict_holds_the_episode(fast):
-    fast.setenv("DRAW_ANCHOR_FOLLOW", "1")
-    fast.setenv("DRAW_ANCHOR_ARBITRATION", "1")
     content = _content()
     # O quad mente (construcao da bancada de arbitragem): o
     # conteudo decide spurious e o episodio fica retido — sem
@@ -346,8 +321,6 @@ def test_spurious_verdict_holds_the_episode(fast):
 
 @pytest.mark.slow
 def test_indeterminate_verdict_lets_follow_fire_and_voting_resumes(fast):
-    fast.setenv("DRAW_ANCHOR_FOLLOW", "1")
-    fast.setenv("DRAW_ANCHOR_ARBITRATION", "1")
     # Canvas modesto (>= piso da arbitragem) e conteudo deslocado
     # que nao casa com nenhuma colocacao: Sp ~ Sc ~ 0.
     modest = np.zeros(SHAPE, np.float32)
@@ -400,7 +373,6 @@ def _drive_hidden(worker, generation, prob, corners, count):
 
 @pytest.mark.slow
 def test_pending_identity_blocks_follow(fast):
-    fast.setenv("DRAW_ANCHOR_FOLLOW", "1")
     content = _content()
     worker = worker_mod.PageCleanWorker(_ProbIsWarp()).start()
     try:
@@ -424,9 +396,7 @@ def test_pending_identity_blocks_follow(fast):
 
 
 @pytest.mark.slow
-def test_armed_judge_is_not_crossed(fast):
-    fast.setenv("DRAW_ANCHOR_FOLLOW", "1")
-    fast.setenv("DRAW_IDENTITY_WATCH", "1")
+def test_identity_judgment_is_not_crossed(fast):
     # Canvas denso (> piso de 2000 px da vigia) para o juiz armar.
     dense = np.zeros(SHAPE, np.float32)
     for row in range(8, 112, 10):
@@ -435,7 +405,7 @@ def test_armed_judge_is_not_crossed(fast):
     try:
         generation = worker.new_generation()
         _drive(worker, generation, [(dense, BASE.copy()) for _ in range(3)])
-        assert worker.arm_identity_check("pose_jump") is True
+        generation = worker.new_generation(preserve_identity=True)
         _drive_hidden(worker, generation, dense, STEP.copy(), 4)
         snapshot = worker.telemetry_snapshot()
         pending = worker._identity_recovery_requested
@@ -454,12 +424,11 @@ def test_armed_judge_is_not_crossed(fast):
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("flag_value", [None, "0"])
 @pytest.mark.parametrize("scenario", sorted(discipline.GOLDEN))
-def test_flag_off_canvas_is_byte_identical_to_baseline(fast, scenario, flag_value):
-    if flag_value is not None:
-        fast.setenv("DRAW_ANCHOR_FOLLOW", flag_value)
-    digest, snapshot = discipline._parity_canvas(scenario)
+def test_follow_off_canvas_is_byte_identical_to_baseline(fast, scenario):
+    digest, snapshot = discipline._parity_canvas(
+        scenario, config=InkConfig(anchor_follow=False)
+    )
     assert digest == discipline.GOLDEN[scenario]
     assert "anchor_reanchors" not in snapshot
     assert not any(k.startswith("follow_") for r in snapshot["records"] for k in r)
@@ -467,8 +436,7 @@ def test_flag_off_canvas_is_byte_identical_to_baseline(fast, scenario, flag_valu
 
 @pytest.mark.slow
 @pytest.mark.parametrize("scenario", sorted(discipline.GOLDEN))
-def test_flag_on_never_triggers_on_settled_jitter_replay(fast, scenario):
-    fast.setenv("DRAW_ANCHOR_FOLLOW", "1")
+def test_follow_never_triggers_on_settled_jitter_replay(fast, scenario):
     digest, snapshot = discipline._parity_canvas(scenario)
     assert snapshot["anchor_reanchors"] == 0
     assert digest == discipline.GOLDEN[scenario]

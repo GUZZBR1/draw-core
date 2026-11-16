@@ -1,10 +1,10 @@
-import cv2
 import numpy as np
 import pytest
 
 import rr
 from draw.ink import accumulator as accumulator_mod
 from draw.ink import registration as registration_mod
+from draw.ink.config import InkConfig
 from rr import _ProbIsWarp
 
 
@@ -15,18 +15,19 @@ def ink():
     return prob
 
 
+def _big_ink():
+    prob = np.zeros((260, 400), np.float32)
+    prob[10:190, 10:200] = 0.95  # ~34k px confirmados
+    return prob
+
+
 def confirmed(acc, prob):
     for _ in range(16):
         result = acc.add(prob, np.ones(prob.shape, bool))
     return result["confirmed"].copy()
 
 
-@pytest.mark.parametrize("e3", ["0", "1"])
-@pytest.mark.parametrize("fast", ["0", "1"])
-def test_erasure_is_published_and_does_not_resurrect(monkeypatch, e3, fast):
-    monkeypatch.setenv("DRAW_INK_REMOVAL", "1")
-    monkeypatch.setenv("DRAW_INK_VOTE_E3", e3)
-    monkeypatch.setenv("DRAW_INK_VOTE_FAST", fast)
+def test_erasure_is_published_and_does_not_resurrect():
     acc = accumulator_mod.LayeredInkAccumulator()
     prob = ink()
     original = confirmed(acc, prob)
@@ -50,8 +51,7 @@ def test_erasure_is_published_and_does_not_resurrect(monkeypatch, e3, fast):
 @pytest.mark.parametrize(
     "mode", ["occlusion", "no_visibility", "turn", "registration", "flicker"]
 )
-def test_negative_evidence_fails_closed(monkeypatch, mode):
-    monkeypatch.setenv("DRAW_INK_REMOVAL", "1")
+def test_negative_evidence_fails_closed(mode):
     acc = accumulator_mod.LayeredInkAccumulator()
     prob = ink()
     original = confirmed(acc, prob)
@@ -70,30 +70,18 @@ def test_negative_evidence_fails_closed(monkeypatch, mode):
     np.testing.assert_array_equal(result["confirmed"], original)
 
 
-def test_removal_off_is_byte_identical_and_monotone(monkeypatch):
-    results = []
-    for value in (None, "0"):
-        if value is None:
-            monkeypatch.delenv("DRAW_INK_REMOVAL", raising=False)
-        else:
-            monkeypatch.setenv("DRAW_INK_REMOVAL", value)
-        acc = accumulator_mod.LayeredInkAccumulator()
-        original = confirmed(acc, ink())
-        for _ in range(20):
-            result = acc.add(np.zeros_like(ink()), np.ones(ink().shape, bool))
-        np.testing.assert_array_equal(original, result["confirmed"])
-        assert "removed_confirmed_px" not in result
-        results.append(result["confirmed"])
-    np.testing.assert_array_equal(*results)
+def test_removal_off_is_byte_identical_and_monotone():
+    acc = accumulator_mod.LayeredInkAccumulator(config=InkConfig(removal=False))
+    original = confirmed(acc, ink())
+    for _ in range(20):
+        result = acc.add(np.zeros_like(ink()), np.ones(ink().shape, bool))
+    np.testing.assert_array_equal(original, result["confirmed"])
+    assert "removed_confirmed_px" not in result
 
 
-def drive(sequence, monkeypatch, flag="1"):
-    monkeypatch.setenv("DRAW_REG_CONTENT_GUARD", flag)
-    monkeypatch.setenv("DRAW_ANCHOR_ARBITRATION", "0")
-    monkeypatch.setenv("DRAW_ANCHOR_FOLLOW", "0")
-    monkeypatch.setenv("DRAW_ECC_REFINE", "0")
+def drive(sequence, config=None):
     clock = rr.SceneClock()
-    worker = rr.make_ink_worker(_ProbIsWarp(), clock)
+    worker = rr.make_ink_worker(_ProbIsWarp(), clock, config=config)
     gen = worker.new_generation()
     for prob, corners in sequence:
         clock.now += 1
@@ -103,53 +91,12 @@ def drive(sequence, monkeypatch, flag="1"):
     return worker
 
 
-def test_page_movement_does_not_reconfirm_duplicate_and_allows_new_ink(monkeypatch):
+def test_live_telemetry_records_arbitration_config(monkeypatch):
     prob = ink()
-    base = rr.base_quad(prob.shape)
-    moved = base + np.float32([80, 0])
-    initial = [(prob, base)] * 8
-    worker = drive(initial, monkeypatch)
-    original = worker._accumulator._confirmed.copy()
-    worker = drive(initial + [(prob, moved)] * 8, monkeypatch)
-    np.testing.assert_array_equal(worker._accumulator._confirmed, original)
-    records = worker.telemetry_snapshot()["records"]
-    assert sum(bool(r.get("reg_content_blocked")) for r in records) == 2
-    assert sum(bool(r.get("reg_content_identity_won")) for r in records) == 1
-    more = prob.copy()
-    more[80:90, 15:35] = 0.95
-    worker = drive(initial + [(prob, moved)] * 8 + [(more, moved)] * 8, monkeypatch)
-    assert (
-        np.count_nonzero(worker._accumulator._confirmed)
-        == np.count_nonzero(original) + 200
+    worker = drive(
+        [(prob, rr.base_quad(prob.shape))] * 8,
+        config=InkConfig(anchor_arbitration=False),
     )
-
-
-def test_spurious_geometry_is_not_reanchored(monkeypatch):
-    prob = ink()
-    base = rr.base_quad(prob.shape)
-    moved = base + np.float32([10, 0])
-    matrix = registration_mod._registration_matrix(base, moved, prob.shape)
-    raw = cv2.warpPerspective(prob, np.linalg.inv(matrix), (120, 100))
-    worker = drive([(prob, base)] * 8 + [(raw, moved)] * 8, monkeypatch)
-    np.testing.assert_array_equal(worker._anchor_corners, base)
-    assert not any(
-        r.get("reg_content_identity_won")
-        for r in worker.telemetry_snapshot()["records"]
-    )
-
-
-def test_content_guard_off_matches_unset(monkeypatch):
-    prob = ink()
-    base = rr.base_quad(prob.shape)
-    seq = [(prob, base)] * 8 + [(prob, base + [20, 0])] * 8
-    first = drive(seq, monkeypatch, "0")._accumulator._confirmed.copy()
-    second = drive(seq, monkeypatch, "")._accumulator._confirmed.copy()
-    np.testing.assert_array_equal(first, second)
-
-
-def test_live_telemetry_explicitly_records_disabled_flag(monkeypatch):
-    prob = ink()
-    worker = drive([(prob, rr.base_quad(prob.shape))] * 8, monkeypatch, "0")
     record = worker.telemetry_snapshot()["records"][-1]
     assert record["anchor_arbitration_enabled"] is False
     assert record["sequence"] == 8 and record["pass_gap_s"] == 1
@@ -157,13 +104,12 @@ def test_live_telemetry_explicitly_records_disabled_flag(monkeypatch):
     assert "new_confirmed_px" in record and "removed_confirmed_px" in record
 
 
-def test_worker_publishes_erasure_through_the_real_path(monkeypatch):
-    monkeypatch.setenv("DRAW_INK_REMOVAL", "1")
+def test_worker_publishes_erasure_through_the_real_path():
     prob = ink()
     base = rr.base_quad(prob.shape)
     erased = prob.copy()
     erased[65:75, 65:85] = 0
-    worker = drive([(prob, base)] * 16 + [(erased, base)] * 10, monkeypatch)
+    worker = drive([(prob, base)] * 16 + [(erased, base)] * 10)
     assert not worker._accumulator._confirmed[65:75, 65:85].any()
     assert np.all(worker._accumulator._confirmed[15:45, 15:55])
     records = worker.telemetry_snapshot()["records"]
@@ -171,71 +117,7 @@ def test_worker_publishes_erasure_through_the_real_path(monkeypatch):
     assert not worker._at_rest() or worker._accumulator._removal_streak.max() == 0
 
 
-def test_content_guard_defers_to_identity_and_arbitration(monkeypatch):
-    prob = ink()
-    base = rr.base_quad(prob.shape)
-    worker = drive([(prob, base)] * 8, monkeypatch)
-    before = worker._accumulator._confirmed.copy()
-    registered = np.roll(prob, 25, axis=1)
-    visible = np.ones(prob.shape, bool)
-    for _ in range(5):
-        _prob, _visible, info = worker._content_registration_guard(
-            prob, registered, visible, visible, base + [80, 0], True
-        )
-        assert not info["reg_content_blocked"]
-        assert not worker._content_guard_quads
-    np.testing.assert_array_equal(before, worker._accumulator._confirmed)
-    np.testing.assert_array_equal(base, worker._anchor_corners)
-
-
-def test_local_erasure_does_not_reopen_e3_initial_confirmation(monkeypatch):
-    monkeypatch.setenv("DRAW_INK_REMOVAL", "1")
-    monkeypatch.setenv("DRAW_INK_VOTE_E3", "1")
-    acc = accumulator_mod.LayeredInkAccumulator()
-    prob = ink()
-    confirmed(acc, prob)
-    noisy = prob.copy()
-    noisy[85:88, 85:88] = 0.95  # 9 px: rejected by E3's new-component rule.
-    visible = np.ones(prob.shape, bool)
-    for _ in range(10):
-        acc.add(noisy, visible)
-    assert not acc._confirmed[85:88, 85:88].any()
-    erased = noisy.copy()
-    erased[65:75, 65:85] = 0
-    for _ in range(16):
-        acc.add(erased, visible)
-    assert not acc._confirmed[65:75, 65:85].any()
-    assert not acc._confirmed[85:88, 85:88].any()
-
-
-@pytest.mark.parametrize("height,width", [(5, 10), (10, 20), (40, 80)])
-@pytest.mark.parametrize("fast", ["0", "1"])
-def test_e3_lateral_tracks_allow_erasure_then_redraw(monkeypatch, height, width, fast):
-    monkeypatch.setenv("DRAW_INK_REMOVAL", "1")
-    monkeypatch.setenv("DRAW_INK_VOTE_E3", "1")
-    monkeypatch.setenv("DRAW_INK_VOTE_FAST", fast)
-    acc = accumulator_mod.LayeredInkAccumulator()
-    initial = np.zeros((260, 400), np.float32)
-    initial[10:180, 10:200] = 0.95
-    confirmed(acc, initial)
-    with_side = initial.copy()
-    region = np.s_[200 : 200 + height, 250 : 250 + width]
-    with_side[region] = 0.95
-    confirmed(acc, with_side)
-    assert np.all(acc._confirmed[region] == 255)
-    confirmed(acc, initial)
-    assert not acc._confirmed[region].any()
-    confirmed(acc, with_side)
-    assert np.all(acc._confirmed[region] == 255)
-
-
-def _big_ink():
-    prob = np.zeros((260, 400), np.float32)
-    prob[10:190, 10:200] = 0.95  # ~34k px confirmados
-    return prob
-
-
-def test_witness_floor_unblocks_stale_canvas(monkeypatch):
+def test_witness_floor_unblocks_stale_canvas():
     """retained < 65% mas >= piso: a testemunha existe e a remocao corre.
 
     O catch-22 medido no sim-hand: mais de ~35% do canvas velho e os
@@ -244,7 +126,6 @@ def test_witness_floor_unblocks_stale_canvas(monkeypatch):
     4k px de re-testemunho comprovam o modelo vivo e a evidencia
     negativa dele conta.
     """
-    monkeypatch.setenv("DRAW_INK_REMOVAL", "1")
     acc = accumulator_mod.LayeredInkAccumulator()
     prob = _big_ink()
     confirmed(acc, prob)
@@ -260,9 +141,8 @@ def test_witness_floor_unblocks_stale_canvas(monkeypatch):
     assert np.all(acc._confirmed[10:190, 110:200] == 255)
 
 
-def test_witness_floor_keeps_total_darkness_closed(monkeypatch):
+def test_witness_floor_keeps_total_darkness_closed():
     """Modelo escurecendo por inteiro segue vedado: nada de varredura."""
-    monkeypatch.setenv("DRAW_INK_REMOVAL", "1")
     acc = accumulator_mod.LayeredInkAccumulator()
     prob = _big_ink()
     original = confirmed(acc, prob)
@@ -273,7 +153,7 @@ def test_witness_floor_keeps_total_darkness_closed(monkeypatch):
     np.testing.assert_array_equal(acc._confirmed > 0, original > 0)
 
 
-def test_absence_streak_survives_unwitnessed_and_occlusion(monkeypatch):
+def test_absence_streak_survives_unwitnessed_and_occlusion():
     """Passada sem testemunha ou pixel ocluido seguram o streak.
 
     A ausencia do F-10 precisa ser persistente, nao consecutiva:
@@ -281,7 +161,6 @@ def test_absence_streak_survives_unwitnessed_and_occlusion(monkeypatch):
     interromper a contagem a cada buraco congelava a copia
     defasada para sempre.
     """
-    monkeypatch.setenv("DRAW_INK_REMOVAL", "1")
     acc = accumulator_mod.LayeredInkAccumulator()
     prob = _big_ink()
     confirmed(acc, prob)

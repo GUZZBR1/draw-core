@@ -4,7 +4,6 @@ import numpy as np
 import pytest
 
 from draw.ink import identity as identity_mod
-from draw.ink import registration as registration_mod
 from draw.ink import worker as worker_mod
 
 SHAPE = (120, 100)
@@ -28,29 +27,11 @@ class Model:
 
 @pytest.fixture
 def worker(monkeypatch):
-    monkeypatch.setenv("DRAW_ECC_REFINE", "1")
-    monkeypatch.setenv("DRAW_IDENTITY_CHAMFER", "0")
-    monkeypatch.setenv("DRAW_PAGE_TURN_EVENT", "1")
     monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0)
     monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0)
-    control = {"rejected": False}
-
-    def refine(reference, observed, hand_mask=None):
-        return (
-            observed,
-            np.eye(3),
-            {
-                "ecc_rejected": control["rejected"] and reference is not None,
-                "ecc_converged": False,
-                "ecc_mode": "affine",
-                "ecc_ms": 0.0,
-            },
-        )
-
-    monkeypatch.setattr(registration_mod, "_refine_ink_ecc", refine)
     instance = worker_mod.PageCleanWorker(Model()).start()
     try:
-        yield instance, control
+        yield instance
     finally:
         instance.stop()
 
@@ -80,21 +61,23 @@ def last_event(worker):
     return worker.telemetry_snapshot()["page_identity_events"][-1]
 
 
-def test_ecc_rejected_defers_and_preserves_canvas(worker):
-    worker, control = worker
+def test_occlusion_defers_and_preserves_canvas(worker):
     canvas = settle(worker)
     anchor = worker._anchor_corners.copy()
     generation = worker.new_generation(preserve_identity=True)
     reference = worker._identity_reference
-    control["rejected"] = True
     for count in range(1, 4):
-        record = drive(worker, generation, corners=QUAD + [30, 15])
+        record = drive(
+            worker,
+            generation,
+            corners=QUAD + [30, 15],
+            visible=np.zeros(SHAPE, bool),
+        )
         event = last_event(worker)
-        assert event["decision"] == "deferred_ecc_rejected"
-        assert event["quarantine_reason"] == "ecc_rejected"
+        assert event["decision"] == "deferred_occlusion"
+        assert event["quarantine_reason"] == "occlusion"
         assert event["deferred"] is True
         assert event["quarantine_frames"] == count
-        assert event["ecc_rejected"] is True
         assert record["page_identity_decision"] == event["decision"]
         assert record["quarantine_frames"] == count
         assert worker._identity_reference is reference
@@ -103,9 +86,7 @@ def test_ecc_rejected_defers_and_preserves_canvas(worker):
         np.testing.assert_array_equal(worker._identity_reference_corners, anchor)
         np.testing.assert_array_equal(worker._accumulator._confirmed, canvas)
         np.testing.assert_array_equal(worker.poll(generation, 0)[1], canvas)
-        assert worker.take_turn_event(generation) is None
 
-    control["rejected"] = False
     drive(worker, generation)
     event = last_event(worker)
     assert event["decision"] == "same_page"
@@ -119,13 +100,8 @@ def test_ecc_rejected_defers_and_preserves_canvas(worker):
     np.testing.assert_array_equal(worker.poll(generation, 0)[1], canvas)
 
 
-@pytest.mark.parametrize("enabled", [0, 1])
-@pytest.mark.parametrize("chamfer", [0, 1])
-def test_flag_telemetry_declared_in_all_states(worker, monkeypatch, enabled, chamfer):
-    worker, control = worker
-    monkeypatch.setenv("DRAW_ECC_REFINE", str(enabled))
-    monkeypatch.setenv("DRAW_IDENTITY_CHAMFER", str(chamfer))
-    # Recuperacao sem referencia tambem declara o estado do flag.
+def test_deferral_fields_declared_in_all_states(worker):
+    # Recuperacao sem referencia tambem declara os campos de quarentena.
     generation = worker.new_generation(preserve_identity=True)
     drive(worker, generation)
     assert last_event(worker)["decision"] == "new_page"
@@ -136,15 +112,10 @@ def test_flag_telemetry_declared_in_all_states(worker, monkeypatch, enabled, cha
     drive(worker, generation)
     assert last_event(worker)["decision"] == "same_page"
     generation = worker.new_generation(preserve_identity=True)
-    control["rejected"] = True
-    drive(worker, generation, page(other=True))
-    if enabled:
-        assert last_event(worker)["decision"] == "deferred_ecc_rejected"
-        control["rejected"] = False
-        drive(worker, generation, page(other=True))
     for _ in range(2):
-        assert last_event(worker)["decision"] == "deferred_switch_consensus"
         drive(worker, generation, page(other=True))
+        assert last_event(worker)["decision"] == "deferred_switch_consensus"
+    drive(worker, generation, page(other=True))
     assert last_event(worker)["decision"] == "new_page"
     drive(worker, generation, page(other=True))
     assert worker.telemetry_snapshot()["records"][-1]["page_identity_decision"] is None
@@ -152,17 +123,12 @@ def test_flag_telemetry_declared_in_all_states(worker, monkeypatch, enabled, cha
         worker.telemetry_snapshot()["records"]
         + worker.telemetry_snapshot()["page_identity_events"]
     ):
-        assert record["ecc_refine_enabled"] == enabled
-        assert type(record["ecc_refine_enabled"]) is int
-        assert type(record["ecc_rejected"]) is bool
-        assert "quarantine_frames" in record
-        assert "deferred" in record
+        assert "quarantine_reason" in record
+        assert type(record["deferred"]) is bool
+        assert type(record["quarantine_frames"]) is int
 
 
-@pytest.mark.parametrize("enabled", [0, 1])
-def test_legitimate_page_turn_commits(worker, monkeypatch, enabled):
-    worker, _ = worker
-    monkeypatch.setenv("DRAW_ECC_REFINE", str(enabled))
+def test_legitimate_page_turn_commits(worker):
     canvas = settle(worker)
     anchor = worker._anchor_corners.copy()
     generation = worker.new_generation(preserve_identity=True)
@@ -179,7 +145,6 @@ def test_legitimate_page_turn_commits(worker, monkeypatch, enabled):
     drive(worker, generation, page(other=True))
     event = last_event(worker)
     assert event["decision"] == "new_page"
-    assert event["ecc_rejected"] is False
     assert event["quarantine_frames"] == 0
     assert not event["deferred"]
     assert worker._identity_reference is None
@@ -195,7 +160,6 @@ def test_legitimate_page_turn_commits(worker, monkeypatch, enabled):
 
 
 def test_switch_consensus_preserves_state_and_abstains(worker):
-    worker, _ = worker
     canvas = settle(worker)
     anchor = worker._anchor_corners.copy()
     worker.set_hand_presence(False)
@@ -214,7 +178,6 @@ def test_switch_consensus_preserves_state_and_abstains(worker):
         np.testing.assert_array_equal(worker._accumulator._confirmed, canvas)
         np.testing.assert_array_equal(worker.poll(generation, 0)[1], canvas)
         assert not np.any(worker._accumulator._window[-1])
-        assert worker.take_turn_event(generation) is None
         with worker._condition:
             worker._generation_passes = worker_mod._REST_MIN_GENERATION_PASSES
             worker._quiet_passes = worker_mod._REST_QUIET_PASSES
@@ -229,7 +192,6 @@ def test_switch_consensus_preserves_state_and_abstains(worker):
 
 @pytest.mark.parametrize("blank", [False, True])
 def test_switch_consensus_publishes_reset_canvas(worker, blank):
-    worker, _ = worker
     settle(worker)
     generation = worker.new_generation(preserve_identity=True)
     candidate = np.zeros(SHAPE, np.float32) if blank else page(other=True)
@@ -250,26 +212,22 @@ def test_switch_consensus_publishes_reset_canvas(worker, blank):
     assert worker.telemetry_snapshot()["publishes"] == publishes + 1
 
 
-@pytest.mark.parametrize("reason", ["ecc_rejected", "occlusion"])
-def test_dirty_pass_breaks_switch_consensus(worker, reason):
-    worker, control = worker
+def test_dirty_pass_breaks_switch_consensus(worker):
     settle(worker)
     generation = worker.new_generation(preserve_identity=True)
     reference = worker._identity_reference
     for _ in range(2):
         drive(worker, generation, page(other=True))
     assert worker._identity_switch_votes == 2
-    control["rejected"] = reason == "ecc_rejected"
     drive(
         worker,
         generation,
         page(other=True),
-        visible=np.zeros(SHAPE, bool) if reason == "occlusion" else None,
+        visible=np.zeros(SHAPE, bool),
     )
-    assert last_event(worker)["decision"] == f"deferred_{reason}"
+    assert last_event(worker)["decision"] == "deferred_occlusion"
     assert worker._identity_switch_votes == 0
     assert worker._identity_defer_count == 1
-    control["rejected"] = False
     for count in range(1, 3):
         drive(worker, generation, page(other=True))
         assert last_event(worker)["decision"] == "deferred_switch_consensus"
@@ -284,7 +242,6 @@ def test_dirty_pass_breaks_switch_consensus(worker, reason):
 
 
 def test_same_page_ends_pending_switch_without_consensus(worker):
-    worker, _ = worker
     canvas = settle(worker)
     anchor = worker._anchor_corners.copy()
     generation = worker.new_generation(preserve_identity=True)
@@ -298,14 +255,7 @@ def test_same_page_ends_pending_switch_without_consensus(worker):
     np.testing.assert_array_equal(worker.poll(generation, 0)[1], canvas)
 
 
-@pytest.mark.parametrize("enabled", [0, 1])
-@pytest.mark.parametrize("chamfer", [0, 1])
-def test_switch_consensus_telemetry_declares_ecc_flag(
-    worker, monkeypatch, enabled, chamfer
-):
-    worker, _ = worker
-    monkeypatch.setenv("DRAW_ECC_REFINE", str(enabled))
-    monkeypatch.setenv("DRAW_IDENTITY_CHAMFER", str(chamfer))
+def test_switch_consensus_telemetry_declares_deferral_fields(worker):
     settle(worker)
     generation = worker.new_generation(preserve_identity=True)
     for decision in (
@@ -317,18 +267,13 @@ def test_switch_consensus_telemetry_declares_ecc_flag(
         event = worker._identity_events[-1]
         assert event["decision"] == record["page_identity_decision"] == decision
         for entry in (event, record):
-            assert entry["ecc_refine_enabled"] == enabled
-            assert type(entry["ecc_refine_enabled"]) is int
             assert entry["quarantine_frames"] == 0
             assert entry["quarantine_reason"] is None
             assert entry["deferred"] is False
-        if chamfer:
-            assert event["shadow_decision"] == record["shadow_decision"] == decision
 
 
 @pytest.mark.parametrize("preserve", [False, True])
 def test_new_generation_resets_switch_votes(worker, preserve):
-    worker, _ = worker
     settle(worker)
     generation = worker.new_generation(preserve_identity=True)
     for _ in range(2):
@@ -345,18 +290,20 @@ def test_new_generation_resets_switch_votes(worker, preserve):
 
 
 def test_switch_consensus_does_not_spend_or_reset_quarantine_budget(worker):
-    worker, control = worker
     canvas = settle(worker)
     generation = worker.new_generation(preserve_identity=True)
     for count in range(1, identity_mod._PAGE_IDENTITY_MAX_DEFERRALS + 2):
-        control["rejected"] = False
         for _ in range(2):
             drive(worker, generation, page(other=True))
             assert last_event(worker)["decision"] == "deferred_switch_consensus"
             assert worker._identity_defer_count == count - 1
             np.testing.assert_array_equal(worker.poll(generation, 0)[1], canvas)
-        control["rejected"] = True
-        drive(worker, generation, page(other=True))
+        drive(
+            worker,
+            generation,
+            page(other=True),
+            visible=np.zeros(SHAPE, bool),
+        )
         assert worker._identity_switch_votes == 0
         assert last_event(worker)["quarantine_frames"] == count
         assert last_event(worker)["decision"] != "new_page"
@@ -367,10 +314,8 @@ def test_switch_consensus_does_not_spend_or_reset_quarantine_budget(worker):
     assert worker._anchor_corners is None
 
 
-@pytest.mark.parametrize("reason", ["ecc_rejected", "occlusion", "mixed"])
 @pytest.mark.parametrize("limit", [None, 2])
-def test_quarantine_timeout(worker, monkeypatch, reason, limit):
-    worker, control = worker
+def test_quarantine_timeout(worker, monkeypatch, limit):
     if limit is not None:
         monkeypatch.setattr(identity_mod, "_PAGE_IDENTITY_MAX_DEFERRALS", limit)
     maximum = identity_mod._PAGE_IDENTITY_MAX_DEFERRALS
@@ -380,18 +325,16 @@ def test_quarantine_timeout(worker, monkeypatch, reason, limit):
     generation = worker.new_generation(preserve_identity=True)
     version = 0
     for count in range(1, maximum + 2):
-        reject = reason == "ecc_rejected" or (reason == "mixed" and count % 2 == 1)
-        control["rejected"] = reject
         record = drive(
             worker,
             generation,
             page(other=True),
-            visible=None if reject else np.zeros(SHAPE, bool),
+            visible=np.zeros(SHAPE, bool),
         )
         event = last_event(worker)
         assert event["quarantine_frames"] == count
         assert record["quarantine_frames"] == count
-        assert event["quarantine_reason"] == ("ecc_rejected" if reject else "occlusion")
+        assert event["quarantine_reason"] == "occlusion"
         assert event["decision"] != "new_page"
         assert event["deferred"] is True
         if count <= maximum:
@@ -412,8 +355,6 @@ def test_quarantine_timeout(worker, monkeypatch, reason, limit):
     assert not np.any(display[1])
     assert not np.any(display[2])
     assert worker.error is None
-    assert worker.take_turn_event(generation) is None
-    control["rejected"] = False
     for _ in range(4):
         drive(worker, generation, page(other=True))
     np.testing.assert_array_equal(worker._anchor_corners, QUAD)
@@ -425,15 +366,12 @@ def test_quarantine_timeout(worker, monkeypatch, reason, limit):
 
 @pytest.mark.parametrize("preserve", [False, True])
 def test_new_generation_resets_quarantine_count(worker, preserve):
-    worker, control = worker
     settle(worker)
     generation = worker.new_generation(preserve_identity=True)
-    control["rejected"] = True
-    drive(worker, generation)
+    drive(worker, generation, visible=np.zeros(SHAPE, bool))
     assert worker._identity_defer_count == 1
     generation = worker.new_generation(preserve_identity=preserve)
     assert worker._identity_defer_count == 0
-    control["rejected"] = False
     drive(worker, generation)
     assert worker._identity_defer_count == 0
     if preserve:

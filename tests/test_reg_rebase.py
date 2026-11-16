@@ -2,7 +2,7 @@
 
 A prova composta sobre a main mergeada (draw-lab/live-audit-2026-11-10/
 17-prova-composta-flags.md) isolou o mecanismo: com
-DRAW_REG_ANCHOR_MEDIAN3 e DRAW_REG_DEADBAND juntas, 100% do descarte
+reg_anchor_median e reg_deadband juntos, 100% do descarte
 do braco composto nasce ate a passada 5 — a ancora anda nas passadas
 1-3 (mediana assentando) enquanto o quad congelado da banda morta
 ficou preso na amostra 1, e as primeiras passadas registram contra um
@@ -24,15 +24,10 @@ import pytest
 import rr
 from draw.ink import registration as registration_mod
 from draw.ink import worker as worker_mod
+from draw.ink.config import InkConfig
 
 SHAPE = (120, 85)
 BASE = rr.base_quad(SHAPE)
-FLAGS = (
-    "DRAW_REG_ANCHOR_MEDIAN3",
-    "DRAW_REG_DEADBAND",
-    "DRAW_ANCHOR_MIGRATION",
-    "DRAW_ECC_REFINE",
-)
 
 
 class _ProbIsWarp:
@@ -48,8 +43,6 @@ class _ProbIsWarp:
 def fast(monkeypatch):
     monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.005)
     monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0.005)
-    for name in FLAGS:
-        monkeypatch.delenv(name, raising=False)
     return monkeypatch
 
 
@@ -59,14 +52,14 @@ def spy(monkeypatch):
     calls = []
     real = registration_mod._register_ink_probability
 
-    def wrapped(prob, anchor, corners, reference, visible=None):
+    def wrapped(prob, anchor, corners, visible=None):
         calls.append(
             (
                 None if anchor is None else np.array(anchor, copy=True),
                 None if corners is None else np.array(corners, copy=True),
             )
         )
-        return real(prob, anchor, corners, reference, visible)
+        return real(prob, anchor, corners, visible)
 
     monkeypatch.setattr(registration_mod, "_register_ink_probability", wrapped)
     return calls
@@ -98,8 +91,8 @@ def _drive(worker, generation, sequence):
             time.sleep(0.001)
 
 
-def _run(sequence):
-    worker = worker_mod.PageCleanWorker(_ProbIsWarp()).start()
+def _run(sequence, config=None):
+    worker = worker_mod.PageCleanWorker(_ProbIsWarp(), config=config).start()
     try:
         generation = worker.new_generation()
         _drive(worker, generation, sequence)
@@ -109,20 +102,17 @@ def _run(sequence):
         worker.stop()
 
 
-def _both_on(fast):
-    fast.setenv("DRAW_REG_ANCHOR_MEDIAN3", "1")
-    fast.setenv("DRAW_REG_DEADBAND", "1")
+BOTH_ON = InkConfig(reg_anchor_median=True, reg_deadband=True)
 
 
 @pytest.mark.slow
 def test_frozen_follows_median_anchor_while_window_open(fast, spy):
-    _both_on(fast)
     page = _page()
     s1 = BASE.copy()
     s2 = _shifted(12.0)  # TL +12 em x
     s3 = _shifted(4.0)  # TL +4 em x
     sequence = [_pass(page, s1), _pass(page, s2), _pass(page, s3)]
-    worker, _confirmed, _provisional = _run(sequence)
+    worker, _confirmed, _provisional = _run(sequence, config=BOTH_ON)
     median2 = np.median(np.stack([s1, s2]), axis=0)
     median3 = np.median(np.stack([s1, s2, s3]), axis=0)
     # Passada 1: congelado = ancora = amostra 1.
@@ -141,7 +131,6 @@ def test_frozen_follows_median_anchor_while_window_open(fast, spy):
 
 @pytest.mark.slow
 def test_sustained_step_releases_after_window_closes(fast, spy):
-    _both_on(fast)
     page = _page()
     step = BASE + np.float32([120.0, 0.0])
     sequence = [
@@ -151,7 +140,7 @@ def test_sustained_step_releases_after_window_closes(fast, spy):
         _pass(page, step),
         _pass(page, step),
     ]
-    worker, _confirmed, _provisional = _run(sequence)
+    worker, _confirmed, _provisional = _run(sequence, config=BOTH_ON)
     assert worker.telemetry_snapshot()["reg_deadband_releases"] == 1
     # A primeira passada do degrau segura (over=1); a segunda libera e
     # o registro passa a usar o quad do degrau.
@@ -164,7 +153,6 @@ def test_sustained_step_releases_after_window_closes(fast, spy):
 
 @pytest.mark.slow
 def test_spike_inside_window_corrupts_neither_anchor_nor_frozen(fast, spy):
-    _both_on(fast)
     page = _page()
     spike = _shifted(200.0)
     s3 = _shifted(4.0)
@@ -174,7 +162,7 @@ def test_spike_inside_window_corrupts_neither_anchor_nor_frozen(fast, spy):
         _pass(page, s3),
         _pass(page, s3),
     ]
-    worker, _confirmed, _provisional = _run(sequence)
+    worker, _confirmed, _provisional = _run(sequence, config=BOTH_ON)
     expected = np.median(np.stack([BASE, spike, s3]), axis=0)
     # Mediana de (0, 200, 4) no TL = 4: o spike nao vira ancora nem
     # congelado, e a passada quieta seguinte registra contra eles.
@@ -186,11 +174,12 @@ def test_spike_inside_window_corrupts_neither_anchor_nor_frozen(fast, spy):
 
 @pytest.mark.slow
 def test_deadband_alone_has_no_rebase(fast, spy):
-    fast.setenv("DRAW_REG_DEADBAND", "1")
     page = _page()
     near = _shifted(6.0)  # 6 px < tau: segura no congelado da amostra 1
     sequence = [_pass(page, BASE), _pass(page, near), _pass(page, near)]
-    worker, _confirmed, _provisional = _run(sequence)
+    worker, _confirmed, _provisional = _run(
+        sequence, config=InkConfig(reg_deadband=True)
+    )
     for _anchor, registration in spy:
         np.testing.assert_allclose(registration, BASE)
     records = worker.telemetry_snapshot()["records"]
@@ -199,12 +188,13 @@ def test_deadband_alone_has_no_rebase(fast, spy):
 
 @pytest.mark.slow
 def test_median_alone_registers_with_pass_corners(fast, spy):
-    fast.setenv("DRAW_REG_ANCHOR_MEDIAN3", "1")
     page = _page()
     s2 = _shifted(12.0)
     s3 = _shifted(4.0)
     sequence = [_pass(page, BASE), _pass(page, s2), _pass(page, s3)]
-    worker, _confirmed, _provisional = _run(sequence)
+    worker, _confirmed, _provisional = _run(
+        sequence, config=InkConfig(reg_anchor_median=True)
+    )
     # Sem banda morta nao ha congelado: o registro usa o quad da
     # propria passada, e a ancora assenta na mediana mesmo assim.
     for (_anchor, registration), (_prob, corners) in zip(spy, sequence, strict=False):

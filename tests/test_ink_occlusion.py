@@ -25,7 +25,6 @@ decisao quando quase nada dela esta visivel.
 import time
 
 import numpy as np
-import pytest
 
 from draw.ink import accumulator as accumulator_mod
 from draw.ink import worker as worker_mod
@@ -145,10 +144,7 @@ def _identity_events(worker):
     return worker.telemetry_snapshot()["page_identity_events"]
 
 
-@pytest.mark.parametrize("chamfer_flag", ["0", "1"])
-def test_identity_recall_ignores_occluded_prior_ink(monkeypatch, chamfer_flag):
-    monkeypatch.setenv("DRAW_IDENTITY_CHAMFER", chamfer_flag)
-    monkeypatch.setenv("DRAW_ECC_REFINE", "0")
+def test_identity_recall_ignores_occluded_prior_ink(monkeypatch):
     monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
     monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0.02)
     ink = _HalfInk()
@@ -180,11 +176,6 @@ def test_identity_recall_ignores_occluded_prior_ink(monkeypatch, chamfer_flag):
         assert event["decision"] == "same_page"
         assert event["recall"] == 1.0
         assert event["visible_reference_px"] == 50
-        if chamfer_flag == "1":
-            assert event["chamfer_seen_to_reference_median_px"] == 0.0
-            assert event["chamfer_reference_to_seen_median_px"] == 0.0
-            for k in (2, 4, 8, 16):
-                assert event[f"chamfer_reference_to_seen_coverage_{k}px"] == 1.0
         recovered = worker.poll(generation, 0)
         assert recovered is not None
         assert np.array_equal(recovered[1], canvas_before)
@@ -207,21 +198,15 @@ def test_identity_recall_ignores_occluded_prior_ink(monkeypatch, chamfer_flag):
             event2 = _identity_events(worker2)[-1]
             assert event2["decision"] == "new_page"
             assert event2["recall"] == 0.5
-            if chamfer_flag == "1":
-                assert event2["chamfer_reference_to_seen_median_px"] > 0
         finally:
             worker2.stop()
     finally:
         worker.stop()
 
 
-@pytest.mark.parametrize("chamfer_flag", ["0", "1"])
 def test_identity_decision_deferred_when_prior_mostly_occluded(
     monkeypatch,
-    chamfer_flag,
 ):
-    monkeypatch.setenv("DRAW_IDENTITY_CHAMFER", chamfer_flag)
-    monkeypatch.setenv("DRAW_ECC_REFINE", "0")
     monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
     monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0.02)
     ink = _HalfInk()
@@ -240,18 +225,9 @@ def test_identity_decision_deferred_when_prior_mostly_occluded(
         generation = worker.new_generation(preserve_identity=True)
         _drive_visible(worker, generation, visible)
         assert _identity_events(worker)[-1]["decision"] == ("deferred_occlusion")
-        if chamfer_flag == "1":
-            event = _identity_events(worker)[-1]
-            assert event["shadow_decision"] == "deferred_occlusion"
-            assert event["chamfer_reference_to_seen_median_px"] == 0.0
-            record = worker.telemetry_snapshot()["records"][-1]
-            assert record["page_identity_decision"] == "deferred_occlusion"
-            for key, value in event.items():
-                if key.startswith("chamfer_") or key in (
-                    "shadow_decision",
-                    "ecc_refine_enabled",
-                ):
-                    assert record[key] == value
+        event = _identity_events(worker)[-1]
+        record = worker.telemetry_snapshot()["records"][-1]
+        assert record["page_identity_decision"] == "deferred_occlusion"
         still = worker.poll(generation, 0)
         assert still is not None
         assert np.array_equal(still[1], canvas_before)
