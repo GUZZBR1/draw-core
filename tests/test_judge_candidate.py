@@ -12,7 +12,6 @@ import json
 import sys
 
 import pytest
-
 from lab import judge_candidate as jc
 
 
