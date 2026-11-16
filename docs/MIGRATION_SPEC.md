@@ -240,6 +240,11 @@ or by the migration). Parity runs must account for them.
   new sheet toward the previous one).
 - Ink worker: rotated landings enter ink rest (legacy compared positional
   quads with a rolled anchor and never rested).
+- Pipeline: the detector's hand mask feeds `seg_hand_occlusion` regardless
+  of `coverage` (legacy tied both detection extras to the same flag).
+- Pipeline: with `canvas_persist` off, a tracker drop also clears the
+  rendered canvas and the provisional layer (legacy cleared only the
+  confirmed mask). Neither change alters the production preset.
 - Camera: drain mode is not migrated (Tier C); `PngWriter` survives a failing
   `on_done`; a failed recovery reopen raises the normal opening error.
 - Integrity is fail-closed (`verify` required); `DRAW_ORT_SPIN`,
