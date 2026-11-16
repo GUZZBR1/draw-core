@@ -277,7 +277,23 @@ def resolve_bind_host(host=DEFAULT_HOST, allow_all_interfaces=False):
         try:
             wildcard = ipaddress.ip_address(host).is_unspecified
         except ValueError:
-            wildcard = False
+            import socket
+
+            try:
+                infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+            except (OSError, UnicodeError):
+                infos = []
+            for info in infos:
+                try:
+                    addr = ipaddress.ip_address(info[4][0])
+                except ValueError:
+                    continue
+                mapped = getattr(addr, "ipv4_mapped", None)
+                if addr.is_unspecified or (
+                    mapped is not None and mapped.is_unspecified
+                ):
+                    wildcard = True
+                    break
     if wildcard:
         if not allow_all_interfaces:
             raise SystemExit(

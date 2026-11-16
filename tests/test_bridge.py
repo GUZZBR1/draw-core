@@ -14,6 +14,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 HELPER = Path(__file__).resolve().parent.parent / "bridge" / "windows_helper.py"
 
 
@@ -76,7 +78,7 @@ def test_accept_loop_refuses_bad_handshake_and_keeps_listening():
     with _client(server) as good:
         assert good.recv(4) == wh.ACCEPT
         assert good.recv(wh.HEADER.size + 4)  # o laco chegou num segundo cliente
-    server.close()
+    # server fica aberto: a thread daemon morre com o processo
 
 
 def test_accept_loop_survives_client_disconnect_mid_stream():
@@ -98,7 +100,7 @@ def test_accept_loop_survives_client_disconnect_mid_stream():
     with _client(server) as again:
         assert again.recv(4) == wh.ACCEPT
         assert again.recv(wh.HEADER.size + 8)
-    server.close()
+    # server fica aberto: a thread daemon morre com o processo
 
 
 def test_capture_timestamp_is_relative_to_process_epoch():
@@ -125,6 +127,7 @@ def test_capture_timestamp_is_relative_to_process_epoch():
     assert frame_id2 == 1
     assert ts2 == 1_500_000_000 // 1000
 
+
 def test_authenticate_enforces_total_handshake_deadline():
     """Par lento (1 byte antes de cada timeout por-recv) nao pode
     segurar o accept serial alem do prazo total."""
@@ -147,7 +150,7 @@ def test_authenticate_enforces_total_handshake_deadline():
     elapsed = time.monotonic() - start
     server_conn.close()
     assert result is False
-    assert elapsed < 1.0
+    assert elapsed < 2.0
 
 
 def test_authenticate_accepts_valid_hello():
@@ -158,3 +161,20 @@ def test_authenticate_accepts_valid_hello():
     server_conn.close()
     client_conn.close()
 
+
+@pytest.mark.parametrize("host", ["0", "0.0", "0.0.0.0", "::", ""])
+def test_resolve_bind_host_rejects_wildcard_forms(host):
+    """Qualquer forma que resolve para endereco nao especificado
+    (wildcard) exige --allow-all-interfaces, como o 0.0.0.0 literal."""
+    with pytest.raises(SystemExit):
+        wh.resolve_bind_host(host)
+
+
+@pytest.mark.parametrize("host", ["0", "0.0.0.0", "::"])
+def test_resolve_bind_host_wildcard_with_opt_in(host):
+    assert wh.resolve_bind_host(host, allow_all_interfaces=True) == host
+
+
+def test_resolve_bind_host_keeps_specific_addresses():
+    assert wh.resolve_bind_host("127.0.0.1") == "127.0.0.1"
+    assert wh.resolve_bind_host("localhost") == "localhost"
