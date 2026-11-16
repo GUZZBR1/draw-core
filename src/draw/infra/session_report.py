@@ -169,11 +169,18 @@ class SessionReport:
                 self._write_seq += 1
                 tag = f"{os.getpid()}-{threading.get_ident()}-{self._write_seq}"
                 tmp = self.path.with_name(f"{self.path.stem}.tmp-{tag}")
-                tmp.write_text(text, encoding="utf-8")
-                tmp.replace(self.path)
                 latest_tmp = self._directory / f"latest.tmp-{tag}"
-                latest_tmp.write_text(text, encoding="utf-8")
-                latest_tmp.replace(self._directory / "latest.json")
+                try:
+                    tmp.write_text(text, encoding="utf-8")
+                    tmp.replace(self.path)
+                    latest_tmp.write_text(text, encoding="utf-8")
+                    latest_tmp.replace(self._directory / "latest.json")
+                except OSError:
+                    # Cada tentativa usa tag nova: sem a limpeza,
+                    # falhas persistentes acumulam .tmp-* no dir.
+                    tmp.unlink(missing_ok=True)
+                    latest_tmp.unlink(missing_ok=True)
+                    raise
         except OSError as error:
             self._error = error
 

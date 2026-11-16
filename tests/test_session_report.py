@@ -121,3 +121,19 @@ def test_writes_leave_no_temporary_files(tmp_path):
         (report.path.parent / "latest.json").read_text(encoding="utf-8")
     )
     assert latest == json.loads(report.path.read_text(encoding="utf-8"))
+
+
+def test_failed_write_leaves_no_temporary_files(tmp_path, monkeypatch):
+    clock = _Clock()
+    report = _make(tmp_path, clock)
+    report.update(sheet_present=True, state="sheet")
+
+    def boom(self, target):
+        raise OSError("rename forcado para o teste")
+
+    monkeypatch.setattr(report_module.Path, "replace", boom)
+    report._write()
+    report._write()  # segunda tentativa com tag nova tambem falha
+    assert report.error is not None
+    leftovers = [p.name for p in report.path.parent.glob("*.tmp*")]
+    assert leftovers == []
