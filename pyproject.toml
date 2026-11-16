@@ -24,6 +24,7 @@ where = ["src"]
 testpaths = ["tests"]
 markers = ["slow: tests with threads/real time; run serialized"]
 filterwarnings = ["error::pytest.PytestUnhandledThreadExceptionWarning"]
+faulthandler_timeout = 120
 
 [tool.ruff]
 target-version = "py311"

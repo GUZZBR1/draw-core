@@ -73,7 +73,8 @@ It delivers only approved `.onnx` files + hashes to `assets/manifest.json`.
 | `draw/paper.py`, `page_clean.py`, `view.py`, `lk_propagate.py` | migrate | engine |
 | `draw/hand.py`, `hand_presence.py` | migrate | `hand.py` (mediapipe extra) |
 | `draw/manifest.py`, `safe_io.py`, `config.py`, `telemetry.py`, `net_policy.py`, `session_report.py` | migrate | `infra/` |
-| `draw/ink.py`, `draw/fusion.py` | verify use, then migrate or archive | - |
+| `draw/ink.py` | migrate `render_canvas` only; drop legacy ink stack | see section below |
+| `draw/fusion.py` | not runtime | `lab/` or archive |
 | `draw/gpu_augmenter.py`, `draw/selflearn/` | archive | `draw-training` |
 | `tools/` replay, sim_*, judge*, eval_*, falsify, seg_metrics | migrate | `lab/` |
 | `tools/` dataset, label, kaggle, runner, export/merge | archive | `draw-training` |
@@ -109,13 +110,40 @@ hand landmarker (unmodified, Apache-2.0). Former production (`e20a89f0`,
 
 ## Flags policy
 
-Legacy has ~40 `DRAW_*` variables, most default `0`. Process:
+Legacy has ~40 `DRAW_*` variables and **every behavior flag defaults to
+off**: the legacy default is not the configuration that was validated. The
+validated set comes from legacy commit `a95eec8` (`docs/SIMULATOR.md`,
+bench of the T16 model, 2026-11-13) and `docs/FALHAS.md`.
 
-1. Ask which are on in the real desk configuration.
-2. On in production -> become the default behavior, flag removed.
-3. Off/rejected (e.g. `DRAW_ANCHOR_MOTION_ABSTAIN`, v1 anchor migration) ->
-   stay in legacy, not copied.
-4. Model paths and `DRAW_MODEL_STRICT` stay as real configuration.
+Tier A, production preset (become defaults in `Config`, env var removed):
+`DRAW_INK_FOLLOW_MOVE`, `DRAW_SHEET_COVERAGE`, `DRAW_CANVAS_PERSIST`,
+`DRAW_INK_SKIP_STALE`, `DRAW_INK_REMOVAL`, `DRAW_SEG_HAND_OCCLUSION`,
+`DRAW_ANCHOR_ARBITRATION`, `DRAW_ANCHOR_FOLLOW`.
+
+Tier B, approved in replay but never enabled (kept as typed `Config` fields,
+default off, one small PR each; enabling needs a desk test, per FALHAS):
+`DRAW_REG_DEADBAND`, `DRAW_REG_ANCHOR_MEDIAN3`.
+
+Tier C, not documented as validated anywhere (not in docs, not in the T16
+set): `DRAW_INK_VOTE_E3`, `DRAW_INK_VOTE_E4`, `DRAW_INK_VOTE_FAST`,
+`DRAW_INK_ACTIVE_CADENCE`, `DRAW_FIRST_CONFIRM_GATE`,
+`DRAW_SHEET_LK_PROPAGATE`, `DRAW_CAPTURE_DRAIN_LATEST`,
+`DRAW_SHEET_DETECT_SETTLED_EVERY`, `DRAW_PAGE_CLEAN_BATCH`. Not copied in the
+first pass; revisit one by one when the owning module is migrated (the vote
+rules live in `ink_layers.py`, ~570 lines).
+
+Tier D, refuted, vetoed or diagnostic-only (stay in legacy):
+`DRAW_ECC_REFINE` (refuted in P2; its `ecc_rejected` quarantine goes with
+it, the `deferred_occlusion` quarantine stays), `DRAW_ANCHOR_MIGRATION` (v1
+vetoed), `DRAW_IDENTITY_WATCH`, `DRAW_PAGE_TURN_EVENT` (hotfix-disabled),
+`DRAW_IDENTITY_CHAMFER` (diagnostic), `DRAW_REG_CONTENT_GUARD`, and
+`DRAW_ANCHOR_MOTION_ABSTAIN` (reverted).
+
+Real configuration, not flags: model paths, `DRAW_MODEL_STRICT`,
+`DRAW_FORMAT`, ORT/OpenCV thread caps.
+
+Consequence for parity: legacy must be run **with the Tier A env set** when
+used as the reference.
 
 ## PR sequence
 
@@ -153,9 +181,38 @@ stage dominated by non-ONNX Python time. Today ~12 FPS is dominated by ONNX
 inference, which is already native. Boundary for a future port: the contract
 types in `contracts.py`.
 
+## Legacy baseline (measured 2026-11-16, legacy `main`)
+
+`pytest -m "not lento"`: 979 passed, 27 skipped, 1 failed, plus a hang.
+
+- **Failure** `test_sim_writer::test_generate_scenario_corpus_contract`:
+  needs real background frames in `~/workspace/draw-lab/...` that are not in
+  the repo. Rule: lab tests that need external data must `skip` when it is
+  absent, so CI is hermetic.
+- **Hang** (found with `faulthandler_timeout`): the full run deadlocks in
+  `HandLandmarker.__del__` (mediapipe `serial_dispatcher`) when GC finalizes a
+  leaked landmarker on the main thread, e.g. during
+  `test_simulator::test_real_hand_adapters_feed_visibility_and_activity`;
+  it also leaks a `selflearn.SessionRecorder` worker thread. Rules: `hand.py`
+  closes the landmarker deterministically (context manager / `close()`), never
+  relies on `__del__`; tests close what they open; CI runs pytest with
+  `faulthandler_timeout`.
+
+## `ink.py` and `fusion.py` (decided from the code)
+
+- `draw/fusion.py`: nothing in `draw/` imports it; only `tools/cadence_fusion.py`
+  and its test use it. Not runtime -> `lab/` or archive.
+- `draw/ink.py`: still imported by `ink_layers`, `loop`, `app`, `view`, but
+  mostly for `render_canvas`. `extract_ink`, `InkAccumulator` and
+  `SessionBaselineInk` serve only the `--legacy-ink` / `--markers` paths.
+  Migrate only `render_canvas` + paper constants; drop the legacy ink stack,
+  `--legacy-ink`, `--markers`, `--ink-model` (the `ink_model` module does not
+  even exist).
+
 ## Open questions
 
-- Which `DRAW_*` flags are on in the desk configuration?
-- Keep `draw/ink.py` / `fusion.py` (legacy ink stack) or drop?
-- Release hosting for model binaries (Release in this repo vs legacy `models-2026-11-06`)?
+- Release hosting for model binaries (Release in this repo vs legacy
+  `models-2026-11-06`)?
 - Rights for the sailor-moon image before it enters the site.
+- Confirm Tier A matches what is run at the desk today (the repo evidence says
+  yes; only the owner can confirm).
