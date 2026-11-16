@@ -29,6 +29,7 @@ models/hand_landmarker.task na raiz do repo. A fonte oficial do
 arquivo é o armazenamento do Google para modelos do MediaPipe.
 """
 
+import threading
 from pathlib import Path
 
 import cv2
@@ -50,6 +51,11 @@ _DILATE_PX = 15
 # Largura maxima do frame na deteccao de PRESENCA (assinatura):
 # presenca nao precisa dos pixels, so da geometria dos marcos.
 _PRESENCE_MAX_WIDTH = 640
+# Teto da espera do close() por uma deteccao em voo: uma chamada
+# travada no MediaPipe nao pode deixar o fechamento pendurado —
+# passado o teto, _closed sinaliza e quem estava em voo fecha ao
+# retornar.
+_CLOSE_LOCK_TIMEOUT_S = 2.0
 
 
 def _resolve_model_path(model_path):
@@ -136,6 +142,7 @@ class HandMasker:
         self._last_video_ts = -1
         self._warned = False
         self._closed = False
+        self._lock = threading.RLock()
 
     def close(self):
         """Fecha os landmarkers criados; chamadas futuras degradam.
@@ -143,10 +150,29 @@ class HandMasker:
         Idempotente: a segunda chamada nao faz nada. Depois do
         fechamento mask()/presence_signature() devolvem None —
         indisponivel permanente, sem recriar o modelo por acidente.
+
+        O fechamento adquire o lock do masker e espera uma chamada
+        de deteccao em voo terminar — um landmarker nunca fecha
+        enquanto outra thread o usa. Se o lock nao abre em
+        _CLOSE_LOCK_TIMEOUT_S (deteccao travada no MediaPipe),
+        _closed fica marcado sem o lock e quem estava em voo fecha
+        os landmarkers ao retornar: o close() nao fica pendurado.
         """
         if self._closed:
             return
-        self._closed = True
+        if not self._lock.acquire(timeout=_CLOSE_LOCK_TIMEOUT_S):
+            self._closed = True
+            self._unavailable = True
+            self._video_unavailable = True
+            return
+        try:
+            self._closed = True
+            self._close_landmarkers()
+        finally:
+            self._lock.release()
+
+    def _close_landmarkers(self):
+        """Fecha os dois landmarkers tolerando erro; idempotente."""
         for landmarker in (self._landmarker, self._video_landmarker):
             if landmarker is not None:
                 try:
@@ -157,6 +183,13 @@ class HandMasker:
         self._video_landmarker = None
         self._unavailable = True
         self._video_unavailable = True
+
+    def _dispose_fresh(self, landmarker):
+        """Fecha um landmarker recem-criado que nao pode publicar."""
+        try:
+            landmarker.close()
+        except Exception:
+            pass
 
     def __enter__(self):
         return self
@@ -194,23 +227,31 @@ class HandMasker:
             return None
 
     def _ensure(self):
-        if self._landmarker is not None:
+        with self._lock:
+            if self._landmarker is not None:
+                return True
+            if self._unavailable:
+                return False
+            try:
+                import mediapipe as mp
+            except Exception:
+                self._unavailable = True
+                self._warn_once()
+                return False
+            created = self._create_landmarker(mp.tasks.vision.RunningMode.IMAGE)
+            if created is None:
+                self._unavailable = True
+                self._warn_once()
+                return False
+            if self._closed:
+                # O close() correu sem o lock enquanto a criacao
+                # estava em voo: o recem-criado nao se publica —
+                # fecha ja.
+                self._dispose_fresh(created)
+                self._unavailable = True
+                return False
+            self._landmarker = created
             return True
-        if self._unavailable:
-            return False
-        try:
-            import mediapipe as mp
-        except Exception:
-            self._unavailable = True
-            self._warn_once()
-            return False
-        created = self._create_landmarker(mp.tasks.vision.RunningMode.IMAGE)
-        if created is None:
-            self._unavailable = True
-            self._warn_once()
-            return False
-        self._landmarker = created
-        return True
 
     def _ensure_video(self):
         """Landmarker em modo VIDEO, criado sob demanda.
@@ -222,21 +263,28 @@ class HandMasker:
         detectar marca o modo como indisponivel e a presenca cai
         para o IMAGE permanentemente: degradacao, nunca erro.
         """
-        if self._video_landmarker is not None:
+        with self._lock:
+            if self._video_landmarker is not None:
+                return True
+            if self._video_unavailable:
+                return False
+            try:
+                import mediapipe as mp
+            except Exception:
+                self._video_unavailable = True
+                return False
+            created = self._create_landmarker(mp.tasks.vision.RunningMode.VIDEO)
+            if created is None:
+                self._video_unavailable = True
+                return False
+            if self._closed:
+                # Mesma corrida do _ensure: criacao que termina
+                # depois do close() descarta o recem-criado.
+                self._dispose_fresh(created)
+                self._video_unavailable = True
+                return False
+            self._video_landmarker = created
             return True
-        if self._video_unavailable:
-            return False
-        try:
-            import mediapipe as mp
-        except Exception:
-            self._video_unavailable = True
-            return False
-        created = self._create_landmarker(mp.tasks.vision.RunningMode.VIDEO)
-        if created is None:
-            self._video_unavailable = True
-            return False
-        self._video_landmarker = created
-        return True
 
     def _landmarks(self, frame, max_width=None, timestamp_ms=None):
         """Marcos das maos no frame: lista de arrays (21, 2) em px
@@ -253,6 +301,18 @@ class HandMasker:
         exige. Sem carimbo, ou se o modo VIDEO falhar, cai no
         landmarker IMAGE de sempre.
         """
+        with self._lock:
+            try:
+                return self._landmarks_locked(frame, max_width, timestamp_ms)
+            finally:
+                # Se o close() passou sem o lock durante esta
+                # chamada, o fechamento acontece aqui, na saida
+                # de quem estava em voo.
+                if self._closed:
+                    self._close_landmarkers()
+
+    def _landmarks_locked(self, frame, max_width, timestamp_ms):
+        """O corpo de _landmarks, rodando sob o lock do masker."""
         use_video = timestamp_ms is not None and self._ensure_video()
         if not use_video and not self._ensure():
             return None

@@ -226,7 +226,10 @@ class HandPresenceWorker:
         self._thread.join(timeout=2.0)
         # O landmarker fecha junto com a parada: deterministico,
         # nunca pelo __del__ do MediaPipe (que trava quando o GC
-        # finaliza um landmarker vazado na thread principal).
+        # finaliza um landmarker vazado na thread principal). Se a
+        # amostragem seguir em voo alem do join (chamada travada no
+        # MediaPipe), o close() do masker nao pendura: sinaliza
+        # _closed e quem estava em voo fecha ao retornar.
         close = getattr(self._presence, "close", None)
         if callable(close):
             close()

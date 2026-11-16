@@ -7,6 +7,7 @@ idempotente e via context manager —, nunca por __del__.
 """
 
 import sys
+import threading
 import types
 from types import SimpleNamespace
 
@@ -25,22 +26,38 @@ def _landmarks_result():
 
 
 class _StubLandmarker:
-    def __init__(self, mode, log, raise_video_detect=False, close_raises=False):
+    def __init__(
+        self,
+        mode,
+        log,
+        raise_video_detect=False,
+        close_raises=False,
+        detect_gate=None,
+    ):
         self._mode = mode
         self._log = log
         self._raise_video_detect = raise_video_detect
         self._close_raises = close_raises
+        self._detect_gate = detect_gate
         self.closed = 0
 
     def detect(self, _image):
         self._log.append(("image", self._mode))
+        self._gate()
         return _landmarks_result()
 
     def detect_for_video(self, _image, timestamp_ms):
         self._log.append(("video", timestamp_ms))
         if self._raise_video_detect:
             raise RuntimeError("detect_for_video falhou neste stub")
+        self._gate()
         return _landmarks_result()
+
+    def _gate(self):
+        if self._detect_gate is not None:
+            entered, release = self._detect_gate
+            entered.set()
+            release.wait(10.0)
 
     def close(self):
         self.closed += 1
@@ -49,7 +66,12 @@ class _StubLandmarker:
 
 
 def _install_fake_mediapipe(
-    monkeypatch, fail_video=False, raise_video_detect=False, close_raises=False
+    monkeypatch,
+    fail_video=False,
+    raise_video_detect=False,
+    close_raises=False,
+    detect_gate=None,
+    create_gate=None,
 ):
     log = []
     created = []
@@ -62,11 +84,16 @@ def _install_fake_mediapipe(
         mode = options.running_mode
         if fail_video and mode == _RunningMode.VIDEO:
             raise RuntimeError("sem video neste stub")
+        if create_gate is not None:
+            entered, release = create_gate
+            entered.set()
+            release.wait(10.0)
         landmarker = _StubLandmarker(
             mode,
             log,
             raise_video_detect=raise_video_detect,
             close_raises=close_raises,
+            detect_gate=detect_gate,
         )
         created.append(landmarker)
         return landmarker
@@ -210,3 +237,61 @@ def test_no_model_path_and_no_default_means_unavailable(tmp_path, monkeypatch):
     )
     masker = hand_module.HandMasker(verify=None)
     assert masker.mask(np.zeros((10, 10, 3), dtype=np.uint8)) is None
+
+
+def test_close_does_not_free_a_landmarker_in_flight(monkeypatch, tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+    _log, created = _install_fake_mediapipe(monkeypatch, detect_gate=(entered, release))
+    monkeypatch.setattr(hand_module, "_CLOSE_LOCK_TIMEOUT_S", 0.2)
+    masker = hand_module.HandMasker(_model(tmp_path), verify=None)
+    frame = np.zeros((80, 100, 3), dtype=np.uint8)
+    done = threading.Event()
+
+    def _call():
+        masker.presence_signature(frame, timestamp_ms=1000)
+        done.set()
+
+    thread = threading.Thread(target=_call)
+    thread.start()
+    assert entered.wait(5.0)
+    # A deteccao detem o lock: o close() estoura o timeout,
+    # sinaliza _closed e NAO fecha o landmarker em uso.
+    masker.close()
+    assert created[0].closed == 0
+    release.set()
+    assert done.wait(5.0)
+    thread.join(5.0)
+    # Quem estava em voo fecha ao retornar.
+    assert created[0].closed == 1
+    # E o masker segue indisponivel depois do fechamento.
+    assert masker.presence_signature(frame) is None
+
+
+def test_landmarker_created_after_close_is_disposed(monkeypatch, tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+    _log, created = _install_fake_mediapipe(monkeypatch, create_gate=(entered, release))
+    monkeypatch.setattr(hand_module, "_CLOSE_LOCK_TIMEOUT_S", 0.2)
+    masker = hand_module.HandMasker(_model(tmp_path), verify=None)
+    frame = np.zeros((80, 100, 3), dtype=np.uint8)
+    done = threading.Event()
+
+    def _call():
+        masker.presence_signature(frame, timestamp_ms=1000)
+        done.set()
+
+    thread = threading.Thread(target=_call)
+    thread.start()
+    assert entered.wait(5.0)
+    # A criacao preguicosa detem o lock: close() sinaliza _closed
+    # e sai sem esperar a criacao terminar.
+    masker.close()
+    release.set()
+    assert done.wait(5.0)
+    thread.join(5.0)
+    # O landmarker criado depois do _closed fecha na hora e nao
+    # se publica; a volta para o IMAGE nem cria outro — _closed
+    # ja marcou o masker indisponivel.
+    assert len(created) == 1
+    assert created[0].closed == 1
