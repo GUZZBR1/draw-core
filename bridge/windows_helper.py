@@ -251,8 +251,8 @@ def capture_frames():
     dispositivo de video, abrir em MJPG 1280x720 (o formato que o
     app ja pede na rota usbipd), e ler os samples na cadencia da
     camera. O carimbo de captura sai na entrega do sample, sobre
-    time.perf_counter_ns() // 1000 (monotonico, epoca = inicio do
-    processo), como manda o PROTOCOL.md.
+    (time.perf_counter_ns() - start_ns) // 1000 (monotonico, epoca =
+    inicio do processo), como manda o PROTOCOL.md.
 
     Rota interim possivel: ler o MJPEG de um ffmpeg no
     Windows e carimbar na leitura. Mais simples, mas o
@@ -356,7 +356,7 @@ def authenticate_client(conn, token, timeout=HANDSHAKE_TIMEOUT_S):
         conn.settimeout(previous)
 
 
-def _handle_client(conn, frames, clock=time.perf_counter_ns):
+def _handle_client(conn, frames, start_ns, clock=time.perf_counter_ns):
     """Envia frames para um cliente autenticado; devolve o total enviado.
 
     Um OSError/ConnectionError no envio (o WSL desconectou) propaga
@@ -364,14 +364,16 @@ def _handle_client(conn, frames, clock=time.perf_counter_ns):
     """
     frame_id = 0
     for jpeg in frames:
-        capture_ts_us = clock() // 1000
+        capture_ts_us = (clock() - start_ns) // 1000
         header = HEADER.pack(MAGIC, VERSION, 0, frame_id, capture_ts_us, len(jpeg))
         conn.sendall(header + jpeg)
         frame_id += 1
     return frame_id
 
 
-def _accept_loop(server, token, make_frames, clock=time.perf_counter_ns, log=print):
+def _accept_loop(
+    server, token, make_frames, start_ns, clock=time.perf_counter_ns, log=print
+):
     """Laco residente: aceita, autentica e serve um cliente por vez.
 
     O ajudante e residente (PROTOCOL.md, "Transporte"): so sai por
@@ -387,7 +389,7 @@ def _accept_loop(server, token, make_frames, clock=time.perf_counter_ns, log=pri
             conn.close()
             continue
         try:
-            sent = _handle_client(conn, make_frames(), clock)
+            sent = _handle_client(conn, make_frames(), start_ns, clock)
             log(f"Cliente {addr[0]} desconectou apos {sent} frames.")
         except (OSError, ConnectionError):
             log(f"Conexao com {addr[0]} caiu; voltando a escutar.")
@@ -408,7 +410,7 @@ def serve(
     O ajudante escuta e o WSL conecta (PROTOCOL.md, "Transporte").
     Conexoes sem o token sao fechadas antes de qualquer frame.
     frame_id comeca em 0 a cada sessao; a epoca do timestamp e o
-    inicio do processo. O laco e residente: cada
+    inicio do processo (start_ns abaixo). O laco e residente: cada
     cliente caido/recusado volta ao accept; so um sinal encerra.
     frames/clock existem para os testes injetarem fonte e relogio.
     """
@@ -417,6 +419,7 @@ def serve(
     bind_host = resolve_bind_host(host, allow_all_interfaces)
     token = resolve_token(token)
     set_dpi_awareness()
+    start_ns = clock()
     family = socket.AF_INET6 if ":" in bind_host else socket.AF_INET
     server = socket.socket(family, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -424,7 +427,7 @@ def serve(
     server.listen(1)
     print(f"Ajudante Draw (ESBOCO) escutando em {bind_host}:{port}.")
     make_frames = (lambda: frames) if frames is not None else capture_frames
-    _accept_loop(server, token, make_frames, clock)
+    _accept_loop(server, token, make_frames, start_ns, clock)
 
 
 def main():

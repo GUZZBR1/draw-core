@@ -6,7 +6,11 @@ imports via ast em vez de executar.
 """
 
 import ast
+import importlib.util
 import py_compile
+import socket
+import struct
+import threading
 from pathlib import Path
 
 HELPER = Path(__file__).resolve().parent.parent / "bridge" / "windows_helper.py"
@@ -26,14 +30,8 @@ def test_windows_helper_has_no_repo_imports():
             imported.add(node.module.split(".")[0])
     assert not ({"draw", "tools", "lab"} & imported)
 
+
 # --- testes da logica de rede (sem Windows nem camera) ---
-
-import importlib.util
-import socket
-import struct
-import threading
-
-import pytest
 
 _spec = importlib.util.spec_from_file_location("windows_helper", HELPER)
 wh = importlib.util.module_from_spec(_spec)
@@ -67,7 +65,7 @@ def test_accept_loop_refuses_bad_handshake_and_keeps_listening():
     logs = []
     thread = threading.Thread(
         target=wh._accept_loop,
-        args=(server, TOKEN, lambda: iter([b"jpeg"])),
+        args=(server, TOKEN, lambda: iter([b"jpeg"]), 0),
         kwargs={"log": logs.append},
         daemon=True,
     )
@@ -86,7 +84,7 @@ def test_accept_loop_survives_client_disconnect_mid_stream():
     logs = []
     thread = threading.Thread(
         target=wh._accept_loop,
-        args=(server, TOKEN, lambda: iter([b"x" * 8] * 40)),
+        args=(server, TOKEN, lambda: iter([b"x" * 8] * 40), 0),
         kwargs={"log": logs.append},
         daemon=True,
     )
@@ -101,3 +99,27 @@ def test_accept_loop_survives_client_disconnect_mid_stream():
         assert again.recv(wh.HEADER.size + 8)
     server.close()
 
+
+def test_capture_timestamp_is_relative_to_process_epoch():
+    """capture_ts_us = (perf_counter_ns - start_ns)//1000 (PROTOCOL)."""
+    server_conn, client_conn = socket.socketpair()
+    ticks = iter([1_000_000_000, 1_500_000_000])
+
+    def clock():
+        return next(ticks)
+
+    with server_conn:
+        sent = wh._handle_client(server_conn, [b"ab", b"cd"], start_ns=0, clock=clock)
+    assert sent == 2
+    data = client_conn.recv(4096)
+    client_conn.close()
+    magic, version, _flags, frame_id, capture_ts_us, length = wh.HEADER.unpack(
+        data[: wh.HEADER.size]
+    )
+    assert (magic, version, frame_id, length) == (wh.MAGIC, wh.VERSION, 0, 2)
+    assert capture_ts_us == 1_000_000_000 // 1000  # epoch = start_ns = 0
+    _, _, _, frame_id2, ts2, _ = wh.HEADER.unpack(
+        data[wh.HEADER.size + 2 : wh.HEADER.size * 2 + 2]
+    )
+    assert frame_id2 == 1
+    assert ts2 == 1_500_000_000 // 1000
