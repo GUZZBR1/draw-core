@@ -175,3 +175,40 @@ def test_consolidate_still_apto_or_reprovado_with_a_gate():
     sections["sheet"]["verdict"] = "REPROVADO_NA_BANCADA"
     verdict, _scope, _failed = jc.consolidate(sections)
     assert verdict == "REPROVADO_NA_BANCADA"
+
+
+def test_relative_candidate_reaches_judges_as_absolute(tmp_path, monkeypatch):
+    """Os juizes rodam com cwd=scripts_dir: --candidate relativo
+    precisa chegar resolvido (contra o cwd do usuario)."""
+    bench = tmp_path / "bench"
+    scripts = bench / "scripts"
+    results = bench / "results"
+    scripts.mkdir(parents=True)
+    results.mkdir()
+    captured = results / "argv.json"
+    stub = (
+        "import json,sys,pathlib\n"
+        f"pathlib.Path({str(captured)!r}).write_text(json.dumps(sys.argv))\n"
+    )
+    for name in ("judge_sheet.py", "judge_absence.py", "judge_adversarial.py"):
+        (scripts / name).write_text(stub)
+    candidate = tmp_path / "cand.onnx"
+    candidate.write_bytes(b"onnx")
+    monkeypatch.chdir(tmp_path)
+    # O stub nao gera relatorio -> rc 2; o que se prova e o argv
+    # que o juiz recebeu.
+    rc = jc.main(
+        [
+            "--candidate",
+            "cand.onnx",
+            "--bench-dir",
+            str(bench),
+            "--python",
+            sys.executable,
+            "--out-dir",
+            str(tmp_path / "out"),
+        ]
+    )
+    assert rc == 2
+    argv = json.loads(captured.read_text())
+    assert argv[-1] == str(candidate.resolve())

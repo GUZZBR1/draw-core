@@ -340,7 +340,9 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
-    candidate = Path(args.candidate)
+    # Os juízes rodam com cwd=scripts_dir: um --candidate relativo
+    # precisa ser resolvido contra o cwd do usuário, não o deles.
+    candidate = Path(args.candidate).resolve()
     if not candidate.is_file():
         print(f"candidato não encontrado: {candidate}", file=sys.stderr)
         return 2
