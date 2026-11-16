@@ -21,6 +21,7 @@ def _corners_float32(value, name):
     corners = np.array(value, dtype=np.float32, copy=True)
     if corners.shape != _CORNERS_SHAPE:
         raise ValueError(f"{name} precisa ter forma {_CORNERS_SHAPE}: {corners.shape}")
+    corners.flags.writeable = False
     return corners
 
 
@@ -29,7 +30,9 @@ class FramePacket:
     """Um quadro capturado: imagem BGR (H, W, 3) uint8 e identidade.
 
     captured_at é um carimbo monotônico em segundos (time.monotonic);
-    sequence é o número de sequência da fonte, >= 0.
+    sequence é o número de sequência da fonte, >= 0. image é guardada
+    como visão somente-leitura do buffer recebido (sem copiar o frame):
+    o produtor não pode mutar o buffer depois de publicar o pacote.
     """
 
     image: np.ndarray
@@ -45,6 +48,9 @@ class FramePacket:
             raise ValueError(f"image precisa ser uint8: {self.image.dtype}")
         if self.sequence < 0:
             raise ValueError(f"sequence precisa ser >= 0: {self.sequence}")
+        image = self.image.view()
+        image.flags.writeable = False
+        object.__setattr__(self, "image", image)
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +67,11 @@ class SheetQuad:
     detector: str = ""
 
     def __post_init__(self):
+        if (self.corners is None) != (self.verdict is None):
+            raise ValueError(
+                "corners e verdict precisam vir juntos: "
+                "(cantos, 'paper') ou (None, None)"
+            )
         if self.corners is not None:
             object.__setattr__(
                 self, "corners", _corners_float32(self.corners, "corners")
@@ -102,8 +113,10 @@ class InkState:
     """Estado da tinta numa geração de página.
 
     confirmed e provisional são máscaras 2D uint8 (None enquanto a
-    passada não produziu); anchor_corners é o quad (4, 2) que ancora
-    a geometria da tinta na cena.
+    passada não produziu), guardadas como visões somente-leitura do
+    buffer recebido: o produtor não pode mutar a máscara depois de
+    publicar. anchor_corners é o quad (4, 2) que ancora a geometria
+    da tinta na cena.
     """
 
     confirmed: np.ndarray | None
@@ -120,6 +133,10 @@ class InkState:
                 or mask.dtype != np.uint8
             ):
                 raise ValueError(f"{name} precisa ser máscara 2D uint8 ou None")
+            if mask is not None:
+                view = mask.view()
+                view.flags.writeable = False
+                object.__setattr__(self, name, view)
         if self.anchor_corners is not None:
             object.__setattr__(
                 self,

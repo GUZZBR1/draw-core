@@ -195,6 +195,50 @@ def test_ink_state_is_frozen():
         state.generation = 7
 
 
+def test_sheet_quad_rejects_corners_without_verdict():
+    with pytest.raises(ValueError, match="juntos"):
+        SheetQuad(corners=QUAD, verdict=None)
+
+
+def test_sheet_quad_rejects_verdict_without_corners():
+    with pytest.raises(ValueError, match="juntos"):
+        SheetQuad(corners=None, verdict="paper")
+
+
+def test_sheet_quad_corners_are_read_only():
+    quad = SheetQuad(corners=QUAD, verdict="paper")
+    with pytest.raises(ValueError):
+        quad.corners[0, 0] = 99.0
+    # a fonte do chamador continua gravável
+    source = QUAD.copy()
+    SheetQuad(corners=source, verdict="paper")
+    source[0, 0] = 1.0
+
+
+def test_frame_packet_image_is_read_only_view():
+    frame = np.zeros((4, 5, 3), dtype=np.uint8)
+    pkt = FramePacket(image=frame, captured_at=0.0, sequence=0)
+    with pytest.raises(ValueError):
+        pkt.image[0, 0, 0] = 7
+    frame[0, 0, 0] = 7  # o buffer original segue gravável
+
+
+def test_ink_state_masks_and_anchor_are_read_only():
+    confirmed = np.zeros((3, 3), dtype=np.uint8)
+    anchor = QUAD.copy()
+    state = InkState(
+        confirmed=confirmed,
+        provisional=None,
+        generation=0,
+        anchor_corners=anchor,
+    )
+    with pytest.raises(ValueError):
+        state.confirmed[0, 0] = 255
+    with pytest.raises(ValueError):
+        state.anchor_corners[0, 0] = 0.0
+    confirmed[0, 0] = 255  # a fonte segue gravável
+
+
 # --- fronteira de dependências --------------------------------------------
 
 
