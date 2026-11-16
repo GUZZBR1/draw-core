@@ -8,6 +8,11 @@ lógica nova) e a renderização do relatório. Fixtures seguem os
 esquemas reais de judge_sheet.py/judge_absence.py.
 """
 
+import json
+import sys
+
+import pytest
+
 from lab import judge_candidate as jc
 
 
@@ -57,7 +62,10 @@ def absence_json(verdict="PASSA_AUSENCIA", cand_fp=11, inc_fp=11):
 def test_parse_args_defaults():
     args = jc.parse_args(["--candidate", "x.onnx"])
     assert args.candidate == "x.onnx"
-    assert args.skip == "" and args.with_replay is False
+    assert args.skip == ""
+    # --with-replay saiu: o runner (tools/replay_reregister.py)
+    # nao migrou para este repo.
+    assert not hasattr(args, "with_replay")
 
 
 def test_extract_sheet_reasons_pairs_vs_incumbent():
@@ -128,3 +136,10 @@ def test_sha256_of(tmp_path):
     p = tmp_path / "m.onnx"
     p.write_bytes(b"draw" * 100)
     assert len(jc.sha256_of(p)) == 64
+
+
+def test_with_replay_option_was_removed():
+    """O runner de replay nao migrou: a opcao nao pode continuar
+    aceita em silencio."""
+    with pytest.raises(SystemExit):
+        jc.parse_args(["--candidate", "x.onnx", "--with-replay"])

@@ -22,15 +22,14 @@ Este script NÃO reimplementa régua nem portão: o veredito final
 promoção: promoção exige holdout selado + teste ao vivo na mesa
 do Lucas (protocolo em JULGAMENTO.md da bancada).
 
-A régua de replay (tools/replay_reregister.py) NÃO consome o
-ONNX candidato — ela consome os mapas de probabilidade cacheados
-do pipeline de produção. Para um candidato a folha, ela não
-julga o candidato; por isso só roda com --with-replay, rotulada
-como contexto da orquestração, nunca como razão de veredito.
+A régua de replay do legado (tools/replay_reregister.py) NÃO
+consome o ONNX candidato — ela consome os mapas de probabilidade
+cacheados do pipeline de produção — e não migrou para este repo:
+a opção --with-replay saiu junto com o runner.
 
 Uso:
-  python tools/judge_candidate.py --candidate <folha.onnx> \
-      [--skip absence,adversarial] [--with-replay] \
+  python lab/judge_candidate.py --candidate <folha.onnx> \
+      [--skip absence,adversarial] \
       [--out-dir DIR] [--bench-dir DIR] [--python PY]
 
 Saída: <out-dir>/candidate_<modelo>_<data>.json + .md (default
@@ -318,12 +317,6 @@ def parse_args(argv=None):
         default="",
         help="juízes a pular, separados por vírgula: sheet,absence,adversarial",
     )
-    ap.add_argument(
-        "--with-replay",
-        action="store_true",
-        help="roda também a régua de replay (contexto "
-        "da orquestração; não julga o candidato)",
-    )
     ap.add_argument("--bench-dir", default=str(DEFAULT_BENCH))
     ap.add_argument(
         "--python",
@@ -376,28 +369,6 @@ def main(argv=None):
     except RuntimeError as e:
         print(f"ERRO: {e}", file=sys.stderr)
         return 2
-
-    if args.with_replay:
-        t0 = time.time()
-        replay_json = out_dir / ".replay_reregister_tmp.json"
-        r = subprocess.run(
-            [
-                args.python,
-                str(REPO / "tools" / "replay_reregister.py"),
-                "--out",
-                str(replay_json),
-            ],
-            cwd=str(REPO),
-        )
-        if r.returncode == 0 and replay_json.is_file():
-            data = json.loads(replay_json.read_text())
-            sections["replay"] = {
-                "verdicts": {k: v.get("verdict") for k, v in data["summary"].items()},
-                "report": str(replay_json),
-            }
-            durations["replay"] = round(time.time() - t0, 1)
-        else:
-            print("aviso: régua de replay falhou; seção omitida", file=sys.stderr)
 
     verdict, scope, failed = consolidate(sections)
     report = {
