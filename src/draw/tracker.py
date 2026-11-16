@@ -366,7 +366,7 @@ class SheetTracker:
                 self._pending_sustain_count = 0
                 self.missed = True
             self._frames_since_seen += 1
-        elif ran_detection:
+        elif ran_detection and verdict != "paper":
             # Deteccao negativa ANTES da primeira confirmacao: o
             # candidato nao pode sobreviver a uma ausencia — senao o
             # _pending_since velho satisfaz a persistencia no

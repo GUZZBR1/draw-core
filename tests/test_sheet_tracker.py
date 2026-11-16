@@ -145,6 +145,32 @@ def test_blank_candidate_does_not_survive_absence():
     assert event == "seen"
 
 
+def test_paper_without_quad_keeps_blank_candidate_alive():
+    """'paper' sem quadrilatero nao reinicia a persistencia do
+    candidato blank_maybe.
+
+    Antes da primeira confirmacao, o retorno de 'so presenca' exige
+    corners confirmados; o paper-sem-quad caia no ramo de limpeza
+    pre-confirmacao e apagava candidato, timer e janela da mediana.
+    So deteccao negativa de verdade (veredito != 'paper') limpa.
+    """
+    tracker = tracker_module.SheetTracker()
+    tracker.update(BASE.copy(), "blank_maybe", True, 0.0)
+    assert tracker.has_pending
+    # Detector afirma papel mas nao fecha quad: presenca sem posicao.
+    tracker.update(None, "paper", True, 0.3)
+    assert tracker.has_pending
+    # O candidato original confirma no prazo dobrado de blank_maybe
+    # contado desde a PRIMEIRA deteccao, nao do reinicio.
+    event = tracker.update(
+        BASE.copy(),
+        "blank_maybe",
+        True,
+        2 * tracker_module._SHEET_JUMP_PERSIST_SECONDS + 0.05,
+    )
+    assert event == "seen"
+
+
 def test_returning_sheet_does_not_inherit_stale_candidate_corners():
     """Folha em outra posicao nao herda cantos do candidato morto.
 
