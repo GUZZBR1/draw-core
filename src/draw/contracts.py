@@ -226,3 +226,50 @@ class DetectionResult:
                 view = mask.view()
                 view.flags.writeable = False
                 object.__setattr__(self, name, view)
+
+
+@dataclass(frozen=True, slots=True)
+class HandSignature:
+    """Assinatura de presença de mão num quadro.
+
+    area é a área do casco convexo dos marcos (ou dos pixels da
+    máscara, na fonte de reserva), em px, >= 0; centroid_x e
+    centroid_y são o centroide em px do quadro. Os três são
+    floats finitos. HandSignature(0.0, 0.0, 0.0) é o "sem mão" de
+    uma detecção que respondeu; indisponível é None, não a
+    assinatura zero.
+    """
+
+    area: float
+    centroid_x: float
+    centroid_y: float
+
+    def __post_init__(self):
+        for name in ("area", "centroid_x", "centroid_y"):
+            value = getattr(self, name)
+            if not isinstance(value, (int, float)) or not np.isfinite(value):
+                raise ValueError(f"{name} precisa ser float finito: {value!r}")
+        if self.area < 0:
+            raise ValueError(f"area precisa ser >= 0: {self.area}")
+
+
+@dataclass(frozen=True, slots=True)
+class HandSample:
+    """Uma amostra de presença de mão.
+
+    present é True (mão), False (sem mão) ou None (sinal
+    indisponível — sem modelo ou landmarker). moved é o sinal de
+    atividade da assinatura: passo de centroide ou variação
+    relativa de área além dos limiares.
+    """
+
+    present: bool | None
+    moved: bool
+
+    def __post_init__(self):
+        if self.present not in (True, False, None):
+            raise ValueError(
+                f"present precisa ser True, False ou None: {self.present!r}"
+            )
+        if not isinstance(self.moved, bool):
+            raise ValueError(f"moved precisa ser bool: {self.moved!r}")
