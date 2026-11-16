@@ -137,3 +137,51 @@ def test_failed_write_leaves_no_temporary_files(tmp_path, monkeypatch):
     assert report.error is not None
     leftovers = [p.name for p in report.path.parent.glob("*.tmp*")]
     assert leftovers == []
+
+
+def test_concurrent_path_readers_publish_one_name(tmp_path, monkeypatch):
+    """path e a escrita podem correr juntos: os dois chamadores tem de
+    convergir para o mesmo nome publicado (o seq so pode ser consumido
+    uma vez por relatorio)."""
+    import itertools
+    import threading
+    import time as time_module
+
+    clock = _Clock()
+    report = _make(tmp_path, clock)
+
+    real_seq = itertools.count()
+    first_inside = threading.Event()
+    release_first = threading.Event()
+
+    class _BlockingSeq:
+        def __next__(self):
+            n = next(real_seq)
+            if n == 0:
+                first_inside.set()
+                release_first.wait(timeout=5.0)
+            return n
+
+    monkeypatch.setattr(report_module, "_REPORT_SEQ", _BlockingSeq())
+
+    seen = {}
+
+    def read_first():
+        seen["first"] = report.path
+
+    def read_second():
+        first_inside.wait(timeout=5.0)
+        seen["second"] = report.path
+
+    t1 = threading.Thread(target=read_first)
+    t2 = threading.Thread(target=read_second)
+    t1.start()
+    t2.start()
+    time_module.sleep(0.2)
+    release_first.set()
+    t1.join(timeout=5.0)
+    t2.join(timeout=5.0)
+
+    assert not t1.is_alive() and not t2.is_alive()
+    assert seen["first"] is seen["second"]
+    assert seen["first"] == report.path

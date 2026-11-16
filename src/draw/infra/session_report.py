@@ -76,15 +76,18 @@ class SessionReport:
     def path(self):
         # Nome calculado uma vez e congelado: a fracao de segundo e o
         # sufixo pid+contador impedem que duas sessoes no mesmo
-        # segundo, no mesmo diretorio, se sobrescrevam.
-        if self._report_path is None:
-            epoch = self._header["inicio_epoch"]
-            stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(epoch))
-            frac = int((epoch % 1) * 1000)
-            self._report_path = self._directory / (
-                f"session-{stamp}-{frac:03d}-{os.getpid()}-{next(_REPORT_SEQ)}.json"
-            )
-        return self._report_path
+        # segundo, no mesmo diretorio, se sobrescrevam. A escolha fica
+        # sob cadeado: dois chamadores concorrentes nao podem consumir
+        # o contador e publicar nomes diferentes.
+        with self._lock:
+            if self._report_path is None:
+                epoch = self._header["inicio_epoch"]
+                stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(epoch))
+                frac = int((epoch % 1) * 1000)
+                self._report_path = self._directory / (
+                    f"session-{stamp}-{frac:03d}-{os.getpid()}-{next(_REPORT_SEQ)}.json"
+                )
+            return self._report_path
 
     def start(self):
         self._directory.mkdir(parents=True, exist_ok=True)
