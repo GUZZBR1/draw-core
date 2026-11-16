@@ -7,6 +7,7 @@ tamanho. Nada aqui abre câmera nem janela.
 """
 
 import json
+import threading
 import time
 
 import pytest
@@ -25,7 +26,8 @@ def _read_records(path):
 @pytest.mark.slow
 def test_records_carry_snapshot_fields_and_counter_deltas(tmp_path):
     path = tmp_path / "telemetry.jsonl"
-    telemetry = SessionTelemetry(path, interval=0.05).start()
+    wrote = threading.Event()
+    telemetry = SessionTelemetry(path, interval=0.02, _wrote=wrote).start()
     try:
         telemetry.update(
             loop_fps=12.5,
@@ -37,26 +39,30 @@ def test_records_carry_snapshot_fields_and_counter_deltas(tmp_path):
             provisional_px=56,
             state="active",
         )
-        deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline:
-            if path.exists() and len(_read_records(path)) >= 1:
-                break
-            time.sleep(0.01)
+        assert wrote.wait(5.0)  # primeiro registro gravado pelo escritor
+        wrote.clear()
         telemetry.update(passes_total=13, retracted_px_total=40)
+        deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
-            if len(_read_records(path)) >= 2:
+            if path.exists() and any(
+                record.get("passes_total") == 13 for record in _read_records(path)
+            ):
                 break
-            time.sleep(0.01)
+            wrote.wait(0.5)
+            wrote.clear()
     finally:
         telemetry.close()
     records = _read_records(path)
     assert len(records) >= 2
-    first, second = records[0], records[-1]
+    first = records[0]
     assert first["loop_fps"] == 12.5
     assert first["canvas_px"] == 1234
     assert first["provisional_px"] == 56
     assert first["state"] == "active"
     assert "t_epoch" in first
+    second = next(
+        record for record in records if record.get("passes_total") == 13
+    )
     assert second["passes_total_delta"] == 3
     assert second["retracted_px_total_delta"] == 0
 

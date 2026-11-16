@@ -28,7 +28,7 @@ from pathlib import Path
 class SessionTelemetry:
     """Escritor de telemetria a 1 Hz em JSONL rotativo."""
 
-    def __init__(self, path, interval=1.0, max_bytes=5_000_000):
+    def __init__(self, path, interval=1.0, max_bytes=5_000_000, _wrote=None):
         self._path = Path(path)
         self._interval = float(interval)
         self._max_bytes = int(max_bytes)
@@ -41,6 +41,9 @@ class SessionTelemetry:
             target=self._run, name="draw-telemetry", daemon=True
         )
         self._error = None
+        # Gancho de teste privado: se recebido, um Event setado apos
+        # cada lote gravado — sem ele nada muda.
+        self._wrote = _wrote
 
     def start(self):
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -102,6 +105,8 @@ class SessionTelemetry:
         except OSError as error:
             self._error = error
             return False
+        if self._wrote is not None:
+            self._wrote.set()
         return True
 
     @property

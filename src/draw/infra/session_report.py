@@ -23,10 +23,14 @@ guarda o retrato mais recente sob cadeado; uma thread propria
 amostra a 1 Hz e dobra os agregados.
 """
 
+import itertools
 import json
+import os
 import threading
 import time
 from pathlib import Path
+
+_REPORT_SEQ = itertools.count()
 
 
 class SessionReport:
@@ -53,6 +57,9 @@ class SessionReport:
         )
         self._started_at = None
         self._samples = 0
+        self._report_path = None
+        self._write_lock = threading.Lock()
+        self._write_seq = 0
         self._sheet_samples = 0
         self._first_sheet_s = None
         self._previous_sheet = False
@@ -67,10 +74,18 @@ class SessionReport:
 
     @property
     def path(self):
-        stamp = time.strftime(
-            "%Y%m%d-%H%M%S", time.localtime(self._header["inicio_epoch"])
-        )
-        return self._directory / f"session-{stamp}.json"
+        # Nome calculado uma vez e congelado: a fracao de segundo e o
+        # sufixo pid+contador impedem que duas sessoes no mesmo
+        # segundo, no mesmo diretorio, se sobrescrevam.
+        if self._report_path is None:
+            epoch = self._header["inicio_epoch"]
+            stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(epoch))
+            frac = int((epoch % 1) * 1000)
+            self._report_path = self._directory / (
+                f"session-{stamp}-{frac:03d}"
+                f"-{os.getpid()}-{next(_REPORT_SEQ)}.json"
+            )
+        return self._report_path
 
     def start(self):
         self._directory.mkdir(parents=True, exist_ok=True)
@@ -146,10 +161,20 @@ class SessionReport:
         try:
             self._directory.mkdir(parents=True, exist_ok=True)
             text = json.dumps(self.summary(), indent=1, ensure_ascii=False)
-            tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(text, encoding="utf-8")
-            tmp.replace(self.path)
-            (self._directory / "latest.json").write_text(text, encoding="utf-8")
+            with self._write_lock:
+                # O escritor periodico e o close() podem se sobrepor:
+                # cada escrita usa um temporario proprio e o lock
+                # serializa — close() espera a escrita em voo em vez
+                # de sobrepor o mesmo .tmp. latest.json tambem e
+                # substituido por rename, nunca escrito no lugar.
+                self._write_seq += 1
+                tag = f"{os.getpid()}-{threading.get_ident()}-{self._write_seq}"
+                tmp = self.path.with_name(f"{self.path.stem}.tmp-{tag}")
+                tmp.write_text(text, encoding="utf-8")
+                tmp.replace(self.path)
+                latest_tmp = self._directory / f"latest.tmp-{tag}"
+                latest_tmp.write_text(text, encoding="utf-8")
+                latest_tmp.replace(self._directory / "latest.json")
         except OSError as error:
             self._error = error
 

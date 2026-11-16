@@ -97,3 +97,27 @@ def test_close_writes_report_and_latest(tmp_path):
         (report.path.parent / "latest.json").read_text(encoding="utf-8")
     )
     assert latest == written
+
+
+def test_same_second_sessions_get_distinct_paths(tmp_path):
+    clock = _Clock()
+    first = _make(tmp_path, clock)
+    second = _make(tmp_path, clock)
+    assert first.path != second.path
+    assert first.path.parent == second.path.parent
+
+
+def test_writes_leave_no_temporary_files(tmp_path):
+    clock = _Clock()
+    report = _make(tmp_path, clock)
+    report.update(sheet_present=True, state="sheet")
+    report._sample_once()
+    report._thread = _FakeThread()
+    report._write()
+    report.close()
+    leftovers = [p.name for p in report.path.parent.glob("*.tmp*")]
+    assert leftovers == []
+    latest = json.loads(
+        (report.path.parent / "latest.json").read_text(encoding="utf-8")
+    )
+    assert latest == json.loads(report.path.read_text(encoding="utf-8"))
