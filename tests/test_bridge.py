@@ -62,45 +62,66 @@ def _client(server, token=TOKEN):
     return conn
 
 
-def test_accept_loop_refuses_bad_handshake_and_keeps_listening():
-    """Um par sem token e recusado e o laco continua para o proximo."""
-    server = _serve_one_client()
+def _start_loop(server, frames):
+    """Sobe o accept loop com parada cooperativa deterministica."""
+    stop = threading.Event()
     logs = []
     thread = threading.Thread(
         target=wh._accept_loop,
-        args=(server, TOKEN, lambda: iter([b"jpeg"]), 0),
-        kwargs={"log": logs.append},
+        args=(server, TOKEN, frames, 0),
+        kwargs={"log": logs.append, "stop": stop},
         daemon=True,
     )
     thread.start()
-    with _client(server, token=b"token-errado-de-teste!") as bad:
-        assert bad.recv(4) == b""  # recusado: conexao fechada sem ACCEPT
-    with _client(server) as good:
-        assert good.recv(4) == wh.ACCEPT
-        assert good.recv(wh.HEADER.size + 4)  # o laco chegou num segundo cliente
-    # server fica aberto: a thread daemon morre com o processo
+    return thread, stop, logs
+
+
+def _stop_loop(thread, stop, server):
+    stop.set()
+    thread.join(timeout=2.0)
+    assert not thread.is_alive()
+    server.close()
+
+
+def test_accept_loop_refuses_bad_handshake_and_keeps_listening():
+    """Um par sem token e recusado e o laco continua para o proximo."""
+    server = _serve_one_client()
+    thread, stop, _logs = _start_loop(server, lambda: iter([b"jpeg"]))
+    try:
+        with _client(server, token=b"token-errado-de-teste!") as bad:
+            assert bad.recv(4) == b""  # recusado: conexao fechada sem ACCEPT
+        with _client(server) as good:
+            assert good.recv(4) == wh.ACCEPT
+            assert good.recv(wh.HEADER.size + 4)  # segundo cliente atendido
+    finally:
+        _stop_loop(thread, stop, server)
 
 
 def test_accept_loop_survives_client_disconnect_mid_stream():
     """WSL caindo no meio do fluxo nao mata o ajudante residente."""
     server = _serve_one_client()
-    logs = []
-    thread = threading.Thread(
-        target=wh._accept_loop,
-        args=(server, TOKEN, lambda: iter([b"x" * 8] * 40), 0),
-        kwargs={"log": logs.append},
-        daemon=True,
-    )
-    thread.start()
-    conn = _client(server)
-    conn.recv(4)  # ACCEPT
-    conn.recv(wh.HEADER.size + 8)  # um frame
-    conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
-    conn.close()  # RST: o proximo sendall do servidor levanta OSError
-    with _client(server) as again:
-        assert again.recv(4) == wh.ACCEPT
-        assert again.recv(wh.HEADER.size + 8)
-    # server fica aberto: a thread daemon morre com o processo
+    thread, stop, _logs = _start_loop(server, lambda: iter([b"x" * 8] * 40))
+    try:
+        conn = _client(server)
+        conn.recv(4)  # ACCEPT
+        conn.recv(wh.HEADER.size + 8)  # um frame
+        conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        conn.close()  # RST: o proximo sendall do servidor levanta OSError
+        with _client(server) as again:
+            assert again.recv(4) == wh.ACCEPT
+            assert again.recv(wh.HEADER.size + 8)
+    finally:
+        _stop_loop(thread, stop, server)
+
+
+def test_accept_loop_stop_event_shuts_down_between_accepts():
+    """O stop cooperativo encerra o laco sem cliente nenhum."""
+    server = _serve_one_client()
+    thread, stop, _logs = _start_loop(server, lambda: iter([b"jpeg"]))
+    stop.set()
+    thread.join(timeout=2.0)
+    assert not thread.is_alive()
+    server.close()
 
 
 def test_capture_timestamp_is_relative_to_process_epoch():

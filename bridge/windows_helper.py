@@ -400,18 +400,33 @@ def _handle_client(conn, frames, start_ns, clock=time.perf_counter_ns):
 
 
 def _accept_loop(
-    server, token, make_frames, start_ns, clock=time.perf_counter_ns, log=print
+    server,
+    token,
+    make_frames,
+    start_ns,
+    clock=time.perf_counter_ns,
+    log=print,
+    stop=None,
 ):
     """Laco residente: aceita, autentica e serve um cliente por vez.
 
-    O ajudante e residente (PROTOCOL.md, "Transporte"): so sai por
-    Ctrl+C/sinal. Falha de handshake fecha a conexao; queda do
+    O ajudante e residente (PROTOCOL.md, "Transporte"): por padrao so
+    sai por Ctrl+C/sinal. Falha de handshake fecha a conexao; queda do
     cliente no meio do fluxo fecha e volta ao accept. A captura e
     reaberta por cliente (make_frames() a cada conexao) — nenhum
-    estado de captura e compartilhado entre clientes.
+    estado de captura e compartilhado entre clientes. O `stop`
+    opcional (threading.Event) da uma saida cooperativa, checada
+    entre accepts — usada por testes e por um desligamento limpo.
     """
+    if stop is not None:
+        server.settimeout(0.25)
     while True:
-        conn, addr = server.accept()
+        if stop is not None and stop.is_set():
+            return
+        try:
+            conn, addr = server.accept()
+        except TimeoutError:
+            continue
         if not authenticate_client(conn, token):
             log(f"Conexao de {addr[0]} recusada: handshake/token invalido.")
             conn.close()
@@ -432,6 +447,7 @@ def serve(
     allow_all_interfaces=False,
     frames=None,
     clock=time.perf_counter_ns,
+    stop=None,
 ):
     """Laco principal: escuta, autentica o WSL, envia frames. ESBOCO.
 
@@ -440,7 +456,8 @@ def serve(
     frame_id comeca em 0 a cada sessao; a epoca do timestamp e o
     inicio do processo (start_ns abaixo). O laco e residente: cada
     cliente caido/recusado volta ao accept; so um sinal encerra.
-    frames/clock existem para os testes injetarem fonte e relogio.
+    frames/clock/stop existem para os testes injetarem fonte,
+    relogio e uma saida cooperativa.
     """
     import socket
 
@@ -455,7 +472,7 @@ def serve(
     server.listen(1)
     print(f"Ajudante Draw (ESBOCO) escutando em {bind_host}:{port}.")
     make_frames = (lambda: frames) if frames is not None else capture_frames
-    _accept_loop(server, token, make_frames, start_ns, clock)
+    _accept_loop(server, token, make_frames, start_ns, clock, stop=stop)
 
 
 def main():
