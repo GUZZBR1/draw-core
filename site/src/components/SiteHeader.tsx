@@ -158,7 +158,10 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
 
   useMotionValueEvent(scrollY, 'change', (value) => {
     setIsScrolled(!isHome || value > 8);
-    if (isHome && value <= 0 && headerPeek.get() > 0 && !headerPeek.isAnimating()) animate(headerPeek, 0, { duration: 0.3 });
+    if (isHome && value <= 0 && headerPeek.get() > 0 && !headerPeek.isAnimating() && !document.querySelector('.site-header')?.contains(document.activeElement)) {
+      if (reduceMotion) headerPeek.set(0);
+      else animate(headerPeek, 0, { duration: 0.3 });
+    }
   });
 
   useEffect(() => {
@@ -166,11 +169,15 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
     if (!isHome) return;
     let gated = false;
     let idle = 0;
+    const showHeader = () => {
+      if (reduceMotion) headerPeek.set(1);
+      else animate(headerPeek, 1, { duration: 0.5, ease: [0.22, 0.61, 0.36, 1] });
+    };
     let cap = 0;
     const peek = (event: Event) => {
       if (!event.cancelable) return false;
       event.preventDefault();
-      animate(headerPeek, 1, { duration: 0.5, ease: [0.22, 0.61, 0.36, 1] });
+      showHeader();
       gated = true;
       window.clearTimeout(cap);
       cap = window.setTimeout(() => { gated = false; }, 1000);
@@ -178,6 +185,7 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
     };
     const atRest = () => window.scrollY <= 0 && headerPeek.get() < 0.5 && !gated;
     const onWheel = (event: WheelEvent) => {
+      if (event.ctrlKey || event.metaKey) return;
       if (gated) {
         event.preventDefault();
         window.clearTimeout(idle);
@@ -194,6 +202,7 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
     };
     const onTouchEnd = () => { window.clearTimeout(idle); idle = window.setTimeout(() => { gated = false; }, 140); };
     const onKey = (event: KeyboardEvent) => {
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
       if (['ArrowDown', 'PageDown', ' ', 'End'].includes(event.key) && atRest()) {
         const target = event.target as HTMLElement | null;
         if (target && /^(INPUT|TEXTAREA|SELECT|BUTTON|A)$/.test(target.tagName)) return;
@@ -214,7 +223,7 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
       window.removeEventListener('touchend', onTouchEnd);
       window.removeEventListener('keydown', onKey);
     };
-  }, [isHome, headerPeek]);
+  }, [isHome, headerPeek, reduceMotion]);
 
   useEffect(() => {
     setIsScrolled(!isHome);
@@ -288,6 +297,11 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
     <>
       <motion.header
         className={`site-header fixed left-1/2 top-2 z-50 ${!isHome || isScrolled ? 'is-scrolled' : ''}`}
+        onFocusCapture={() => {
+          if (!isHome || headerPeek.get() >= 1) return;
+          if (reduceMotion) headerPeek.set(1);
+          else animate(headerPeek, 1, { duration: 0.25 });
+        }}
         style={{ width: headerWidth, maxWidth: headerMaxWidth, x: '-50%', y: headerY, opacity: headerOpacity, pointerEvents: headerPointer }}
       >
         <motion.nav
