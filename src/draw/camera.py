@@ -23,6 +23,7 @@ from pathlib import Path
 import cv2
 
 from .contracts import FramePacket
+from .protocol import HelperCapture, is_helper_source
 
 # Limite de falhas seguidas de leitura que declara a fonte morta.
 # Era a contagem do laco principal (15 read() falhos seguidos e o app
@@ -83,6 +84,13 @@ class LatestFrameCapture:
         self._dead = False
         self._stopped = False
         self._error = None
+        # Metadados do emissor (HelperCapture): o último id/ts publicado
+        # no pacote e o contador de descarte na fonte, quando a fonte
+        # o expõe (saltos de frame_id contados no adaptador, sobre
+        # todos os registros — decode ruim não vira descarte falso).
+        self._source_frame_id = None
+        self._source_ts_ms = None
+        self._has_source_dropped = hasattr(self._capture, "source_dropped")
 
     def start(self):
         self._thread.start()
@@ -116,6 +124,11 @@ class LatestFrameCapture:
                 # read() retorna — o consumidor ve o instante de
                 # publicacao, nao o do proprio relogio.
                 captured_at = time.monotonic()
+                # Identidade do emissor quando a fonte a expõe
+                # (HelperCapture): entra no pacote e alimenta a
+                # contagem de descarte na origem.
+                source_frame_id = getattr(self._capture, "last_frame_id", None)
+                source_ts_ms = getattr(self._capture, "last_capture_ts_ms", None)
                 with self._condition:
                     if self._stopped:
                         return
@@ -124,6 +137,8 @@ class LatestFrameCapture:
                     self._seq += 1
                     self._frame = frame
                     self._captured_at = captured_at
+                    self._source_frame_id = source_frame_id
+                    self._source_ts_ms = source_ts_ms
                     self._failures = 0
                     self._condition.notify_all()
             else:
@@ -156,6 +171,8 @@ class LatestFrameCapture:
                     image=self._frame,
                     captured_at=self._captured_at,
                     sequence=self._seq,
+                    source_frame_id=self._source_frame_id,
+                    source_ts_ms=self._source_ts_ms,
                 )
             return None
 
@@ -173,13 +190,18 @@ class LatestFrameCapture:
         """Contadores para a telemetria de sessao (1 registro/s).
 
         capture_dropped: publicados substituidos antes do consumo
-        (a fila do slot).
+        (a fila do slot). capture_source_dropped: quadros que o
+        emissor descartou na fonte (saltos de frame_id), presente so
+        quando a fonte publica identidade propria.
         """
         with self._condition:
-            return {
+            fields = {
                 "capture_seq": self._seq,
                 "capture_dropped": self._dropped,
             }
+            if self._has_source_dropped:
+                fields["capture_source_dropped"] = self._capture.source_dropped
+            return fields
 
     @property
     def failures(self):
@@ -435,9 +457,24 @@ def _local_open_hint(source):
     )
 
 
-def open_capture(source, capture_factory=None):
+def open_capture(source, capture_factory=None, helper_token_file=None):
     global _LAST_OPEN_PROBE
     _LAST_OPEN_PROBE = None
+    if is_helper_source(source):
+        # Fonte do ajudante Windows (bridge/PROTOCOL.md): arquivo
+        # .drawcap gravado ou stream tcp:// ao vivo. AuthenticationError
+        # sobe direto — o operador precisa ver que o token faltou ou
+        # foi recusado, nao um "nao consegui abrir" generico.
+        capture = HelperCapture(source, token_file=helper_token_file)
+        if capture.isOpened():
+            return capture
+        capture.release()
+        raise RuntimeError(
+            f"Nao consegui abrir a fonte do ajudante: {source!r}. "
+            "Confira se o arquivo .drawcap existe e e legivel, ou se o "
+            "ajudante esta escutando na porta TCP (o token vem de "
+            "--helper-token-file; veja bridge/PROTOCOL.md)."
+        )
     if capture_factory is None:
         capture_factory = cv2.VideoCapture
     capture = capture_factory(source)

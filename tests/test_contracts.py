@@ -59,6 +59,31 @@ def test_frame_packet_rejects_negative_sequence():
         FramePacket(image=_frame(), captured_at=0.0, sequence=-1)
 
 
+def test_frame_packet_source_metadata_optional():
+    packet = FramePacket(image=_frame(), captured_at=1.0, sequence=0)
+    assert packet.source_frame_id is None
+    assert packet.source_ts_ms is None
+    packet = FramePacket(
+        image=_frame(),
+        captured_at=1.0,
+        sequence=0,
+        source_frame_id=7,
+        source_ts_ms=42_000,
+    )
+    assert packet.source_frame_id == 7
+    assert packet.source_ts_ms == 42_000
+
+
+@pytest.mark.parametrize(
+    "field",
+    [{"source_frame_id": -1}, {"source_ts_ms": -5}],
+    ids=["frame_id_negativo", "ts_negativo"],
+)
+def test_frame_packet_rejects_negative_source_metadata(field):
+    with pytest.raises(ValueError, match="source_"):
+        FramePacket(image=_frame(), captured_at=0.0, sequence=0, **field)
+
+
 def test_frame_packet_is_frozen():
     packet = FramePacket(image=_frame(), captured_at=0.0, sequence=0)
     with pytest.raises(FrozenInstanceError):
