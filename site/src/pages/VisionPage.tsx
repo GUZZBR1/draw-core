@@ -33,8 +33,71 @@ export default function VisionPage() {
     let segmentIndex = 0;
     let letterIndex = 0;
     let timer = 0;
+    let revealed = false;
+
+    const reveal = () => {
+      if (revealed) return;
+      revealed = true;
+      window.clearTimeout(timer);
+      removeIntent();
+      const mists: HTMLSpanElement[] = [];
+      segments.forEach(({ element, text }, index) => {
+        if (index < segmentIndex) return;
+        const rest = index === segmentIndex ? text.slice(letterIndex) : text;
+        if (!rest) return;
+        const mist = document.createElement('span');
+        mist.className = 'vision-mist';
+        mist.textContent = rest;
+        mist.style.transitionDelay = `${mists.length * 70}ms`;
+        element.append(mist);
+        mists.push(mist);
+      });
+      requestAnimationFrame(() => requestAnimationFrame(() => mists.forEach((mist) => mist.classList.add('is-clear'))));
+    };
+
+    const RESISTANCE = 260;
+    let travel = 0;
+    let idle = 0;
+    let lastTouchY = 0;
+    const push = (distance: number) => {
+      if (distance <= 0) return;
+      travel += distance;
+      window.clearTimeout(idle);
+      idle = window.setTimeout(() => { travel = 0; }, 450);
+      if (travel >= RESISTANCE) reveal();
+    };
+    const onWheel = (event: WheelEvent) => {
+      const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? window.innerHeight : 1;
+      push(event.deltaY * unit);
+    };
+    const onTouchStart = (event: TouchEvent) => { lastTouchY = event.touches[0].clientY; };
+    const onTouchMove = (event: TouchEvent) => {
+      const y = event.touches[0].clientY;
+      push(lastTouchY - y);
+      lastTouchY = y;
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.altKey || event.ctrlKey || event.metaKey) return;
+      if (['PageDown', 'End', ' ', 'ArrowDown'].includes(event.key)) push(event.key === 'ArrowDown' ? 60 : RESISTANCE);
+    };
+    const onScroll = () => { if (window.scrollY > 700) reveal(); };
+    window.addEventListener('wheel', onWheel, { passive: true });
+    window.addEventListener('touchstart', onTouchStart, { passive: true });
+    window.addEventListener('touchmove', onTouchMove, { passive: true });
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('scroll', onScroll, { passive: true });
+    function removeIntent() {
+      window.clearTimeout(idle);
+      window.removeEventListener('wheel', onWheel);
+      window.removeEventListener('touchstart', onTouchStart);
+      window.removeEventListener('touchmove', onTouchMove);
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('scroll', onScroll);
+    }
+
     const writeNext = () => {
       if (motionPreference.matches) {
+        removeIntent();
         segments.forEach(({ element, text }) => { element.textContent = text; });
         return;
       }
@@ -57,7 +120,7 @@ export default function VisionPage() {
     };
 
     timer = window.setTimeout(writeNext, 1200);
-    return () => window.clearTimeout(timer);
+    return () => { window.clearTimeout(timer); removeIntent(); };
   }, [paragraphs]);
 
   return (

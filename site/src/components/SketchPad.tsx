@@ -13,9 +13,10 @@ const COLORS: { name: string; value: string; display?: string }[] = [
   { name: 'Violeta', value: '#8c719a' },
 ];
 const SIZES = [
-  { name: 'Fino', value: 2 },
-  { name: 'Médio', value: 4 },
-  { name: 'Grosso', value: 8 },
+  { name: 'Fino', value: 2, icon: 4 },
+  { name: 'Médio', value: 4, icon: 7 },
+  { name: 'Grosso', value: 8, icon: 11 },
+  { name: 'Enorme', value: 36, icon: 19 },
 ];
 const POINT_LIMIT = 5000;
 
@@ -59,6 +60,38 @@ export default function SketchPad() {
   const [color, setColor] = useState(COLORS[0].value);
   const [brushSize, setBrushSize] = useState(4);
   const [tool, setTool] = useState<Tool>('pen');
+  const previewRef = useRef<HTMLSpanElement>(null);
+  const previewTimerRef = useRef(0);
+
+  const movePreview = useCallback((x: number, y: number) => {
+    const preview = previewRef.current;
+    if (!preview) return;
+    preview.style.transform = `translate3d(${x}px, ${y}px, 0) translate(-50%, -50%)`;
+    preview.classList.add('is-visible');
+  }, []);
+
+  const hidePreview = useCallback(() => {
+    window.clearTimeout(previewTimerRef.current);
+    previewRef.current?.classList.remove('is-visible');
+  }, []);
+
+  const firstRender = useRef(true);
+  useEffect(() => {
+    if (firstRender.current) { firstRender.current = false; return; }
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    movePreview(canvas.clientWidth / 2, canvas.clientHeight / 2);
+    window.clearTimeout(previewTimerRef.current);
+    previewTimerRef.current = window.setTimeout(hidePreview, 1100);
+    return () => window.clearTimeout(previewTimerRef.current);
+  }, [brushSize, tool, movePreview, hidePreview]);
+
+  function trackPointer(event: React.PointerEvent<HTMLCanvasElement>) {
+    if (event.pointerType === 'touch' && activePointerRef.current === null) return;
+    window.clearTimeout(previewTimerRef.current);
+    const bounds = event.currentTarget.getBoundingClientRect();
+    movePreview(event.clientX - bounds.left, event.clientY - bounds.top);
+  }
 
   const paintStroke = useCallback((
     context: CanvasRenderingContext2D,
@@ -249,7 +282,7 @@ export default function SketchPad() {
               title={`Traço ${size.name.toLowerCase()}`}
               onClick={() => setBrushSize(size.value)}
             >
-              <span style={{ width: size.value * 1.7, height: size.value * 1.7 }} />
+              <span style={{ width: size.icon, height: size.icon }} />
             </button>
           ))}
         </div>
@@ -265,15 +298,23 @@ export default function SketchPad() {
         </button>
       </div>
       <p className="sketch-hint" aria-hidden="true">Toque e arraste, solte quando terminar</p>
+      <span
+        ref={previewRef}
+        className="sketch-brush-preview"
+        aria-hidden="true"
+        style={{ width: Math.max(brushSize, 6), height: Math.max(brushSize, 6) }}
+      />
       <canvas
         ref={canvasRef}
         className="sketch-canvas"
         aria-label="Folha de desenho em branco. Use mouse, toque ou caneta para desenhar."
         tabIndex={0}
         onPointerDown={beginStroke}
-        onPointerMove={continueStroke}
-        onPointerUp={finishStroke}
-        onPointerCancel={finishStroke}
+        onPointerMove={(event) => { trackPointer(event); continueStroke(event); }}
+        onPointerEnter={trackPointer}
+        onPointerLeave={(event) => { if (activePointerRef.current === null || event.pointerType !== 'mouse') hidePreview(); }}
+        onPointerUp={(event) => { finishStroke(event); if (event.pointerType !== 'mouse') hidePreview(); }}
+        onPointerCancel={(event) => { finishStroke(event); hidePreview(); }}
         onLostPointerCapture={finishStroke}
         onContextMenu={(event) => event.preventDefault()}
       >
