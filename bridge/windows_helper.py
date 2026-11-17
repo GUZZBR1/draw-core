@@ -26,11 +26,13 @@ Duas metades:
    de estruturas Win32 documentadas.
 
 2. Laço captura -> JPEG -> socket conforme o PROTOCOL.md. A
-   captura usa cv2.VideoCapture (DirectShow) pedindo MJPG
-   1280x720 — a camera entrega JPEG nativo — e cv2.imencode faz o
-   JPEG do frame. O carimbo sai na entrega do frame ao socket
-   (mede a entrega, não a exposição do sensor; a diferença entra
-   no relatorio quando o passo de latencia rodar).
+   captura usa cv2.VideoCapture (DirectShow) no modo nativo da
+   camera — negociar FOURCC/resolucao em tempo de execucao trava
+   drivers UVC reais, entao --width/--height sao opt-in e FOURCC
+   nao se expoe — e cv2.imencode faz o JPEG do frame. O carimbo
+   sai na entrega do frame ao socket (mede a entrega, não a
+   exposição do sensor; a diferença entra no relatorio quando o
+   passo de latencia rodar).
 
 Uso pretendido (no Windows, quando testado):
   set DRAW_HELPER_TOKEN=<token compartilhado com o WSL>
@@ -243,6 +245,15 @@ def click(down=True):
 # --- Captura: cv2/DirectShow ---
 
 
+class CaptureError(RuntimeError):
+    """Falha da camera/pipeline de captura.
+
+    Derruba so o atendimento daquele cliente — o ajudante residente
+    volta ao accept e tenta de novo na proxima conexao. Subclasse de
+    RuntimeError para quem so quer o tipo generico.
+    """
+
+
 def capture_frames(index=0, width=None, height=None, quality=85):
     """Produz (jpeg_bytes) por frame capturado via cv2/DirectShow.
 
@@ -268,7 +279,7 @@ def capture_frames(index=0, width=None, height=None, quality=85):
 
     cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
     if not cap.isOpened():
-        raise RuntimeError(f"camera {index} indisponivel ou em uso")
+        raise CaptureError(f"camera {index} indisponivel ou em uso")
     if width:
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
     if height:
@@ -277,7 +288,7 @@ def capture_frames(index=0, width=None, height=None, quality=85):
         while True:
             ok, frame = cap.read()
             if not ok or frame is None:
-                raise RuntimeError(f"leitura da camera {index} falhou")
+                raise CaptureError(f"leitura da camera {index} falhou")
             ok, jpeg = cv2.imencode(".jpg", frame, (cv2.IMWRITE_JPEG_QUALITY, quality))
             if ok:
                 yield jpeg.tobytes()
@@ -455,6 +466,8 @@ def _accept_loop(
         try:
             sent = _handle_client(conn, make_frames(), start_ns, clock)
             log(f"Cliente {addr[0]} desconectou apos {sent} frames.")
+        except CaptureError as exc:
+            log(f"Captura falhou para {addr[0]} ({exc}); voltando a escutar.")
         except (OSError, ConnectionError):
             log(f"Conexao com {addr[0]} caiu; voltando a escutar.")
         finally:

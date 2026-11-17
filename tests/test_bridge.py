@@ -114,6 +114,34 @@ def test_accept_loop_survives_client_disconnect_mid_stream():
         _stop_loop(thread, stop, server)
 
 
+def test_accept_loop_survives_capture_failure_and_serves_next_client():
+    """Camera falhando para um cliente nao mata o ajudante residente.
+
+    O generador da primeira conexao levanta CaptureError (camera em
+    uso/desconectada); a conexao morre, o laco volta ao accept e o
+    proximo cliente recebe frames normalmente.
+    """
+    server = _serve_one_client()
+
+    def _fail():
+        raise wh.CaptureError("camera 0 indisponivel ou em uso")
+        yield  # pragma: no cover — inalcancavel; mantem gerador
+
+    gens = [_fail(), iter([b"x" * 8])]
+    thread, stop, logs = _start_loop(server, lambda: gens.pop(0))
+    try:
+        conn = _client(server)
+        assert conn.recv(4) == wh.ACCEPT
+        while conn.recv(4096):  # a falha de captura fecha a conexao
+            pass
+        with _client(server) as again:
+            assert again.recv(4) == wh.ACCEPT
+            assert again.recv(wh.HEADER.size + 8)
+        assert any("Captura falhou" in line for line in logs)
+    finally:
+        _stop_loop(thread, stop, server)
+
+
 def test_accept_loop_stop_event_shuts_down_between_accepts():
     """O stop cooperativo encerra o laco sem cliente nenhum."""
     server = _serve_one_client()
