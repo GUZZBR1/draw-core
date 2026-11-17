@@ -2,6 +2,7 @@
 precisa do repo legado e dos binários dos modelos)."""
 
 import json
+import os
 
 import numpy as np
 from lab.parity_e2e import compare
@@ -103,6 +104,7 @@ def test_run_legacy_limpa_env_draw(monkeypatch, tmp_path):
 
     def fake_run(cmd, env=None, **kw):
         seen["env"] = env
+        seen["cmd"] = cmd
         (tmp_path / "telemetry.json").write_text(json.dumps({"frames": []}))
         np.savez_compressed(tmp_path / "canvas.npz")
         return subprocess.CompletedProcess(cmd, 0, "", "")
@@ -116,8 +118,140 @@ def test_run_legacy_limpa_env_draw(monkeypatch, tmp_path):
         fps=1.0,
         sheet_model="s.onnx",
         ink_model="i.onnx",
+        hand_model="h.task",
     )
     assert "DRAW_INK_REMOVAL" not in seen["env"]
     assert "DRAW_MODEL_STRICT" not in seen["env"]
     assert seen["env"]["PYTHONPATH"] == str(tmp_path)
     assert seen["env"]["PATH"] == "/usr/bin"
+    assert "--hand-model" in seen["cmd"]
+    assert "h.task" in seen["cmd"]
+
+
+def test_compare_alinha_pelo_frame_id():
+    # Mesmas contagens, lacunas diferentes: parear por posição
+    # casaria o frame 2 do novo com o frame 1 do legado.
+    new = [_rec(0), _rec(2)]
+    old = [_rec(0), _rec(1)]
+    report = compare(
+        new,
+        [_mask(0), _mask(0)],
+        old,
+        [_mask(0), _mask(0)],
+        iou_min=0.999,
+        corner_tol=0.5,
+    )
+    assert report["ok"] is False
+    assert report["frames"] == 1  # só o frame 0 existiu nos dois
+    missing = {(d["frame"], d["frame_missing"]) for d in report["divergences"]}
+    assert missing == {(1, "new"), (2, "legacy")}
+
+
+def test_compare_frame_extra_lado_unico_diverge():
+    new = [_rec(0), _rec(1)]
+    old = [_rec(0)]
+    report = compare(
+        new, [_mask(0), _mask(0)], old, [_mask(0)], iou_min=0.999, corner_tol=0.5
+    )
+    assert report["ok"] is False
+    (div,) = report["divergences"]
+    assert div == {"frame": 1, "frame_missing": "legacy"}
+
+
+def _fake_legacy_repo(tmp_path):
+    repo = tmp_path / "legado"
+    (repo / "draw").mkdir(parents=True)
+    (repo / "draw" / "loop.py").write_text("")
+    return repo
+
+
+def test_main_hand_measured_exige_os_dois_lados(monkeypatch, tmp_path):
+    from lab import parity_e2e
+
+    repo = _fake_legacy_repo(tmp_path)
+    recs = [_rec(0, present=False)]
+    masks = [_mask(0)]
+
+    def runs(new_n, old_n):
+        monkeypatch.setattr(
+            parity_e2e,
+            "run_new",
+            lambda *a, **k: (recs, masks, new_n),
+        )
+        monkeypatch.setattr(
+            parity_e2e,
+            "run_legacy",
+            lambda *a, **k: (recs, masks, old_n),
+        )
+
+    runs(4, 0)
+    out = tmp_path / "um_lado"
+    parity_e2e.main(
+        ["--corpus", "corpus", "--out", str(out), "--legacy-repo", str(repo)]
+    )
+    report = json.loads((out / "parity.json").read_text())
+    assert report["hand_samples"] == {"new": 4, "legacy": 0}
+    assert report["hand_measured"] is False
+
+    runs(4, 2)
+    out = tmp_path / "dois_lados"
+    parity_e2e.main(
+        ["--corpus", "corpus", "--out", str(out), "--legacy-repo", str(repo)]
+    )
+    report = json.loads((out / "parity.json").read_text())
+    assert report["hand_samples"] == {"new": 4, "legacy": 2}
+    assert report["hand_measured"] is True
+
+
+def test_driver_fecha_maskers_no_finally():
+    """O import do driver seta as 8 flags validadas no topo do
+    módulo — isola o os.environ para não vazar no resto da suíte."""
+    import importlib
+
+    saved = dict(os.environ)
+    try:
+        drv = importlib.import_module("lab.parity_legacy_driver")
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+    class Lm:
+        def __init__(self):
+            self.closed = 0
+
+        def close(self):
+            self.closed += 1
+
+    class MaskerInterno:
+        def __init__(self):
+            self._landmarker = Lm()
+            self._video_landmarker = Lm()
+
+    interno = MaskerInterno()
+    drv._close_hand_masker(interno)
+    assert interno._landmarker.closed == 1
+    assert interno._video_landmarker.closed == 1
+
+    class MaskerPublico:
+        def __init__(self):
+            self.closed = 0
+            self._landmarker = Lm()
+
+        def close(self):
+            self.closed += 1
+
+    publico = MaskerPublico()
+    drv._close_hand_masker(publico)
+    assert publico.closed == 1
+    assert publico._landmarker.closed == 0  # prefere o método público
+
+    class LmRuim:
+        def close(self):
+            raise RuntimeError("finalizer ruim")
+
+    class MaskerRuim:
+        _landmarker = LmRuim()
+        _video_landmarker = None
+
+    drv._close_hand_masker(MaskerRuim())  # engole a exceção
+    drv._close_hand_masker(None)
