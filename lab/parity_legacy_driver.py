@@ -12,11 +12,15 @@ legado toda flag de comportamento nasce desligada e o default não é
 a configuração validada; no draw-core elas são o default de
 PipelineConfig/InkConfig.
 
-Saída: out/telemetry.json (corners/present por frame) + out/canvas.npz
-(clean_mask>0 de cada frame). Uso:
+Saída: out/telemetry.json (corners/present por frame + hand_samples,
+amostras de presença com sinal real — zero denuncia ambiente sem
+mediapipe/modelo) + out/canvas.npz (clean_mask>0 de cada frame). Com
+--hand-model resolvendo um arquivo, masker e presença entram nos dois
+lados como na produção. Uso:
 
   PYTHONPATH=/caminho/do/draw python lab/parity_legacy_driver.py \
-      --corpus <dir|video.mp4> --out <dir> [--frames N] [--fps 2.0]
+      --corpus <dir|video.mp4> --out <dir> [--frames N] [--fps 2.0] \
+      [--hand-model models/hand_landmarker.task]
 """
 
 import argparse
@@ -78,6 +82,7 @@ def main(argv=None):
     ap.add_argument("--fps", type=float, default=2.0)
     ap.add_argument("--sheet-model", default="models/draw_seg_v3_dyn.onnx")
     ap.add_argument("--ink-model", default="models/page_clean_unet.onnx")
+    ap.add_argument("--hand-model", default="models/hand_landmarker.task")
     args = ap.parse_args(argv)
 
     from draw.ink_layers import _PageCleanWorker
@@ -85,6 +90,8 @@ def main(argv=None):
     from draw.neural import NeuralSheetDetector
     from draw.sheet_track import _gate_info_from_trace
 
+    from draw import hand as hand_module
+    from draw import hand_presence as hand_presence_module
     from draw.app import _detect_sheet_combined_traced
     from draw.page_clean import PageCleanInk
 
@@ -92,6 +99,21 @@ def main(argv=None):
     detector.load()
     page_clean = PageCleanInk(args.ink_model)
     page_clean.load()
+    # Mão como na produção: masker do page-clean + presença do laço.
+    # Sem o arquivo (ou sem mediapipe instalada) os dois lados rodam
+    # sem o recurso e a telemetria marca a mão como não medida.
+    hand_masker = (
+        hand_module.HandMasker(args.hand_model)
+        if hand_module.hand_model_available(args.hand_model)
+        else None
+    )
+    presence = (
+        hand_presence_module._MediaPipeHandPresence(
+            hand_module.HandMasker(args.hand_model)
+        )
+        if hand_module.hand_model_available(args.hand_model)
+        else None
+    )
 
     class Clock:
         def __init__(self, dt):
@@ -136,10 +158,41 @@ def main(argv=None):
         def take_traces(self, upto_result_seq=None):
             return []
 
+    class SyncPresence:
+        """Presença síncrona no contrato (seq, presença, moveu)."""
+
+        def __init__(self, presence):
+            self._presence = presence
+            self._result = None
+            self._seq = 0
+            self.error = None
+            self.real_samples = 0
+
+        def submit(self, frame, timestamp_ms):
+            self._seq += 1
+            sample = self._presence.sample(frame, timestamp_ms)
+            present, moved = (
+                (sample.present, sample.moved) if hasattr(sample, "present") else sample
+            )
+            self._result = (self._seq, present, moved)
+            if present is not None:
+                self.real_samples += 1
+
+        def poll(self, after_seq):
+            if self._result is None or self._result[0] <= after_seq:
+                return None
+            return self._result
+
     det = SyncDet()
-    worker = _PageCleanWorker(page_clean, None, clock=clock)
+    presence_worker = SyncPresence(presence) if presence is not None else None
+    worker = _PageCleanWorker(page_clean, hand_masker, clock=clock)
     loop = SheetInkLoop(
-        detection_worker=det, ink_worker=worker, clock=clock, log=lambda *_a: None
+        detection_worker=det,
+        ink_worker=worker,
+        hand_presence_worker=presence_worker,
+        hand_masker=hand_masker,
+        clock=clock,
+        log=lambda *_a: None,
     )
 
     out = Path(args.out)
@@ -168,8 +221,16 @@ def main(argv=None):
             if loop.clean_mask is None
             else (np.asarray(loop.clean_mask) > 0)
         )
+    hand_samples = presence_worker.real_samples if presence_worker else 0
     (out / "telemetry.json").write_text(
-        json.dumps({"frames": records, "flags": sorted(VALIDATED_FLAGS)}, indent=1)
+        json.dumps(
+            {
+                "frames": records,
+                "flags": sorted(VALIDATED_FLAGS),
+                "hand_samples": hand_samples,
+            },
+            indent=1,
+        )
     )
     np.savez_compressed(out / "canvas.npz", *canvases)
     print(json.dumps({"frames": len(records), "out": str(out)}))

@@ -103,6 +103,7 @@ def test_run_legacy_limpa_env_draw(monkeypatch, tmp_path):
 
     def fake_run(cmd, env=None, **kw):
         seen["env"] = env
+        seen["cmd"] = cmd
         (tmp_path / "telemetry.json").write_text(json.dumps({"frames": []}))
         np.savez_compressed(tmp_path / "canvas.npz")
         return subprocess.CompletedProcess(cmd, 0, "", "")
@@ -116,8 +117,41 @@ def test_run_legacy_limpa_env_draw(monkeypatch, tmp_path):
         fps=1.0,
         sheet_model="s.onnx",
         ink_model="i.onnx",
+        hand_model="h.task",
     )
     assert "DRAW_INK_REMOVAL" not in seen["env"]
     assert "DRAW_MODEL_STRICT" not in seen["env"]
     assert seen["env"]["PYTHONPATH"] == str(tmp_path)
     assert seen["env"]["PATH"] == "/usr/bin"
+    assert "--hand-model" in seen["cmd"]
+    assert "h.task" in seen["cmd"]
+
+
+def test_compare_alinha_pelo_frame_id():
+    # Mesmas contagens, lacunas diferentes: parear por posição
+    # casaria o frame 2 do novo com o frame 1 do legado.
+    new = [_rec(0), _rec(2)]
+    old = [_rec(0), _rec(1)]
+    report = compare(
+        new,
+        [_mask(0), _mask(0)],
+        old,
+        [_mask(0), _mask(0)],
+        iou_min=0.999,
+        corner_tol=0.5,
+    )
+    assert report["ok"] is False
+    assert report["frames"] == 1  # só o frame 0 existiu nos dois
+    missing = {(d["frame"], d["frame_missing"]) for d in report["divergences"]}
+    assert missing == {(1, "new"), (2, "legacy")}
+
+
+def test_compare_frame_extra_lado_unico_diverge():
+    new = [_rec(0), _rec(1)]
+    old = [_rec(0)]
+    report = compare(
+        new, [_mask(0), _mask(0)], old, [_mask(0)], iou_min=0.999, corner_tol=0.5
+    )
+    assert report["ok"] is False
+    (div,) = report["divergences"]
+    assert div == {"frame": 1, "frame_missing": "legacy"}
