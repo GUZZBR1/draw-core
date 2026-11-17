@@ -581,3 +581,432 @@ def test_polyline_rect_overlap_exclusive_border_not_erased():
     # apagado, como na correcao anterior.
     by_thickness = np.array([[31, 5], [31, 15]], dtype=np.float32)
     assert sim_source._polyline_rect_overlap(by_thickness, rect, 4)
+
+
+def test_page_expected_matches_simulator_final(tmp_path):
+    """O gabarito do avaliador segue a ordem do simulador: a borracha
+    correu antes do redesenho, então traço de fase 1 dentro do
+    retângulo apagado é tinta esperada — não falso positivo."""
+    from lab.eval_scenario import _page_expected
+
+    capture = scenario(move=(20, 10, 1.5))
+    drain(capture)
+    gt = tmp_path / "scenario.gt.npz"
+    capture.save_ground_truth(gt)
+    with np.load(gt, allow_pickle=False) as bundle:
+        # fase de redraw aplicada e borracha já corrida: o esperado
+        # do checkpoint final tem que ser exatamente o estado da folha
+        expected = _page_expected(bundle, int(bundle["stroke_phase"].size), erased=True)
+        np.testing.assert_array_equal(expected > 0, bundle["page_ink_final"] > 0)
+        # e o redesenho DENTRO do retângulo apagado sobrevive no
+        # gabarito (era o que o apagar-em-bloco zerava)
+        x, y, w, h = (int(v) for v in bundle["erase_rect"])
+        redraw = _raster(bundle, np.nonzero(bundle["stroke_phase"] == 1)[0]) > 0
+        inside = np.zeros_like(redraw)
+        inside[y : y + h, x : x + w] = True
+        assert (expected > 0)[inside & redraw].all()
+
+
+def test_final_checkpoint_terminal_canvas_loss():
+    """Canvas perdido no evento final não empresta o IoU de fases
+    anteriores: o veredito expõe o status em vez de métricas."""
+    from lab.eval_scenario import _final_checkpoint
+
+    events = [{"kind": "hold", "end": 10}, {"kind": "settle", "end": 20}]
+    checkpoints = [
+        {"frame": 9, "phase": "hold", "iou": 0.9, "confirmed_px": 100},
+        {"frame": 19, "phase": "settle", "status": "sem âncora/canvas"},
+    ]
+    final = _final_checkpoint(checkpoints, events)
+    assert "iou" not in final
+    assert "canvas ausente" in final["status"]
+
+
+def test_final_checkpoint_missing_terminal_event():
+    """Vídeo truncado antes do último evento: veredito sem métrica,
+    com status explicando — nunca o sucesso de uma fase anterior."""
+    from lab.eval_scenario import _final_checkpoint
+
+    events = [{"kind": "hold", "end": 10}, {"kind": "settle", "end": 20}]
+    checkpoints = [{"frame": 9, "phase": "hold", "iou": 0.9}]
+    final = _final_checkpoint(checkpoints, events)
+    assert "iou" not in final
+    assert "evento final" in final["status"]
+
+
+def test_pipeline_summary_eh_json_serializavel():
+    """anchors/registrations carregam ndarrays — sem o resumo o
+    json.dumps do relatório quebrava e a auditoria não produzia
+    saída nenhuma."""
+    from lab.eval_scenario import _pipeline_summary
+
+    quad = np.float32([[0, 0], [10, 0], [10, 10], [0, 10]])
+    reg = {"anchor": quad, "quad": quad, "submitted": quad, "frame": 3}
+    pipeline = {
+        "mask": np.ones((4, 4), np.uint8),
+        "corners": quad,
+        "anchors": [quad.copy()],
+        "registrations": [reg],
+        "registration_history": [reg, dict(reg, frame=7)],
+        "canvas_shape": [60, 80],
+        "frames": 10,
+        "status": "ok",
+    }
+    summary = _pipeline_summary(pipeline)
+    json.dumps(summary)  # não levanta
+    assert summary["anchor_count"] == 1
+    assert summary["registration_count"] == 1
+    assert summary["registration_history_count"] == 2
+    assert summary["anchor_corners"] == [[0, 0], [10, 0], [10, 10], [0, 10]]
+    assert summary["final_confirmed_px"] == 16
+    assert "mask" not in summary and "registrations" not in summary
+    assert "anchors" not in summary and "corners" not in summary
+    assert "registration_history" not in summary
+    assert pipeline["mask"] is not None  # não muta o original
+
+
+def test_project_via_registrations_identidade():
+    from lab.eval_scenario import _project_via_registrations
+
+    height, width = 60, 80
+    mask = np.zeros((30, 30), np.uint8)
+    mask[5:15, 5:15] = 255
+    anchor = np.float32([[0, 0], [40, 0], [40, 40], [0, 40]])
+    reg = {"anchor": anchor, "quad": anchor, "submitted": None, "frame": None}
+    out = _project_via_registrations(mask, [reg], 5, canvas_hw=(height, width))
+    # âncora==quad → registro identidade; sem submetido/frame cai na
+    # escala página→grade — mesmo resultado do caminho anterior.
+    expected = cv2.warpPerspective(
+        mask,
+        np.diag([width / 30, height / 30, 1.0]),
+        (width, height),
+        flags=cv2.INTER_NEAREST,
+    )
+    assert np.array_equal(out > 0, expected > 0)
+
+
+def test_project_via_registrations_filtra_por_frame():
+    from lab.eval_scenario import _project_via_registrations
+
+    mask = np.zeros((30, 30), np.uint8)
+    mask[5:15, 5:15] = 255
+    anchor = np.float32([[0, 0], [40, 0], [40, 40], [0, 40]])
+    late = {"anchor": anchor, "quad": anchor, "submitted": None, "frame": 10}
+    # Passada de frame posterior ao checkpoint não projeta.
+    assert _project_via_registrations(mask, [late], 5, canvas_hw=(60, 80)) is None
+    assert _project_via_registrations(mask, [late], 10, canvas_hw=(60, 80)) is not None
+    # E sem registro nenhum também cai fora (fallback da pose).
+    assert _project_via_registrations(mask, [], 10, canvas_hw=(60, 80)) is None
+    assert _project_via_registrations(mask, ["lixo"], 10, canvas_hw=(60, 80)) is None
+
+
+def test_project_via_registrations_unia_duas_poses():
+    """Re-âncora sem reset: a tinta antiga fica onde a cadeia dela
+    a depositou; a união cobre as duas posições da grade."""
+    from lab.eval_scenario import _project_via_registrations
+
+    mask = np.zeros((30, 30), np.uint8)
+    mask[5:15, 5:15] = 255
+    anchor_a = np.float32([[0, 0], [40, 0], [40, 40], [0, 40]])
+    anchor_b = anchor_a + np.float32([8, 0])
+    regs = [
+        {"anchor": anchor_a, "quad": anchor_a, "submitted": None, "frame": None},
+        # A segunda passada registrou a geometria de anchor_a sob a
+        # grade da âncora nova — o conteúdo desloca na grade.
+        {"anchor": anchor_b, "quad": anchor_a, "submitted": None, "frame": None},
+    ]
+    union = _project_via_registrations(mask, regs, 9, canvas_hw=(60, 80)) > 0
+    single = _project_via_registrations(mask, regs[:1], 9, canvas_hw=(60, 80)) > 0
+    assert union.sum() > single.sum()
+
+
+def test_project_via_registrations_usa_quad_submetido_e_pose_real():
+    """sub≠reg com a pose verdadeira do bundle: a cadeia é
+    P(âncora)·P(reg)⁻¹·P(sub)·H — composição manual igual."""
+    from lab.eval_scenario import _project_via_registrations
+
+    from draw.paper import perspective_matrix
+
+    height, width = 60, 80
+    mask = np.zeros((30, 30), np.uint8)
+    mask[5:15, 5:15] = 255
+    anchor = np.float32([[0, 0], [40, 0], [40, 40], [0, 40]])
+    sub = anchor + np.float32([2, 0])  # warp visto com viés
+    quads = np.stack([anchor, anchor + np.float32([8, 0])])
+    reg = {"anchor": anchor, "quad": anchor, "submitted": sub, "frame": 1}
+    out = _project_via_registrations(
+        mask, [reg], 9, canvas_hw=(height, width), quads=quads
+    )
+    destination = np.float32([[0, 0], [width, 0], [width, height], [0, height]])
+    page_corners = np.float32([[0, 0], [30, 0], [30, 30], [0, 30]])
+    chain = (
+        perspective_matrix(anchor, destination)
+        @ np.linalg.inv(perspective_matrix(anchor, destination))
+        @ perspective_matrix(sub, destination)
+        @ perspective_matrix(page_corners, quads[1])
+    )
+    expected = cv2.warpPerspective(
+        mask, chain, (width, height), flags=cv2.INTER_NEAREST
+    )
+    assert np.array_equal(out > 0, expected > 0)
+    # E diverge do caminho sem a pose submetida.
+    naive = cv2.warpPerspective(
+        mask,
+        np.diag([width / 30, height / 30, 1.0]),
+        (width, height),
+        flags=cv2.INTER_NEAREST,
+    )
+    assert not np.array_equal(out > 0, naive > 0)
+
+
+def test_project_via_registrations_min_frame_descarta_registros_antigos():
+    """Traço de fase 1 projetado só por passadas que já o podiam
+    ver: registro anterior à segunda escrita não entra na união."""
+    from lab.eval_scenario import _project_via_registrations
+
+    mask = np.zeros((30, 30), np.uint8)
+    mask[5:15, 5:15] = 255
+    anchor_a = np.float32([[0, 0], [40, 0], [40, 40], [0, 40]])
+    anchor_b = anchor_a + np.float32([8, 0])
+    early = {"anchor": anchor_a, "quad": anchor_a, "submitted": None, "frame": 2}
+    late = {"anchor": anchor_b, "quad": anchor_a, "submitted": None, "frame": 6}
+    union = (
+        _project_via_registrations(
+            mask, [early, late], 9, canvas_hw=(60, 80), min_frame=4
+        )
+        > 0
+    )
+    only_late = _project_via_registrations(mask, [late], 9, canvas_hw=(60, 80)) > 0
+    # O registro de frame 2 ficou de fora da união com min_frame=4.
+    assert np.array_equal(union, only_late)
+    # E se nada passa do corte, cai fora para o fallback da pose.
+    assert (
+        _project_via_registrations(mask, [early], 9, canvas_hw=(60, 80), min_frame=4)
+        is None
+    )
+
+
+def test_project_via_registrations_curvo_sem_pose_cai_no_fallback():
+    """Bundle curvo sem histórico de quads (GT salvo antes de
+    consumir o vídeo): a escala plana página→grade mentiria pior que
+    o mapa denso do checkpoint — o registro é pulado e a função cai
+    fora para o _project de sempre."""
+    from lab.eval_scenario import _project_via_registrations
+
+    mask = np.zeros((30, 30), np.uint8)
+    mask[5:15, 5:15] = 255
+    anchor = np.float32([[0, 0], [40, 0], [40, 40], [0, 40]])
+    reg = {"anchor": anchor, "quad": anchor, "submitted": None, "frame": None}
+    assert (
+        _project_via_registrations(mask, [reg], 5, canvas_hw=(60, 80), curved=True)
+        is None
+    )
+    # Sem a marca de curvatura o mesmo registro projeta plano.
+    assert _project_via_registrations(mask, [reg], 5, canvas_hw=(60, 80)) is not None
+
+
+def test_project_via_registrations_filtra_por_epoca():
+    """Checkpoint de época 2 não projeta pelos registros da época 1:
+    depois do reset do acumulador a história anterior descreve tinta
+    que não existe mais — e o checkpoint anterior ao reset não pode
+    ver os registros novos."""
+    from lab.eval_scenario import _project_via_registrations
+
+    mask = np.zeros((30, 30), np.uint8)
+    mask[5:15, 5:15] = 255
+    anchor_a = np.float32([[0, 0], [40, 0], [40, 40], [0, 40]])
+    anchor_b = anchor_a + np.float32([8, 0])
+    old = {"anchor": anchor_a, "quad": anchor_a, "submitted": None, "frame": 2}
+    old["epoch"] = 1
+    new = {"anchor": anchor_b, "quad": anchor_a, "submitted": None, "frame": 6}
+    new["epoch"] = 2
+    union = (
+        _project_via_registrations(mask, [old, new], 9, canvas_hw=(60, 80), epoch=2) > 0
+    )
+    only_new = _project_via_registrations(mask, [new], 9, canvas_hw=(60, 80)) > 0
+    assert np.array_equal(union, only_new)
+    # Checkpoint da época 1 (antes do reset) vê só a história dela.
+    old_only = (
+        _project_via_registrations(mask, [old, new], 9, canvas_hw=(60, 80), epoch=1) > 0
+    )
+    assert np.array_equal(
+        old_only,
+        _project_via_registrations(mask, [old], 9, canvas_hw=(60, 80)) > 0,
+    )
+    # Registro sem marca de época não é excluído por filtro nenhum.
+    legacy = {"anchor": anchor_a, "quad": anchor_a, "submitted": None, "frame": 1}
+    assert (
+        _project_via_registrations(mask, [legacy], 9, canvas_hw=(60, 80), epoch=3)
+        is not None
+    )
+
+
+def _timeline_bundle():
+    """Dois traços de fase 0 + um de fase 1, com relógio write
+    determinístico: 8 frames para 2 traços → 4 frames por traço."""
+    points = np.array(
+        [
+            [2, 4],
+            [8, 4],
+            [14, 4],
+            [20, 4],
+            [26, 4],  # traço 0: 5 pontos na horizontal
+            [2, 12],
+            [14, 12],
+            [26, 12],  # traço 1: 3 pontos
+            [4, 20],
+            [16, 20],
+            [28, 20],  # traço 2 (fase 1): 3 pontos
+        ],
+        np.int32,
+    )
+    bundle = {
+        "page_ink_full": np.zeros((30, 30), np.uint8),
+        "points": points,
+        "offsets": np.array([0, 5, 8, 11]),
+        "thickness": np.array([2, 2, 2]),
+        "stroke_phase": np.array([0, 0, 1]),
+        "erase_rect": np.array([0, 0, 12, 16], np.int32),
+    }
+    events = [
+        {"kind": "write", "start": 10, "end": 18},
+        {"kind": "erase", "start": 20, "end": 28, "rect": (0, 0, 12, 16)},
+        {"kind": "write", "start": 30, "end": 34},
+    ]
+    return bundle, events
+
+
+def test_stroke_reveals_por_traco():
+    from lab.eval_scenario import _stroke_reveals
+
+    bundle, events = _timeline_bundle()
+    reveals = _stroke_reveals(bundle, events)
+    # write 1: slots 0 e 1 → (10, 13) e (14, 17); write 2: (30, 33).
+    assert reveals[0] == (10, 13, 4.0)
+    assert reveals[1] == (14, 17, 4.0)
+    assert reveals[2] == (30, 33, 4.0)
+
+
+def test_revealed_page_mask_traco_parcial_e_borracha():
+    from lab.eval_scenario import _revealed_page_mask, _stroke_reveals
+
+    bundle, events = _timeline_bundle()
+    reveals = _stroke_reveals(bundle, events)
+    erase = events[1]
+    rect = (0, 0, 12, 16)
+
+    # Antes da escrita: folha vazia.
+    assert not _revealed_page_mask(bundle, reveals, 9, erase, rect).any()
+    # Meio do traço 0 (fração 2/4): prefixo até ~metade dos pontos
+    # (x≤14, o resto da polilinha ainda não existe).
+    partial = _revealed_page_mask(bundle, reveals, 11, erase, rect) > 0
+    assert partial[:, 2:13].any() and not partial[:, 17:].any()
+    # Traço 0 completo, traço 1 ainda não começou.
+    mask = _revealed_page_mask(bundle, reveals, 13, erase, rect) > 0
+    assert mask[4, 24:27].any() and not mask[12].any()
+    # Meio da borracha (t=5/8 → frente ~x=8): traço 1 visível à
+    # direita da frente, apagado à esquerda.
+    mask = _revealed_page_mask(bundle, reveals, 24, erase, rect) > 0
+    assert not mask[:16, :8].any() and mask[12, 14:27].any()
+    # Redesenho (fase 1) dentro do retângulo não é apagado.
+    mask = _revealed_page_mask(bundle, reveals, 33, erase, rect) > 0
+    assert mask[20, 4:10].any()
+    # Depois da borracha a faixa dos traços de fase 0 zera de vez.
+    assert not mask[:16, :12].any()
+
+
+def test_project_via_registrations_conteudo_por_frame_sem_fantasma():
+    """O caso do achado: âncora A numa passada de página em branco,
+    âncora B antes do traço tardio — a união não pode marcar o
+    traço na posição de A, onde nenhuma passada o depositou."""
+    from lab.eval_scenario import _project_via_registrations
+
+    mask = np.zeros((30, 30), np.uint8)
+    mask[5:15, 5:15] = 255
+    blank = np.zeros_like(mask)
+    anchor_a = np.float32([[0, 0], [40, 0], [40, 40], [0, 40]])
+    anchor_b = anchor_a + np.float32([8, 0])
+    early = {"anchor": anchor_a, "quad": anchor_a, "submitted": None, "frame": 2}
+    late = {"anchor": anchor_b, "quad": anchor_a, "submitted": None, "frame": 6}
+
+    def revealed(frame):
+        # A passada do frame 2 viu página em branco; a do 6, o traço.
+        return mask if frame >= 4 else blank
+
+    truth = (
+        _project_via_registrations(
+            mask,
+            [early, late],
+            9,
+            canvas_hw=(60, 80),
+            content_by_frame=revealed,
+        )
+        > 0
+    )
+    only_late = _project_via_registrations(mask, [late], 9, canvas_hw=(60, 80)) > 0
+    assert np.array_equal(truth, only_late)
+    # Sem conteúdo por frame a passada cega cria a cópia fantasma.
+    naive = _project_via_registrations(mask, [early, late], 9, canvas_hw=(60, 80)) > 0
+    assert naive.sum() > truth.sum()
+
+
+def test_project_via_registrations_apagado_sai_da_verdade():
+    """Conteúdo de passada ∩ esperado do checkpoint: a passada viu
+    dois traços, a borracha removeu um — só o sobrevivente pode
+    continuar projetando como verdade na grade."""
+    from lab.eval_scenario import _project_via_registrations
+
+    content = np.zeros((30, 30), np.uint8)
+    content[5:15, 5:15] = 255  # traço que a borracha vai remover
+    content[20:25, 20:25] = 255  # traço que sobrevive
+    expected = np.zeros_like(content)
+    expected[20:25, 20:25] = 255
+    anchor = np.float32([[0, 0], [40, 0], [40, 40], [0, 40]])
+    reg = {"anchor": anchor, "quad": anchor, "submitted": None, "frame": 6}
+    out = (
+        _project_via_registrations(
+            expected,
+            [reg],
+            9,
+            canvas_hw=(60, 80),
+            content_by_frame=lambda frame: content,
+        )
+        > 0
+    )
+    survivor = _project_via_registrations(expected, [reg], 9, canvas_hw=(60, 80)) > 0
+    assert np.array_equal(out, survivor)
+    # Sem a interseção o traço apagado também entraria na verdade.
+    naive = _project_via_registrations(content, [reg], 9, canvas_hw=(60, 80)) > 0
+    assert naive.sum() > out.sum()
+
+
+def test_unobserved_truth_marca_escrita_nunca_vista():
+    """Nenhum registro depois da revelação do traço: a fatia esperada
+    continua exigência (projetada pelo chamador pela pose do
+    checkpoint) — canvas vazio não pode ler como captura perfeita."""
+    from lab.eval_scenario import _unobserved_truth
+
+    expected = np.zeros((30, 30), np.uint8)
+    expected[5:15, 5:15] = 255
+    anchor = np.float32([[0, 0], [40, 0], [40, 40], [0, 40]])
+    early = {"anchor": anchor, "quad": anchor, "submitted": None, "frame": 2}
+    late = {"anchor": anchor, "quad": anchor, "submitted": None, "frame": 8}
+
+    def revealed(frame):
+        # A escrita só aparece a partir do frame 5.
+        return expected if frame >= 5 else np.zeros_like(expected)
+
+    # Só a passada cega (frame 2): a máscara inteira é não observada.
+    unreached = _unobserved_truth(expected, [early], 9, None, revealed)
+    assert np.array_equal(unreached, expected)
+    # Com a passada tardia vendo o traço, nada falta observar.
+    unreached = _unobserved_truth(expected, [early, late], 9, None, revealed)
+    assert not unreached.any()
+    # Época errada não conta como observação.
+    late_ep = dict(late, epoch=2)
+    unreached = _unobserved_truth(expected, [early, late_ep], 9, 1, revealed)
+    assert np.array_equal(unreached, expected)
+    # Registro sem frame assume visão plena (contrato antigo).
+    timeless = {"anchor": anchor, "quad": anchor, "submitted": None, "frame": None}
+    unreached = _unobserved_truth(expected, [timeless], 9, None, revealed)
+    assert not unreached.any()

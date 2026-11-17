@@ -1,0 +1,222 @@
+"""Contratos do falsificador: amostragem, mutação e placar."""
+
+import numpy as np
+import pytest
+from lab.falsify import mutate_config, sample_config, score_report
+from lab.sim_source import SyntheticCapture
+
+
+def test_sampled_configs_build_valid_captures():
+    rng = np.random.default_rng(11)
+    for index in range(40):
+        cfg = sample_config(rng, index)
+        capture = SyntheticCapture(cfg["text"], seed=cfg["seed"], **cfg["params"])
+        assert capture.frame_count > 0
+        ok, frame = capture.read()
+        assert ok and frame.shape == (512, 512, 3)
+        capture.release()
+
+
+def test_mutation_stays_valid_and_near_parent():
+    rng = np.random.default_rng(12)
+    parent = sample_config(rng, 0)
+    for _ in range(40):
+        child = mutate_config(parent, rng)
+        capture = SyntheticCapture(child["text"], seed=child["seed"], **child["params"])
+        assert capture.frame_count > 0
+        capture.release()
+
+
+def test_mutation_never_leaves_parameter_contract():
+    """Mutação que escapasse do contrato do SyntheticCapture viraria
+    score=-1 por ERRO — não por falha do pipeline. Cada campo mutável
+    tem faixa própria."""
+    rng = np.random.default_rng(42)
+    for index in range(15):
+        parent = sample_config(rng, index)
+        for _ in range(25):
+            child = mutate_config(parent, rng)
+            params = child["params"]
+            for key, value in params.items():
+                if key in ("ink_sheen", "page_curl"):
+                    assert 0.0 <= value <= 1.0, (key, value)
+                if key == "jpeg_quality":
+                    assert 10 <= value <= 100
+                if key == "hand_scale":
+                    assert 0 < value <= 4
+                if key == "fps":
+                    assert 0 < value <= 120
+                if key == "erase_rect":
+                    x, y, w, h = value
+                    assert x >= 0 and y >= 0 and w >= 1 and h >= 1
+                    assert x + w <= 360 and y + h <= 510
+                if key in ("move", "return_pose", "lift"):
+                    assert all(np.isfinite(v) for v in value)
+                if key == "lift":
+                    assert float(np.linalg.norm(value)) >= 1.0
+            capture = SyntheticCapture(child["text"], seed=child["seed"], **params)
+            assert capture.frame_count > 0
+            capture.release()
+
+
+def test_run_trial_pipeline_crash_is_failing_outcome(tmp_path, monkeypatch):
+    """Crash dentro da auditoria é desfecho falho do pipeline, não
+    cenário inválido: score máximo (elegível a elite/mutação), erro
+    registrado — e sem keep o vídeo gerado continua sem dono."""
+    import lab.falsify as fz
+
+    def fake_export(capture, output):
+        output.write_bytes(b"x")
+        output.with_suffix(".gt.npz").write_bytes(b"x")
+        output.with_suffix(".json").write_bytes(b"x")
+        output.with_name(output.stem + "_ink_full.npy").write_bytes(b"x")
+        return {"frames": 1}
+
+    monkeypatch.setattr(fz, "export_video", fake_export)
+    monkeypatch.setattr(
+        fz,
+        "audit",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("auditoria falhou")),
+    )
+    cfg = {"text": "ab", "seed": 1, "params": {"fps": 8, "settle_seconds": 0.3}}
+    result = fz.run_trial(cfg, tmp_path, "bad", models={}, keep_artifacts=False)
+    assert result["score"] == fz.PIPELINE_CRASH_SCORE
+    assert "RuntimeError" in result["pipeline_error"]
+    assert result["verdict"]["status"].startswith("pipeline_error")
+    for suffix in (".mp4", ".gt.npz", ".json"):
+        assert not (tmp_path / f"bad{suffix}").exists()
+    assert not (tmp_path / "bad_ink_full.npy").exists()
+
+
+def test_run_trial_pipeline_crash_keeps_artifacts(tmp_path, monkeypatch):
+    """Com keep_artifacts o vídeo que derruba o pipeline fica
+    preservado — é a evidência do defeito, não lixo de retry."""
+    import lab.falsify as fz
+
+    def fake_export(capture, output):
+        output.write_bytes(b"x")
+        output.with_suffix(".gt.npz").write_bytes(b"x")
+        return {"frames": 1}
+
+    monkeypatch.setattr(fz, "export_video", fake_export)
+    monkeypatch.setattr(
+        fz,
+        "audit",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("auditoria falhou")),
+    )
+    cfg = {"text": "ab", "seed": 1, "params": {"fps": 8, "settle_seconds": 0.3}}
+    result = fz.run_trial(cfg, tmp_path, "bad", models={}, keep_artifacts=True)
+    assert result["score"] == fz.PIPELINE_CRASH_SCORE
+    assert result["artifacts"] == str(tmp_path / "bad.mp4")
+    assert (tmp_path / "bad.mp4").exists()
+
+
+def test_run_trial_config_failure_still_raises(tmp_path, monkeypatch):
+    """Falha de configuração/export — cenário que nem chegou ao
+    pipeline — continua propagando para o score -1 do chamador."""
+    import lab.falsify as fz
+
+    monkeypatch.setattr(
+        fz,
+        "SyntheticCapture",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            ValueError("parâmetro impossível")
+        ),
+    )
+    cfg = {"text": "ab", "seed": 1, "params": {"fps": 8}}
+    with pytest.raises(ValueError):
+        fz.run_trial(cfg, tmp_path, "bad", models={}, keep_artifacts=False)
+
+
+def test_score_report_weights_documented_failures():
+    perfect = {
+        "verdict": {"final_iou": 0.9},
+        "checkpoints": [{"iou": 0.9}],
+    }
+    score, comps = score_report(perfect)
+    assert score == pytest.approx(0.1 + 0.5 * 0.1)
+    assert comps["no_canvas"] == 0.0
+
+    lost = {"verdict": {"final_iou": None, "status": "canvas ausente"}}
+    score, comps = score_report(lost)
+    assert comps["no_canvas"] == 1.0 and score >= 2.0
+
+    ghost = {
+        "verdict": {
+            "final_iou": 0.8,
+            "residual_confirmed_in_erased_px": 8000,
+            "redraw_confirmed_recall": 0.2,
+        },
+        "checkpoints": [{"iou": 0.8}],
+    }
+    score, comps = score_report(ghost)
+    assert comps["erase_residual"] == 1.0
+    assert comps["redraw_loss"] == pytest.approx(0.8)
+    worst = {
+        "verdict": {"final_iou": 0.8},
+        "checkpoints": [{"iou": 0.8}, {"iou": 0.1}],
+    }
+    assert score_report(worst)[1]["worst_phase_loss"] == pytest.approx(0.9)
+
+
+def test_score_report_ausencia_final_nao_penaliza():
+    from lab.falsify import score_report
+
+    report = {
+        "verdict": {"status": "ausência (folha fora de cena)", "absence": True},
+        "checkpoints": [
+            {"frame": 10, "iou": 0.9},
+            {"frame": 20, "status": "ausência (folha fora de cena)", "absence": True},
+        ],
+    }
+    score, comp = score_report(report)
+    assert comp["no_canvas"] == 0.0
+    assert comp["iou_loss"] == 0.0
+    assert comp["worst_phase_loss"] == pytest.approx(0.1)
+
+
+def test_score_report_sem_canvas_real_ainda_reprova():
+    from lab.falsify import score_report
+
+    report = {
+        "verdict": {"status": "canvas ausente no evento final"},
+        "checkpoints": [{"frame": 20, "status": "sem âncora/canvas"}],
+    }
+    score, comp = score_report(report)
+    assert comp["no_canvas"] == 1.0
+    assert comp["iou_loss"] == 1.0
+    assert comp["worst_phase_loss"] == 1.0
+
+
+def test_audit_models_default_aceito():
+    # models=None é o default; audit com tupla vazia quebrava no .get.
+    import inspect
+
+    from lab import eval_scenario
+
+    sig = inspect.signature(eval_scenario.audit)
+    assert sig.parameters["models"].default is None
+
+
+def test_final_checkpoint_propaga_absence():
+    # O dict reconstruido sem iou dropava a flag: verdict["absence"]
+    # saia sempre False e o score_report cobrava a ausencia.
+    from lab.eval_scenario import _final_checkpoint
+
+    checkpoints = [
+        {"frame": 10, "iou": 0.9},
+        {
+            "frame": 20,
+            "phase": "lift_out",
+            "status": "ausência (folha fora de cena)",
+            "absence": True,
+            "confirmed_px": 500,
+        },
+    ]
+    events = [{"end": 11}, {"kind": "lift_out", "end": 21}]
+    final = _final_checkpoint(checkpoints, events)
+    assert final["absence"] is True
+    assert final["confirmed_px"] == 500
+    score, comp = score_report({"verdict": final, "checkpoints": checkpoints})
+    assert comp["no_canvas"] == 0.0
+    assert comp["iou_loss"] == 0.0

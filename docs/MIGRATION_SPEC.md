@@ -158,6 +158,15 @@ the single env read the runtime keeps.
 Consequence for parity: legacy must be run **with the Tier A env set** when
 used as the reference.
 
+Parity evidence so far:
+
+- **Fake-worker parity** (pipeline design PR): 10 scenarios, 720 frames,
+  zero behavior divergences; one 1-ULP timestamp difference.
+- **End-to-end parity** (`lab/parity_e2e.py`): real neural detector,
+  tracker, `PageCleanInk` and ink worker on both sides, same model
+  binaries, synthetic 68-frame scenario — zero divergences (identical
+  per-frame canvas masks, identical presence, corners within 0.5 px).
+
 ## PR sequence
 
 Every item is its own PR against `main`. Modules with a hard mutual

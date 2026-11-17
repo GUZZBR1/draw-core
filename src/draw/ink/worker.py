@@ -210,6 +210,20 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         # aos quads posicionais (0 = posicional; k = cantos rolados
         # por k apos um pouso rodado julgado pela arbitragem).
         self._anchor_roll = 0
+        # Tripla (ancora, quad de registro, quad submetido) da
+        # ultima passada que VOTOU: a ancora sozinha nao diz em
+        # que pose a grade estava quando cada evidencia votou —
+        # deadband congela o quad de registro (que difere do
+        # submetido), pouso/follow trocam a ancora no meio da
+        # passada, e passadas abstidas (arbitragem/follow/
+        # consenso de identidade) nao depositam nada e ficam com
+        # None aqui. Telemetria de leitura (last_registration).
+        self._last_registration = None
+        # Epoca do conteudo do acumulador: sobe a cada reset —
+        # a tinta que sobrevive ao reset e so a que entrou
+        # depois dele, entao registros de passadas anteriores
+        # deixam de descrever o canvas (eval descarta).
+        self._canvas_epoch = 0
         self._identity_reference = None
         self._identity_reference_corners = None
         self._identity_recovery_requested = False
@@ -315,6 +329,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._follow_streak_quads = []
             self._follow_hold = False
             self._anchor_roll = 0
+            self._last_registration = None
             self._still_passes = 0
             self._generation_passes = 0
             self._quiet_passes = 0
@@ -865,6 +880,11 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     prob, anchor, registration_corners, visible
                 )
             )
+            self._last_registration = (
+                None if anchor is None else anchor.copy(),
+                (None if registration_corners is None else registration_corners.copy()),
+                None if corners is None else corners.copy(),
+            )
             if coverage is not None and coverage.shape == prob.shape:
                 # Gate de re-confirmacao (cobertura de folha do loop): onde
                 # o warp nao e folha, so a tinta que a ancora JA
@@ -1086,6 +1106,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         # Perda de lock, nao voto de pagina nova.
                         # A proxima passada estabelece outra ancora.
                         self._accumulator.reset()
+                        self._canvas_epoch += 1
                         self._anchor_corners = None
                         self._anchor_samples = []
                         self._reg_frozen_corners = None
@@ -1104,6 +1125,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         self._still_passes = 0
                     elif not keep_page:
                         self._accumulator.reset()
+                        self._canvas_epoch += 1
                         self._anchor_corners = corners
                         self._anchor_samples = (
                             [corners.copy()]
@@ -1168,6 +1190,20 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                             visible,
                         )
                     )
+                    self._last_registration = (
+                        None
+                        if self._anchor_corners is None
+                        else self._anchor_corners.copy(),
+                        (
+                            None
+                            if (self._reg_frozen_corners if reg_deadband else corners)
+                            is None
+                            else (
+                                self._reg_frozen_corners if reg_deadband else corners
+                            ).copy()
+                        ),
+                        None if corners is None else corners.copy(),
+                    )
                     force_publish = True
             follow_abstain = False
             if anchor_follow:
@@ -1210,6 +1246,20 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                             visible,
                         )
                     )
+                    self._last_registration = (
+                        None
+                        if self._anchor_corners is None
+                        else self._anchor_corners.copy(),
+                        (
+                            None
+                            if (self._reg_frozen_corners if reg_deadband else corners)
+                            is None
+                            else (
+                                self._reg_frozen_corners if reg_deadband else corners
+                            ).copy()
+                        ),
+                        None if corners is None else corners.copy(),
+                    )
                     arbitration_abstain = False
                     force_publish = True
             if (
@@ -1220,9 +1270,26 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             ):
                 if visible is not None:
                     prob = np.where(visible, prob, 0.0).astype(np.float32)
+                # Voto sem registro (1a passada ou pagina nova na
+                # identidade): a evidencia entra na propria
+                # geometria do warp e a ancora e o quad da
+                # passada — o par registrado antes (referencia
+                # de identidade, quad atual) descreveria uma
+                # matriz pela qual a tinta nunca passou.
+                self._last_registration = (
+                    None
+                    if corners is None
+                    else (corners.copy(), corners.copy(), corners.copy())
+                )
             else:
                 prob = registered_prob
                 visible = registered_visible
+            pass_voted = not (
+                identity_switch_pending
+                or (identity_deferred and identity_timed_out)
+                or arbitration_abstain
+                or follow_abstain
+            )
             if identity_switch_pending or (identity_deferred and identity_timed_out):
                 visible = np.zeros(prob.shape, dtype=bool)
             if arbitration_abstain:
@@ -1236,6 +1303,11 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 # deslocada que a re-ancoragem existe para
                 # nao fabricar.
                 visible = np.zeros(prob.shape, dtype=bool)
+            if not pass_voted:
+                # Passada abstida nao deposita: o registro fica
+                # None para o avaliador nao projetar GT por uma
+                # geometria que nunca chegou ao canvas.
+                self._last_registration = None
             result = self._accumulator.add(
                 prob,
                 visible,
@@ -1393,6 +1465,42 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         """
         with self._condition:
             return None if self._anchor_corners is None else self._anchor_corners.copy()
+
+    @property
+    def last_registration(self):
+        """Tripla (âncora, quad de registro, quad submetido) — cópias.
+
+        A grade armazenada e indexada pela retificacao da ancora,
+        mas cada evidencia entra pela matriz P(ancora)·P(reg)⁻¹ da
+        SUA passada, aplicada sobre o warp do quad SUBMETIDO: a
+        folha pode andar entre o pouso da ancora e a passada
+        seguinte, e o deadband/pouso/follow trocam os dois primeiros
+        no meio do caminho. Avaliadores projetam o GT pelo mesmo
+        caminho; a ancora sozinha nao basta. None quando a ultima
+        passada nao votou (abstida por arbitragem, follow ou
+        consenso de identidade) ou antes da primeira.
+        """
+        with self._condition:
+            if self._last_registration is None:
+                return None
+            anchor, registration, submitted = self._last_registration
+            return (
+                None if anchor is None else anchor.copy(),
+                None if registration is None else registration.copy(),
+                None if submitted is None else submitted.copy(),
+            )
+
+    @property
+    def canvas_epoch(self):
+        """Época do conteúdo do acumulador — sobe a cada reset.
+
+        Registros de registro de passadas anteriores ao ultimo
+        reset nao descrevem mais o canvas (a tinta que eles
+        projetavam foi descartada); consumidores como o
+        eval_capture descartam os registros quando a epoca muda.
+        """
+        with self._condition:
+            return self._canvas_epoch
 
     def stop(self):
         # O teto cobre uma passada em voo: a trabalhadora so ve o

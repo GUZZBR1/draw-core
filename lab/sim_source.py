@@ -396,6 +396,11 @@ class SyntheticCapture:
         self._motion_blur = bool(motion_blur)
         self._prev_quad = self._quad_now.copy()
         self._prev_sprite = {}
+        # Quad verdadeiro de cada frame renderizado: a avaliação
+        # projeta o GT pela pose REAL da passada, não pelo quad
+        # que o detector entregou ao warp (viés de detecção vira
+        # medida, não ruído de referência).
+        self._quads_history = []
         self._curl = None
         self._curl_shade = None
         if page_curl > 0:
@@ -682,6 +687,7 @@ class SyntheticCapture:
         else:
             rgb = gs._sequence_photometric(self._rng, rgb, 1.0)
         self.last_scene = {"rgb": rgb, "mask": mask, "ink_full": ink_w}
+        self._quads_history.append(quad.copy())
         self._position += 1
         return True, rgb
 
@@ -696,7 +702,10 @@ class SyntheticCapture:
         ``__init__`` não é a cena que a avaliação compara. ``events``
         descreve a linha do tempo; fases geométricas carregam
         ``quad_end`` (o quad no último frame da fase), que a auditoria
-        usa para reconstruir a pose por fase. Os campos ``*_final`` são
+        usa para reconstruir a pose por fase. ``quads`` é a pose
+        verdadeira de cada frame renderizado — presente só quando o
+        vídeo já foi consumido; a avaliação projeta o GT por ela, não
+        pelo quad que o detector entregou. Os campos ``*_final`` são
         determinísticos — o GT sai correto antes ou depois de consumir
         o vídeo.
         """
@@ -792,6 +801,12 @@ class SyntheticCapture:
             extra["page_curl"] = np.array(json.dumps(self._curl, ensure_ascii=False))
         if self._light_dir is not None:
             extra["light_dir"] = self._light_dir
+        if self._quads_history:
+            # Pose verdadeira por frame consumido (n, 4, 2) — só
+            # existe quando o vídeo foi percorrido; a avaliação a
+            # usa para projetar o GT pela pose real de cada
+            # passada, com o quad submetido como ponte.
+            extra["quads"] = np.stack(self._quads_history)
         np.savez_compressed(
             path,
             version=np.array(1),
