@@ -1,15 +1,36 @@
 import { useEffect, useRef, useState } from 'react';
 import {
+  animate,
   motion,
   useMotionTemplate,
+  useMotionValue,
   useMotionValueEvent,
   useReducedMotion,
   useScroll,
   useTransform,
 } from 'motion/react';
+import { flushSync } from 'react-dom';
 import { Link, useLocation } from 'react-router-dom';
 
-const MORPH_DISTANCE = 180;
+const MORPH_DISTANCE = 130;
+const HEADER_REVEAL = 36;
+const MORPH_START = 0;
+const LIFT_RANGE = 60;
+const HOME_LIFT = 32;
+const TEAR_STEPS = 24;
+const TEAR_DURATION = 1100;
+
+function tearPolygon(stage: 'start' | 'line' | 'full') {
+  const jitter = (index: number, salt: number) => Math.sin(index * 12.9898 + salt * 78.233) * 0.5;
+  const side = (direction: 1 | -1, salt: number) => Array.from({ length: TEAR_STEPS + 1 }, (_, index) => {
+    const progress = index / TEAR_STEPS;
+    const t = stage === 'start' ? 0 : stage === 'line' ? progress : -0.2 + progress * 1.4;
+    const offset = stage === 'full' ? 110 : stage === 'start' ? 0 : 0.5 + jitter(index, salt) * 0.8;
+    const wobble = direction * offset;
+    return `${100 * t + wobble}% ${100 * t - wobble}%`;
+  });
+  return `polygon(${[...side(1, 1), ...side(-1, 2).reverse()].join(', ')})`;
+}
 
 function scrollProgress(value: number) {
   return Math.min(1, Math.max(0, value / MORPH_DISTANCE));
@@ -78,22 +99,30 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
   }
 
   const progress = useTransform(scrollY, (value) =>
-    isHome ? scrollProgress(value) : 1,
+    isHome ? scrollProgress(Math.max(0, value - MORPH_START)) : 1,
   );
+  const headerPeek = useMotionValue(0);
+  const headerOpacity = useTransform(() =>
+    isHome ? Math.max(headerPeek.get(), Math.min(1, Math.max(0, scrollY.get() / HEADER_REVEAL))) : 1,
+  );
+  const headerY = useTransform(headerOpacity, (amount) => -10 * (1 - amount));
+  const headerPointer = useTransform(headerOpacity, (amount) => (amount < 0.5 ? 'none' : 'auto'));
+  const homeLift = useTransform(scrollY, (value) => (isHome ? -HOME_LIFT * (1 - Math.min(1, Math.max(0, value / LIFT_RANGE))) : 0));
   const brandScale = useTransform(progress, (amount) => {
     const ratio = compactFontSize() / startFontSize();
     return 1 + (ratio - 1) * amount;
   });
-  const brandY = useTransform(progress, (amount) => {
+  const brandBaseY = useTransform(progress, (amount) => {
     const height = startFontSize() * 0.83;
     const scale = 1 + (compactFontSize() / startFontSize() - 1) * amount;
     const centered = -height / 2;
     const compact = 18 + (height * scale) / 2 - height / 2 - window.innerHeight / 2;
     return centered + (compact - centered) * amount;
   });
+  const brandY = useTransform(() => brandBaseY.get() + homeLift.get());
   const productOpacity = useTransform(progress, [0.62, 0.94], [0, 1]);
   const productX = useTransform(progress, [0.62, 0.94], [-6, 0]);
-  const webcamOpacity = useTransform(progress, [0, 0.14], [1, 0]);
+  const webcamOpacity = useTransform(scrollY, [0, 40], [1, 0]);
   const inverseBrandScale = useTransform(() => 1 / brandScale.get());
   const glassAmount = useTransform(progress, [0, 0.22], [0, 44]);
   const borderAmount = useTransform(progress, [0, 0.18], [0, 11]);
@@ -127,7 +156,65 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
   const navShadowAlpha = useTransform(progress, [0, 0.25], [0, 0.045]);
   const navShadow = useMotionTemplate`0 7px 25px rgba(34, 35, 31, ${navShadowAlpha}), inset 0 1px rgba(255, 255, 255, ${navShadowAlpha})`;
 
-  useMotionValueEvent(scrollY, 'change', (value) => setIsScrolled(!isHome || value > 8));
+  useMotionValueEvent(scrollY, 'change', (value) => {
+    setIsScrolled(!isHome || value > 8);
+    if (isHome && value <= 0 && headerPeek.get() > 0 && !headerPeek.isAnimating()) animate(headerPeek, 0, { duration: 0.3 });
+  });
+
+  useEffect(() => {
+    headerPeek.set(0);
+    if (!isHome) return;
+    let gated = false;
+    let idle = 0;
+    let cap = 0;
+    const peek = (event: Event) => {
+      if (!event.cancelable) return false;
+      event.preventDefault();
+      animate(headerPeek, 1, { duration: 0.5, ease: [0.22, 0.61, 0.36, 1] });
+      gated = true;
+      window.clearTimeout(cap);
+      cap = window.setTimeout(() => { gated = false; }, 1000);
+      return true;
+    };
+    const atRest = () => window.scrollY <= 0 && headerPeek.get() < 0.5 && !gated;
+    const onWheel = (event: WheelEvent) => {
+      if (gated) {
+        event.preventDefault();
+        window.clearTimeout(idle);
+        idle = window.setTimeout(() => { gated = false; }, 140);
+        return;
+      }
+      if (event.deltaY > 0 && atRest()) peek(event);
+    };
+    let touchY = 0;
+    const onTouchStart = (event: TouchEvent) => { touchY = event.touches[0].clientY; };
+    const onTouchMove = (event: TouchEvent) => {
+      if (gated) { if (event.cancelable) event.preventDefault(); return; }
+      if (touchY - event.touches[0].clientY > 12 && atRest()) peek(event);
+    };
+    const onTouchEnd = () => { window.clearTimeout(idle); idle = window.setTimeout(() => { gated = false; }, 140); };
+    const onKey = (event: KeyboardEvent) => {
+      if (['ArrowDown', 'PageDown', ' ', 'End'].includes(event.key) && atRest()) {
+        const target = event.target as HTMLElement | null;
+        if (target && /^(INPUT|TEXTAREA|SELECT|BUTTON|A)$/.test(target.tagName)) return;
+        if (peek(event)) idle = window.setTimeout(() => { gated = false; }, 300);
+      }
+    };
+    window.addEventListener('wheel', onWheel, { passive: false });
+    window.addEventListener('touchstart', onTouchStart, { passive: true });
+    window.addEventListener('touchmove', onTouchMove, { passive: false });
+    window.addEventListener('touchend', onTouchEnd, { passive: true });
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.clearTimeout(idle);
+      window.clearTimeout(cap);
+      window.removeEventListener('wheel', onWheel);
+      window.removeEventListener('touchstart', onTouchStart);
+      window.removeEventListener('touchmove', onTouchMove);
+      window.removeEventListener('touchend', onTouchEnd);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [isHome, headerPeek]);
 
   useEffect(() => {
     setIsScrolled(!isHome);
@@ -201,7 +288,7 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
     <>
       <motion.header
         className={`site-header fixed left-1/2 top-2 z-50 ${!isHome || isScrolled ? 'is-scrolled' : ''}`}
-        style={{ width: headerWidth, maxWidth: headerMaxWidth, x: '-50%' }}
+        style={{ width: headerWidth, maxWidth: headerMaxWidth, x: '-50%', y: headerY, opacity: headerOpacity, pointerEvents: headerPointer }}
       >
         <motion.nav
           className="nav-shell flex w-full items-center justify-between gap-4 border text-ink shadow-[0_7px_25px_rgba(34,35,31,0.04)] backdrop-blur-2xl"
@@ -224,19 +311,44 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
             vision
           </Link>
           <div className="nav-right flex items-center gap-3 sm:gap-5">
-            <motion.span
+            <motion.a
               className="location font-mono text-[10px] tracking-[.025em] text-muted sm:text-[16px]"
               whileHover={{ y: -1, color: 'var(--ink)' }}
               transition={{ duration: 0.2, ease: 'easeOut' }}
+              href="https://www.google.com/maps/search/?api=1&query=S%C3%A3o%20Paulo%2C%20Brazil"
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label="São Paulo, Brazil no Google Maps"
             >
-              são paulo, brasil
-            </motion.span>
+              São Paulo, Brazil
+            </motion.a>
             <motion.button
               className="theme-toggle min-h-[34px] min-w-[56px] rounded-full border border-ink/15 bg-paper/20 px-3 font-mono text-[10px] text-ink transition duration-300 hover:-translate-y-px hover:border-ink/40 hover:bg-ink/5 active:translate-y-0 active:scale-[.97] sm:min-h-[42px] sm:min-w-[78px] sm:px-4 sm:text-[13px]"
               style={{ scaleY: themeButtonScale, transformOrigin: 'center' }}
               type="button"
               aria-label={`Ativar tema ${dark ? 'claro' : 'escuro'}`}
-              onClick={() => setDark((current) => !current)}
+              onClick={() => {
+                const root = document.documentElement;
+                if (reduceMotion || !document.startViewTransition) {
+                  setDark((current) => !current);
+                  return;
+                }
+                root.classList.add('theme-tearing');
+                const transition = document.startViewTransition(() => {
+                  flushSync(() => setDark((current) => !current));
+                });
+                transition.ready.then(() => {
+                  root.animate(
+                    {
+                      clipPath: [tearPolygon('start'), tearPolygon('line'), tearPolygon('full')],
+                      offset: [0, 0.42, 1],
+                      easing: ['cubic-bezier(.45,.05,.3,1)', 'cubic-bezier(.65,0,.2,1)'],
+                    },
+                    { duration: TEAR_DURATION, fill: 'forwards', pseudoElement: '::view-transition-new(root)' },
+                  );
+                });
+                transition.finished.finally(() => root.classList.remove('theme-tearing'));
+              }}
             >
               {dark ? 'light' : 'dark'}
             </motion.button>
@@ -318,7 +430,8 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
                     <rect x="5" y="4" width="54" height="26" rx="9" />
                     <circle className="webcam-lens" cx="32" cy="17" r="8" />
                     <circle className="webcam-aperture" cx="32" cy="17" r="3" />
-                    <circle className="webcam-status" cx="51" cy="12" r="1.5" />
+                    <circle className="webcam-status" cx="51" cy="12" r="2.2" />
+                    <circle className="webcam-rec" cx="51" cy="12" r="1.1" />
                     <path d="M27 30v3c0 1.8 1.4 3 3 3h4c1.7 0 3-1.3 3-3v-3" />
                   </svg>
                 </motion.button>
@@ -382,7 +495,7 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
               }
             }}
           >
-            <span aria-hidden="true">·</span> product
+            <span aria-hidden="true">·</span> <span className="product-word">product</span>
           </Link>
         </motion.div>
         <motion.div className="definition-card-anchor" style={{ x: '-50%', scale: inverseBrandScale }}>

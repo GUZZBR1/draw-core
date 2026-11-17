@@ -2,6 +2,14 @@ import { useEffect, useRef } from 'react';
 
 const SOURCE_GLYPHS = Array.from("$@B%8&WM#*oahkbdpqwmZO0QLCJUYXzcvunxrjft/\\|()1{}[]?-_+~<>i!lI;:,\"^`'. ");
 const SAMPLE_SIZE = 5;
+const REVEAL_DURATION = 2.8;
+const REVEAL_LEAD = 2.1;
+const REVEAL_FADE = 0.09;
+
+function cellNoise(col: number, row: number) {
+  const value = Math.sin(col * 127.1 + row * 311.7) * 43758.5453;
+  return value - Math.floor(value);
+}
 
 function cssColor(element: Element, token: string, fallback: string) {
   return getComputedStyle(element).getPropertyValue(token).trim() || fallback;
@@ -197,7 +205,9 @@ export default function VisionAsciiPortrait() {
         return;
       }
       lastPaint = timestamp;
-      const elapsed = (timestamp - startTime) / 1000;
+      const clock = (timestamp - startTime) / 1000;
+      const elapsed = Math.max(0, clock - REVEAL_LEAD);
+      const reveal = reducedMotion.matches ? 1 : Math.min(1, clock / REVEAL_DURATION);
       const opening = reducedMotion.matches ? 1 : Math.max(0, Math.min(1, (elapsed - 0.35) / 1.05));
       const eyeOpen = opening * opening * (3 - 2 * opening);
       const hairFlow = reducedMotion.matches ? 0 : Math.min(1, smoothstep(1.1, 2.5, elapsed));
@@ -208,6 +218,7 @@ export default function VisionAsciiPortrait() {
       const colors = new Array<string>(cols * rows);
       const paperLum = paperLightness;
       let previousFill = '';
+      let previousAlpha = 1;
 
       for (let row = 0; row < rows; row += 1) {
         for (let col = 0; col < cols; col += 1) {
@@ -296,6 +307,14 @@ export default function VisionAsciiPortrait() {
           }
           const fill = colors[index];
           if (!fill || glyph.darkness < 0.012) continue;
+          const appearAt = (row / rows) * 0.55 + cellNoise(col, row) * 0.4;
+          const appeared = (reveal * (1 + REVEAL_FADE) - appearAt) / REVEAL_FADE;
+          if (appeared <= 0) continue;
+          const alpha = Math.min(1, appeared);
+          if (alpha !== previousAlpha) {
+            output.globalAlpha = alpha;
+            previousAlpha = alpha;
+          }
           if (fill !== previousFill) {
             output.fillStyle = fill;
             previousFill = fill;
@@ -304,6 +323,7 @@ export default function VisionAsciiPortrait() {
         }
       }
 
+      output.globalAlpha = 1;
       output.save();
       output.font = `bold ${fontSize * 1.6}px "DM Mono", monospace`;
       output.textBaseline = 'middle';
@@ -312,6 +332,7 @@ export default function VisionAsciiPortrait() {
         { x: 0.409, close: Math.max(1 - eyeOpen, blink, wink) },
         { x: 0.579, close: Math.max(1 - eyeOpen, blink) },
       ].forEach(({ x, close }) => {
+        if (reveal < 1) return;
         const centerX = x * outputWidth;
         const centerY = 0.432 * outputHeight;
         if (close > 0.52) {
