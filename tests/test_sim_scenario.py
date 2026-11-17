@@ -632,3 +632,125 @@ def test_final_checkpoint_missing_terminal_event():
     final = _final_checkpoint(checkpoints, events)
     assert "iou" not in final
     assert "evento final" in final["status"]
+
+
+def test_pipeline_summary_eh_json_serializavel():
+    """anchors/registrations carregam ndarrays — sem o resumo o
+    json.dumps do relatório quebrava e a auditoria não produzia
+    saída nenhuma."""
+    from lab.eval_scenario import _pipeline_summary
+
+    quad = np.float32([[0, 0], [10, 0], [10, 10], [0, 10]])
+    reg = {"anchor": quad, "quad": quad, "submitted": quad, "frame": 3}
+    pipeline = {
+        "mask": np.ones((4, 4), np.uint8),
+        "corners": quad,
+        "anchors": [quad.copy()],
+        "registrations": [reg],
+        "canvas_shape": [60, 80],
+        "frames": 10,
+        "status": "ok",
+    }
+    summary = _pipeline_summary(pipeline)
+    json.dumps(summary)  # não levanta
+    assert summary["anchor_count"] == 1
+    assert summary["registration_count"] == 1
+    assert summary["anchor_corners"] == [[0, 0], [10, 0], [10, 10], [0, 10]]
+    assert summary["final_confirmed_px"] == 16
+    assert "mask" not in summary and "registrations" not in summary
+    assert "anchors" not in summary and "corners" not in summary
+    assert pipeline["mask"] is not None  # não muta o original
+
+
+def test_project_via_registrations_identidade():
+    from lab.eval_scenario import _project_via_registrations
+
+    height, width = 60, 80
+    mask = np.zeros((30, 30), np.uint8)
+    mask[5:15, 5:15] = 255
+    anchor = np.float32([[0, 0], [40, 0], [40, 40], [0, 40]])
+    reg = {"anchor": anchor, "quad": anchor, "submitted": None, "frame": None}
+    out = _project_via_registrations(mask, [reg], 5, canvas_hw=(height, width))
+    # âncora==quad → registro identidade; sem submetido/frame cai na
+    # escala página→grade — mesmo resultado do caminho anterior.
+    expected = cv2.warpPerspective(
+        mask,
+        np.diag([width / 30, height / 30, 1.0]),
+        (width, height),
+        flags=cv2.INTER_NEAREST,
+    )
+    assert np.array_equal(out > 0, expected > 0)
+
+
+def test_project_via_registrations_filtra_por_frame():
+    from lab.eval_scenario import _project_via_registrations
+
+    mask = np.zeros((30, 30), np.uint8)
+    mask[5:15, 5:15] = 255
+    anchor = np.float32([[0, 0], [40, 0], [40, 40], [0, 40]])
+    late = {"anchor": anchor, "quad": anchor, "submitted": None, "frame": 10}
+    # Passada de frame posterior ao checkpoint não projeta.
+    assert _project_via_registrations(mask, [late], 5, canvas_hw=(60, 80)) is None
+    assert _project_via_registrations(mask, [late], 10, canvas_hw=(60, 80)) is not None
+    # E sem registro nenhum também cai fora (fallback da pose).
+    assert _project_via_registrations(mask, [], 10, canvas_hw=(60, 80)) is None
+    assert _project_via_registrations(mask, ["lixo"], 10, canvas_hw=(60, 80)) is None
+
+
+def test_project_via_registrations_unia_duas_poses():
+    """Re-âncora sem reset: a tinta antiga fica onde a cadeia dela
+    a depositou; a união cobre as duas posições da grade."""
+    from lab.eval_scenario import _project_via_registrations
+
+    mask = np.zeros((30, 30), np.uint8)
+    mask[5:15, 5:15] = 255
+    anchor_a = np.float32([[0, 0], [40, 0], [40, 40], [0, 40]])
+    anchor_b = anchor_a + np.float32([8, 0])
+    regs = [
+        {"anchor": anchor_a, "quad": anchor_a, "submitted": None, "frame": None},
+        # A segunda passada registrou a geometria de anchor_a sob a
+        # grade da âncora nova — o conteúdo desloca na grade.
+        {"anchor": anchor_b, "quad": anchor_a, "submitted": None, "frame": None},
+    ]
+    union = _project_via_registrations(mask, regs, 9, canvas_hw=(60, 80)) > 0
+    single = _project_via_registrations(mask, regs[:1], 9, canvas_hw=(60, 80)) > 0
+    assert union.sum() > single.sum()
+
+
+def test_project_via_registrations_usa_quad_submetido_e_pose_real():
+    """sub≠reg com a pose verdadeira do bundle: a cadeia é
+    P(âncora)·P(reg)⁻¹·P(sub)·H — composição manual igual."""
+    from lab.eval_scenario import _project_via_registrations
+
+    from draw.paper import perspective_matrix
+
+    height, width = 60, 80
+    mask = np.zeros((30, 30), np.uint8)
+    mask[5:15, 5:15] = 255
+    anchor = np.float32([[0, 0], [40, 0], [40, 40], [0, 40]])
+    sub = anchor + np.float32([2, 0])  # warp visto com viés
+    quads = np.stack([anchor, anchor + np.float32([8, 0])])
+    reg = {"anchor": anchor, "quad": anchor, "submitted": sub, "frame": 1}
+    out = _project_via_registrations(
+        mask, [reg], 9, canvas_hw=(height, width), quads=quads
+    )
+    destination = np.float32([[0, 0], [width, 0], [width, height], [0, height]])
+    page_corners = np.float32([[0, 0], [30, 0], [30, 30], [0, 30]])
+    chain = (
+        perspective_matrix(anchor, destination)
+        @ np.linalg.inv(perspective_matrix(anchor, destination))
+        @ perspective_matrix(sub, destination)
+        @ perspective_matrix(page_corners, quads[1])
+    )
+    expected = cv2.warpPerspective(
+        mask, chain, (width, height), flags=cv2.INTER_NEAREST
+    )
+    assert np.array_equal(out > 0, expected > 0)
+    # E diverge do caminho sem a pose submetida.
+    naive = cv2.warpPerspective(
+        mask,
+        np.diag([width / 30, height / 30, 1.0]),
+        (width, height),
+        flags=cv2.INTER_NEAREST,
+    )
+    assert not np.array_equal(out > 0, naive > 0)

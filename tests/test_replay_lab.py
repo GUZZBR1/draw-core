@@ -120,3 +120,62 @@ def test_select_worst_frame_eh_indice_do_arquivo():
     records[2]["sig_quad_jump_px"] = 99.0
     worst = select_worst(records, 1, min_gap=0)
     assert worst[0]["frame"] == 3
+
+
+def test_run_replay_pareia_deteccao_consumida(tmp_path):
+    """Pipeline.step consulta o resultado anterior antes de submeter:
+    o det_* do registro é a detecção CONSUMIDA (produzida pelo frame
+    anterior), não a recém-submetida."""
+    from lab.replay_lab import run_replay
+
+    for i in range(3):
+        cv2.imwrite(str(tmp_path / f"f{i}.png"), np.zeros((64, 64, 3), np.uint8))
+    quads = [
+        np.float32([[x, 10], [x + 20, 10], [x + 20, 30], [x, 30]]) for x in (5, 15, 25)
+    ]
+    submitted = []
+
+    class FakeDetector:
+        last_presence_logit = None
+
+        def __call__(self, frame, return_mask=False):
+            idx = len(submitted)
+            submitted.append(idx)
+            return (quads[idx], "paper", np.ones(frame.shape[:2], np.uint8))
+
+    class FakeInk:
+        threshold = 0.5
+
+        def ink_mask(self, warp):
+            return np.zeros(warp.shape[:2], np.uint8)
+
+    records = run_replay(
+        tmp_path,
+        tmp_path / "out",
+        detector=FakeDetector(),
+        page_clean=FakeInk(),
+        verify=None,
+    )
+    assert len(records) == 3
+    # Frame 0: nenhum resultado pendente — nada foi consumido.
+    assert records[0]["det_frame"] is None
+    assert records[0]["det_quad"] is None
+    # Frames seguintes: det_* descreve a detecção do frame anterior —
+    # a que o rastreador acabou de consumir neste step.
+    assert records[1]["det_frame"] == 0
+    assert np.allclose(records[1]["det_quad"], quads[0])
+    assert records[2]["det_frame"] == 1
+    assert np.allclose(records[2]["det_quad"], quads[1])
+
+
+def test_build_panel_sobrepoe_canvas_confirmado():
+    frame = np.full((60, 80, 3), 255, np.uint8)
+    warp = np.full((40, 30, 3), 128, np.uint8)
+    ink = np.zeros((40, 30), np.uint8)
+    canvas = np.zeros((40, 30), np.uint8)
+    canvas[5:15, 5:15] = 255  # confirmado acumulado sem tinta no frame
+    panel = build_panel(frame, None, warp, ink, canvas)
+    # O ladrilho warp+tinta ocupa o quadrante superior-direito:
+    # lá dentro, o retângulo do canvas ficou ciano (B e G altos).
+    tile = panel[0:30, 40:80]
+    assert tile[..., 0].max() > 200 and tile[..., 1].max() > 200

@@ -177,8 +177,14 @@ def select_worst(records, top_k, min_gap=2):
 # ------------------------------------------------------------------
 # Prancha 2×2
 # ------------------------------------------------------------------
-def build_panel(frame, quad, warp, ink_mask):
-    """2×2: original | warp+ tinta verde | quad vermelho | warp."""
+def build_panel(frame, quad, warp, ink_mask, canvas_mask=None):
+    """2×2: original | warp+ tinta verde / confirmado ciano | quad vermelho | warp.
+
+    ``canvas_mask`` é a máscara confirmada ACUMULADA na grade da
+    página — sem ela o painel só mostra a tinta do frame e defeitos
+    de acumulação (que o próprio índice usa para escolher o painel)
+    ficam invisíveis no diagnóstico.
+    """
     h, w = frame.shape[:2]
     pw, ph = w // 2, h // 2
 
@@ -197,6 +203,16 @@ def build_panel(frame, quad, warp, ink_mask):
     else:
         wh, ww = warp.shape[:2]
         mask_panel = warp.copy()
+        if canvas_mask is not None:
+            c = cv2.resize((canvas_mask > 0).astype(np.uint8) * 255, (ww, wh))
+            cyan = np.zeros_like(warp)
+            cyan[:, :, 0] = 255
+            cyan[:, :, 1] = 255
+            mask_panel = np.where(
+                (c > 0)[..., None],
+                cv2.addWeighted(mask_panel, 0.55, cyan, 0.45, 0),
+                mask_panel,
+            )
         if ink_mask is not None:
             m = cv2.resize((ink_mask > 0).astype(np.uint8) * 255, (ww, wh))
             green = np.zeros_like(warp)
@@ -204,10 +220,15 @@ def build_panel(frame, quad, warp, ink_mask):
             mask_panel = np.where(
                 (m > 0)[..., None],
                 cv2.addWeighted(warp, 0.45, green, 0.55, 0),
-                warp,
+                mask_panel,
             )
     panels = [fit(frame), fit(mask_panel), fit(quad_panel), fit(warp)]
-    labels = ["original", "warp + tinta (verde)", "quad (vermelho)", "warp"]
+    labels = [
+        "original",
+        "warp + tinta (verde) / confirmado (ciano)",
+        "quad (vermelho)",
+        "warp",
+    ]
     for panel, label in zip(panels, labels, strict=True):
         cv2.rectangle(panel, (0, 0), (pw, 26), (0, 0, 0), -1)
         cv2.putText(
@@ -303,6 +324,8 @@ def run_replay(
             self._seq = 0
             self.error = None
             self.traces = []
+            self.seq_frames = []
+            self.frame_hint = None
 
         def submit(self, frame, captured_at, frame_index=None):
             outcome = _detect_sheet_combined_traced(frame, detector)
@@ -320,6 +343,7 @@ def run_replay(
                 hand_mask=(extras.get("hand_mask") if extras else None),
             )
             self.traces.append(trace)
+            self.seq_frames.append(self.frame_hint)
 
         def poll(self, after_seq):
             if self._result is None or self._result.sequence <= after_seq:
@@ -341,11 +365,29 @@ def run_replay(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     records = []
+    # Pipeline.step consulta o resultado pendente ANTES de submeter a
+    # detecção nova (atraso de 1 quadro): a detecção que o rastreador
+    # consumiu neste frame veio da submissão do frame anterior. O
+    # registro precisa parear o estado do laço com a detecção
+    # CONSUMIDA — com o rastro recém-submetido, det_quad descrevia um
+    # frame diferente do quad/present ao lado e os sinais de salto
+    # ranqueavam painéis errados.
+    consumed = []
+    _real_poll = det_worker.poll
+
+    def _spy_poll(after_seq):
+        result = _real_poll(after_seq)
+        if result is not None:
+            consumed.append(result)
+        return result
+
+    det_worker.poll = _spy_poll
     for idx, path in enumerate(files):
         frame = cv2.imread(str(path))
         if frame is None:
             continue
         clock.t = idx * clock.dt
+        det_worker.frame_hint = idx
         loop.step(FramePacket(image=frame, captured_at=clock.t, sequence=idx + 1))
         # Uma chamada de pump por frame (o padrão dos replays do
         # PR #65): a cadência da trabalhadora decide pelo relógio
@@ -366,7 +408,18 @@ def run_replay(
             if loop.tracker.corners is None
             else np.asarray(loop.tracker.corners, float).tolist()
         )
-        trace = det_worker.traces[-1] if det_worker.traces else {}
+        consumed_now = consumed[-1] if consumed else None
+        consumed.clear()
+        trace = (
+            det_worker.traces[consumed_now.sequence - 1]
+            if consumed_now is not None
+            else {}
+        )
+        det_frame = (
+            det_worker.seq_frames[consumed_now.sequence - 1]
+            if consumed_now is not None
+            else None
+        )
         canvas_px = (
             int((loop.clean_mask > 0).sum()) if loop.clean_mask is not None else 0
         )
@@ -375,6 +428,7 @@ def run_replay(
             "file": path.name,
             "present": loop.tracker.corners is not None,
             "quad": quad,
+            "det_frame": det_frame,
             "verdict": (trace or {}).get("combined_verdict"),
             "det_quad": (trace or {}).get("combined_corners"),
             "presence_logit": (trace or {}).get("presence_logit"),
@@ -395,7 +449,10 @@ def run_replay(
                     ink_mask = (prob >= page_clean.threshold).astype(np.uint8)
                 except Exception:  # prancha sem warp é diagnóstico tb
                     warp, ink_mask = None, None
-            panel = build_panel(frame, quad, warp, ink_mask)
+            canvas_mask = (
+                None if loop.clean_mask is None else np.asarray(loop.clean_mask) > 0
+            )
+            panel = build_panel(frame, quad, warp, ink_mask, canvas_mask)
             cv2.imwrite(str(out_dir / f"panel_{idx:04d}.png"), panel)
     compute_signals(records)
     (out_dir / "telemetry.json").write_text(

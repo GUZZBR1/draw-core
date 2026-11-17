@@ -120,6 +120,144 @@ def _project(mask, corners, page_to_scene, canvas_hw, scene_map=None):
     )
 
 
+def _project_via_registrations(
+    mask, registrations, frame, *, canvas_hw, quads=None, curl=None, page_corners=None
+):
+    """GT na grade do canvas pela cadeia das passadas até `frame`.
+
+    Cada registro de run_pipeline guarda âncora, quad de registro,
+    quad submetido e o índice do frame de origem. A evidência da
+    passada i ficou em X_i·p da grade, com
+        X_i = P(âncora_i)·P(reg_i)⁻¹ · P(sub_i)·H_i
+    — a mesma cadeia do evaluate_canvas. A união sobre os registros
+    com ``frame <= frame`` descreve o que o canvas confirmado pode
+    conter naquele checkpoint: tinta depositada antes de um
+    lift/move continua projetando pelo registro da sua passada, não
+    pela pose nova (que a colocaria fora da grade). Registros sem
+    submetido/frame colapsam P(sub)·H na escala página→grade, como
+    no eval_capture. Folha curvada remapa página→cena pelo mapa
+    denso sintetizado da pose daquela passada.
+
+    Retorna None quando não há registro utilizável — o chamador cai
+    na projeção pela pose do checkpoint, como antes.
+    """
+    height, width = canvas_hw
+    destination = np.float32([[0, 0], [width, 0], [width, height], [0, height]])
+    true_quads = None if quads is None else np.asarray(quads, np.float32)
+    valid = [
+        r
+        for r in registrations
+        if isinstance(r, dict) and (r.get("frame") is None or r["frame"] <= frame)
+    ]
+    if not valid:
+        return None
+    # Dedup por bytes — repetições da mesma geometria projetam igual.
+    seen = {}
+    for reg in valid:
+        key = (
+            None
+            if reg.get("anchor") is None
+            else np.asarray(reg["anchor"], np.float32).tobytes(),
+            None
+            if reg.get("quad") is None
+            else np.asarray(reg["quad"], np.float32).tobytes(),
+            None
+            if reg.get("submitted") is None
+            else np.asarray(reg["submitted"], np.float32).tobytes(),
+            reg.get("frame") if true_quads is not None else None,
+        )
+        seen.setdefault(key, reg)
+    page_to_grid = np.diag([width / mask.shape[1], height / mask.shape[0], 1.0])
+    if page_corners is None:
+        ph, pw = mask.shape
+        page_corners = np.float32([[0, 0], [pw, 0], [pw, ph], [0, ph]])
+    projections = []
+    for reg in seen.values():
+        anchor, quad, sub = reg.get("anchor"), reg.get("quad"), reg.get("submitted")
+        rframe = reg.get("frame")
+        if anchor is None or quad is None:
+            reg_matrix = np.eye(3, dtype=np.float64)
+        else:
+            reg_matrix = perspective_matrix(
+                np.asarray(anchor, np.float32), destination
+            ) @ np.linalg.inv(
+                perspective_matrix(np.asarray(quad, np.float32), destination)
+            )
+        has_true_pose = (
+            sub is not None
+            and true_quads is not None
+            and rframe is not None
+            and 0 <= rframe < len(true_quads)
+            and np.asarray(true_quads[rframe]).shape == (4, 2)
+            and np.isfinite(true_quads[rframe]).all()
+        )
+        if curl is not None and has_true_pose and page_corners is not None:
+            scene_map = sim_isp.scene_to_page_map(
+                np.linalg.inv(
+                    cv2.getPerspectiveTransform(
+                        page_corners, np.asarray(true_quads[rframe], np.float32)
+                    )
+                ),
+                mask.shape[1],
+                mask.shape[0],
+                curl,
+            )
+            scene = cv2.remap(
+                mask,
+                scene_map[0],
+                scene_map[1],
+                cv2.INTER_NEAREST,
+                borderMode=cv2.BORDER_CONSTANT,
+            )
+            chain = reg_matrix @ perspective_matrix(
+                np.asarray(sub, np.float32), destination
+            )
+            projections.append(
+                cv2.warpPerspective(
+                    scene, chain, (width, height), flags=cv2.INTER_NEAREST
+                )
+            )
+            continue
+        if has_true_pose:
+            input_map = perspective_matrix(
+                np.asarray(sub, np.float32), destination
+            ) @ perspective_matrix(
+                page_corners, np.asarray(true_quads[rframe], np.float32)
+            )
+        else:
+            input_map = page_to_grid
+        projections.append(
+            cv2.warpPerspective(
+                mask, reg_matrix @ input_map, (width, height), flags=cv2.INTER_NEAREST
+            )
+        )
+    if len(projections) == 1:
+        return projections[0]
+    return np.maximum.reduce(projections)
+
+
+def _pipeline_summary(pipeline):
+    """Resumo JSON-seguro do resultado do run_pipeline.
+
+    ``anchors``/``registrations`` carregam ndarrays — o relatório
+    vira JSON, então ficam as contagens (como no main do
+    eval_capture). Os registros brutos seguem na variável local do
+    audit para projetar o GT pela cadeia das passadas.
+    """
+    summary = dict(pipeline)
+    final_mask = summary.pop("mask", None)
+    corners = summary.pop("corners", None)
+    anchors = summary.pop("anchors", ()) or ()
+    registrations = summary.pop("registrations", []) or []
+    summary["final_confirmed_px"] = (
+        None if final_mask is None else int((np.asarray(final_mask) > 0).sum())
+    )
+    summary["anchor_corners"] = None if corners is None else corners.tolist()
+    summary["anchor_count"] = len(anchors)
+    summary["registration_count"] = len(registrations)
+    return summary
+
+
 def audit(video, gt_path, *, fps=None, models=None, save_masks=None, verify="manifest"):
     # models=() quebrava no .get: dict vazio e não tupla.
     models = models or {}
@@ -165,13 +303,8 @@ def audit(video, gt_path, *, fps=None, models=None, save_masks=None, verify="man
     finally:
         capture.release()
 
-    final_mask = pipeline.pop("mask", None)
-    pipeline["final_confirmed_px"] = (
-        None if final_mask is None else int((np.asarray(final_mask) > 0).sum())
-    )
-    corners = pipeline.get("corners")
-    pipeline["anchor_corners"] = None if corners is None else corners.tolist()
-    pipeline.pop("corners", None)
+    registrations = list(pipeline.get("registrations") or [])
+    pipeline = _pipeline_summary(pipeline)
     canvas_hw = tuple(pipeline["canvas_shape"])
     stroke_phase = bundle["stroke_phase"]
     points, offsets = bundle["points"], bundle["offsets"]
@@ -249,12 +382,15 @@ def audit(video, gt_path, *, fps=None, models=None, save_masks=None, verify="man
             "phase_start": phase["start"],
         }
         if snap["corners"] is None or snap["confirmed"] is None:
-            # lift_out tira a folha de cena de propósito: sem âncora
-            # nessa fase é ausência geometricamente impossível de
-            # pontuar, não falha — MAS só quando o canvas persistiu:
+            # lift_out/absent tiram a folha de cena de propósito: sem
+            # âncora nessa fase é ausência geometricamente impossível
+            # de pontuar, não falha — MAS só quando o canvas persistiu:
             # confirmed=None significa que o laço perdeu a tinta,
             # e perder tinta durante a ausência é falha de verdade.
-            absent = phase["kind"] == "lift_out" and snap["confirmed"] is not None
+            absent = (
+                phase["kind"] in ("lift_out", "absent")
+                and snap["confirmed"] is not None
+            )
             entry["status"] = (
                 "ausência (folha fora de cena)" if absent else "sem âncora/canvas"
             )
@@ -273,7 +409,34 @@ def audit(video, gt_path, *, fps=None, models=None, save_masks=None, verify="man
             if snap["provisional"] is None
             else np.asarray(snap["provisional"]) > 0
         )
-        truth = _project(expected, corners, page_to_scene, canvas_hw, scene_map) > 0
+
+        def project_truth(
+            page_mask,
+            *,
+            frame=frame,
+            corners=corners,
+            page_to_scene=page_to_scene,
+            scene_map=scene_map,
+        ):
+            # Registros das passadas até o frame do checkpoint: a
+            # tinta persistida de fases antigas (pré-lift/move) fica
+            # onde a cadeia de registro dela a depositou — projetar
+            # pela pose do checkpoint deslocaria a verdade para fora
+            # da grade e marcaria ausência injusta.
+            projected = _project_via_registrations(
+                page_mask,
+                registrations,
+                frame,
+                canvas_hw=canvas_hw,
+                quads=bundle.get("quads"),
+                curl=curl,
+                page_corners=page_corners,
+            )
+            if projected is not None:
+                return projected > 0
+            return _project(page_mask, corners, page_to_scene, canvas_hw, scene_map) > 0
+
+        truth = project_truth(expected)
         entry.update(pixel_metrics(confirmed, truth))
         entry["confirmed_px"] = int(confirmed.sum())
         entry["provisional_px"] = int(provisional.sum())
@@ -286,9 +449,7 @@ def audit(video, gt_path, *, fps=None, models=None, save_masks=None, verify="man
             redraw = np.zeros(shape, np.uint8)
             for mask in redraw_masks:
                 redraw |= mask
-            redraw_canvas = (
-                _project(redraw, corners, page_to_scene, canvas_hw, scene_map) > 0
-            )
+            redraw_canvas = project_truth(redraw)
             denom = max(1, int(redraw_canvas.sum()))
             entry["redraw_confirmed_recall"] = (
                 float((confirmed & redraw_canvas).sum()) / denom
@@ -298,9 +459,7 @@ def audit(video, gt_path, *, fps=None, models=None, save_masks=None, verify="man
         if w and h:
             rect_mask = np.zeros(shape, np.uint8)
             rect_mask[y : y + h, x : x + w] = 255
-            rect_canvas = (
-                _project(rect_mask, corners, page_to_scene, canvas_hw, scene_map) > 0
-            )
+            rect_canvas = project_truth(rect_mask)
             # Resíduo = confirmado no retângulo apagado FORA do que o
             # redesenho legítimo cobre — traço de fase 1 dentro do
             # retângulo é tinta esperada, não sobra da borracha.
