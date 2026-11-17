@@ -8,10 +8,13 @@ imports via ast em vez de executar.
 import ast
 import importlib.util
 import py_compile
+import queue
 import socket
 import struct
+import sys
 import threading
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -140,6 +143,101 @@ def test_accept_loop_survives_capture_failure_and_serves_next_client():
         assert any("Captura falhou" in line for line in logs)
     finally:
         _stop_loop(thread, stop, server)
+
+
+def test_accept_loop_closes_capture_generator_on_disconnect():
+    """Cliente caindo fecha o gerador de captura (stop no produtor).
+
+    Antes, um OSError no sendall abandonava o gerador de captura: o
+    finally dele (stop da thread produtora + release do VideoCapture)
+    so rodava quando o GC coletasse — a camera podia ficar refem ate
+    la. O accept loop agora chama close() no gerador ao fim de cada
+    cliente, em qualquer caminho de saida.
+    """
+    server = _serve_one_client()
+    closed = threading.Event()
+
+    def _gen():
+        try:
+            while True:
+                yield b"x" * 8
+        finally:
+            closed.set()
+
+    thread, stop, _logs = _start_loop(server, lambda: _gen())
+    try:
+        conn = _client(server)
+        conn.recv(4)  # ACCEPT
+        conn.recv(wh.HEADER.size + 8)
+        conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        conn.close()  # RST: o proximo sendall do servidor levanta OSError
+        assert closed.wait(2.0)  # gerador fechado pelo accept loop
+    finally:
+        _stop_loop(thread, stop, server)
+
+
+def test_accept_loop_survives_eager_factory_failure():
+    """Factory que levanta na chamada nao mata o helper nem vaza socket.
+
+    Nem toda factory e um gerador preguicoso: uma que abre a camera
+    ANTES de retornar o iterador pode levantar CaptureError na propria
+    chamada de make_frames(). Isso precisa cair na mesma recuperacao
+    das falhas de iteracao — conexao fechada, laco volta ao accept.
+    """
+    server = _serve_one_client()
+
+    def _boom():
+        raise wh.CaptureError("camera ocupada ja na abertura")
+
+    factories = [_boom, lambda: iter([b"x" * 8])]
+    thread, stop, logs = _start_loop(server, lambda: factories.pop(0)())
+    try:
+        conn = _client(server)
+        assert conn.recv(4) == wh.ACCEPT
+        while conn.recv(4096):  # a falha na factory fecha a conexao
+            pass
+        with _client(server) as again:
+            assert again.recv(4) == wh.ACCEPT
+            assert again.recv(wh.HEADER.size + 8)
+        assert any("Captura falhou" in line for line in logs)
+    finally:
+        _stop_loop(thread, stop, server)
+
+
+def test_camera_producer_reports_unexpected_error(monkeypatch):
+    """Excecao no produtor (imencode etc.) vira CaptureError, nao stall.
+
+    Sem o catch-all, a excecao morria com a thread daemon e o
+    consumidor so via a fila vazia — reportava 'camera parou de
+    entregar frames' em vez do erro real.
+    """
+
+    class _Cap:
+        def isOpened(self):
+            return True
+
+        def read(self):
+            return True, object()
+
+        def release(self):
+            pass
+
+    def _imencode(*_args):
+        raise RuntimeError("encoder quebrou")
+
+    fake_cv2 = types.SimpleNamespace(
+        CAP_DSHOW=0,
+        VideoCapture=lambda *_a: _Cap(),
+        imencode=_imencode,
+        IMWRITE_JPEG_QUALITY=1,
+    )
+    monkeypatch.setitem(sys.modules, "cv2", fake_cv2)
+
+    out = queue.Queue()
+    wh._camera_jpeg_producer(0, None, None, 85, out, threading.Event())
+    item = out.get_nowait()
+    assert isinstance(item, wh.CaptureError)
+    assert "encoder quebrou" in str(item)
 
 
 def test_accept_loop_stop_event_shuts_down_between_accepts():
@@ -323,3 +421,50 @@ def test_capture_frames_raises_on_read_failure(monkeypatch):
     with pytest.raises(RuntimeError, match="leitura"):
         next(gen)
     assert cap.released
+
+
+def test_enqueue_put_never_drops_and_honors_stop():
+    """Protocolo push: nada se descarta; stop destrava o produtor."""
+    import queue as _queue
+
+    q = _queue.Queue(maxsize=1)
+    wh._enqueue_put(q, b"frame", threading.Event())
+    assert q.get_nowait() == b"frame"
+
+    full = _queue.Queue(maxsize=1)
+    full.put(b"stuck")
+    stop = threading.Event()
+    stop.set()
+    wh._enqueue_put(full, b"item", stop)  # retorna sem bloquear
+    assert full.get_nowait() == b"stuck"  # nada evictado
+
+
+def test_capture_frames_stalled_camera_becomes_capture_error():
+    """read() encalhado no DirectShow: o prazo vira CaptureError.
+
+    Reproduz a falha vista em hardware (o stream morreu no meio da
+    sessao e o cliente seguinte nem completava o handshake porque o
+    accept loop ficou preso no _handle_client): o produtor nunca
+    entrega, o consumidor nao pode congelar — estoura CaptureError
+    que so derruba aquele cliente.
+    """
+
+    def _stalled(index, width, height, quality, out, stop):
+        stop.wait(5.0)  # simula cap.read() bloqueado para sempre
+
+    gen = wh.capture_frames(stall_timeout=0.05, _producer=_stalled)
+    with pytest.raises(wh.CaptureError, match="parou de entregar"):
+        next(gen)
+    gen.close()
+
+
+def test_capture_frames_propagates_producer_error():
+    """Erro do produtor (camera indisponivel) chega ao consumidor."""
+
+    def _dead(index, width, height, quality, out, stop):
+        wh._enqueue_put(out, wh.CaptureError("camera 0 indisponivel ou em uso"), stop)
+
+    gen = wh.capture_frames(_producer=_dead)
+    with pytest.raises(wh.CaptureError, match="indisponivel"):
+        next(gen)
+    gen.close()
