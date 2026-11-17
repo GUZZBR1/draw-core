@@ -354,3 +354,28 @@ def test_run_check_avisa_sem_backend_gui(monkeypatch, capsys):
     monkeypatch.setattr(app_module.sys, "platform", "darwin")
     assert app_module.run_check(0) == 1
     assert "draw-core[gui]" in capsys.readouterr().out
+
+
+def test_gui_backend_compiled_gui_none(monkeypatch):
+    monkeypatch.setattr(
+        app_module.cv2,
+        "getBuildInformation",
+        lambda: "General configuration\n  GUI: NONE\n  Media I/O:\n    JPEG: YES\n",
+    )
+    assert app_module._gui_backend_compiled() is False
+
+
+def test_gui_backend_compiled_secao_irma_nao_conta(monkeypatch):
+    # Media I/O irmã também é indentada: um YES fora da seção GUI
+    # não pode marcar a roda headless como "com janela".
+    info = (
+        "General configuration\n"
+        "  GUI:\n"
+        "    QT:                          NO\n"
+        "    GTK+:                        NO\n"
+        "  Media I/O:\n"
+        "    JPEG:                        YES\n"
+        "    PNG:                         YES\n"
+    )
+    monkeypatch.setattr(app_module.cv2, "getBuildInformation", lambda: info)
+    assert app_module._gui_backend_compiled() is False

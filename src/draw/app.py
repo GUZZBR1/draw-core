@@ -444,19 +444,29 @@ def _gui_backend_compiled():
     desconhecido não bloqueia — a sonda de display decide em seguida.
     """
     info = cv2.getBuildInformation()
-    marker = re.search(r"GUI:\s*\n", info)
-    if marker is None:
-        return True
-    section = []
-    for line in info[marker.end() :].splitlines():
-        stripped = line.strip()
-        if stripped and not line.startswith((" ", "\t")):
+    match = re.search(
+        r"^(?P<indent>[ \t]*)GUI:[ \t]*(?P<inline>\S*)", info, re.MULTILINE
+    )
+    if match is None:
+        return True  # formato desconhecido: não bloqueia
+    inline = match.group("inline")
+    if inline:
+        # Valor inline explícito (GUI: NONE, e variantes de build
+        # que listam o backend na mesma linha).
+        return inline.upper() not in ("NONE", "NO", "OFF", "FALSE", "0")
+    # Seção multilinha: entradas mais indentadas que o cabeçalho GUI.
+    # Seções irmãs (Media I/O etc.) também são indentadas — o corte é
+    # pelo recuo do próprio "GUI:", não por "linha sem espaço".
+    base = len(match.group("indent").expandtabs())
+    for line in info[match.end() :].splitlines():
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent <= base:
             break
-        if stripped:
-            section.append(stripped)
-    if not section:
-        return False
-    return any("YES" in line for line in section)
+        if ":" in line and "YES" in line:
+            return True
+    return False
 
 
 def _require_gui_backend():
