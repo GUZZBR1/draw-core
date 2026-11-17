@@ -8,10 +8,13 @@ imports via ast em vez de executar.
 import ast
 import importlib.util
 import py_compile
+import queue
 import socket
 import struct
+import sys
 import threading
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -171,6 +174,70 @@ def test_accept_loop_closes_capture_generator_on_disconnect():
         assert closed.wait(2.0)  # gerador fechado pelo accept loop
     finally:
         _stop_loop(thread, stop, server)
+
+
+def test_accept_loop_survives_eager_factory_failure():
+    """Factory que levanta na chamada nao mata o helper nem vaza socket.
+
+    Nem toda factory e um gerador preguicoso: uma que abre a camera
+    ANTES de retornar o iterador pode levantar CaptureError na propria
+    chamada de make_frames(). Isso precisa cair na mesma recuperacao
+    das falhas de iteracao — conexao fechada, laco volta ao accept.
+    """
+    server = _serve_one_client()
+
+    def _boom():
+        raise wh.CaptureError("camera ocupada ja na abertura")
+
+    factories = [_boom, lambda: iter([b"x" * 8])]
+    thread, stop, logs = _start_loop(server, lambda: factories.pop(0)())
+    try:
+        conn = _client(server)
+        assert conn.recv(4) == wh.ACCEPT
+        while conn.recv(4096):  # a falha na factory fecha a conexao
+            pass
+        with _client(server) as again:
+            assert again.recv(4) == wh.ACCEPT
+            assert again.recv(wh.HEADER.size + 8)
+        assert any("Captura falhou" in line for line in logs)
+    finally:
+        _stop_loop(thread, stop, server)
+
+
+def test_camera_producer_reports_unexpected_error(monkeypatch):
+    """Excecao no produtor (imencode etc.) vira CaptureError, nao stall.
+
+    Sem o catch-all, a excecao morria com a thread daemon e o
+    consumidor so via a fila vazia — reportava 'camera parou de
+    entregar frames' em vez do erro real.
+    """
+
+    class _Cap:
+        def isOpened(self):
+            return True
+
+        def read(self):
+            return True, object()
+
+        def release(self):
+            pass
+
+    def _imencode(*_args):
+        raise RuntimeError("encoder quebrou")
+
+    fake_cv2 = types.SimpleNamespace(
+        CAP_DSHOW=0,
+        VideoCapture=lambda *_a: _Cap(),
+        imencode=_imencode,
+        IMWRITE_JPEG_QUALITY=1,
+    )
+    monkeypatch.setitem(sys.modules, "cv2", fake_cv2)
+
+    out = queue.Queue()
+    wh._camera_jpeg_producer(0, None, None, 85, out, threading.Event())
+    item = out.get_nowait()
+    assert isinstance(item, wh.CaptureError)
+    assert "encoder quebrou" in str(item)
 
 
 def test_accept_loop_stop_event_shuts_down_between_accepts():

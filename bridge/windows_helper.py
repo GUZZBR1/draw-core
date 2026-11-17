@@ -283,10 +283,11 @@ def _camera_jpeg_producer(index, width, height, quality, out, stop):
     cap.read() do DirectShow que nunca retorna so encalha ESTE
     daemon — nunca o laco de accept do ajudante residente.
     """
-    import cv2  # tardio: opcional; so a captura precisa dele
-
-    cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+    cap = None
     try:
+        import cv2  # tardio: opcional; so a captura precisa dele
+
+        cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
         if not cap.isOpened():
             _enqueue_put(
                 out, CaptureError(f"camera {index} indisponivel ou em uso"), stop
@@ -306,8 +307,16 @@ def _camera_jpeg_producer(index, width, height, quality, out, stop):
             ok, jpeg = cv2.imencode(".jpg", frame, (cv2.IMWRITE_JPEG_QUALITY, quality))
             if ok:
                 _enqueue_put(out, jpeg.tobytes(), stop)
+    except Exception as exc:  # noqa: BLE001 - o consumidor precisa do erro real
+        # Sem isso, uma excecao do produtor (ex.: imencode) morria com
+        # a thread e o consumidor reportava stall — o erro real so
+        # existia no traceback da thread.
+        _enqueue_put(
+            out, CaptureError(f"captura na camera {index} falhou: {exc}"), stop
+        )
     finally:
-        cap.release()
+        if cap is not None:
+            cap.release()
 
 
 def capture_frames(
@@ -543,8 +552,13 @@ def _accept_loop(
             log(f"Conexao de {addr[0]} recusada: handshake/token invalido.")
             conn.close()
             continue
-        frames = make_frames()
+        frames = None
         try:
+            # Dentro do try de proposito: uma factory eagerciada que
+            # levanta CaptureError/OSError ao abrir a camera precisa
+            # cair na mesma recuperacao das falhas de iteracao —
+            # so a sessao morre, o helper volta ao accept.
+            frames = make_frames()
             sent = _handle_client(conn, frames, start_ns, clock)
             log(f"Cliente {addr[0]} desconectou apos {sent} frames.")
         except CaptureError as exc:
