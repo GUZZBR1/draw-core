@@ -45,6 +45,33 @@ for _flag in VALIDATED_FLAGS:
     os.environ[_flag] = "1"
 
 
+def _close_hand_masker(masker):
+    """Fecha os landmarkers MediaPipe de um HandMasker.
+
+    Sem fechamento explícito os finalizers do MediaPipe podem
+    deadlockar na saída do processo e deixar o run_legacy esperando
+    para sempre. O HandMasker legado não expõe close(): usa o método
+    público quando existe e, caso contrário, fecha os dois landmarkers
+    internos diretamente.
+    """
+    if masker is None:
+        return
+    close = getattr(masker, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            pass
+        return
+    for name in ("_landmarker", "_video_landmarker"):
+        landmarker = getattr(masker, name, None)
+        if landmarker is not None:
+            try:
+                landmarker.close()
+            except Exception:
+                pass
+
+
 def iter_frames(source, limit):
     """Frames de um diretório de imagens ou de um vídeo."""
     path = Path(source)
@@ -107,11 +134,14 @@ def main(argv=None):
         if hand_module.hand_model_available(args.hand_model)
         else None
     )
-    presence = (
-        hand_presence_module._MediaPipeHandPresence(
-            hand_module.HandMasker(args.hand_model)
-        )
+    presence_masker = (
+        hand_module.HandMasker(args.hand_model)
         if hand_module.hand_model_available(args.hand_model)
+        else None
+    )
+    presence = (
+        hand_presence_module._MediaPipeHandPresence(presence_masker)
+        if presence_masker is not None
         else None
     )
 
@@ -198,42 +228,48 @@ def main(argv=None):
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     records, canvases = [], []
-    for idx, frame in iter_frames(args.corpus, args.frames):
-        clock.t = idx * clock.dt
-        loop.step(frame, clock.t * 1000.0)
-        worker.pump()
-        loop.collect_ink()
-        if worker.error is not None:
-            raise RuntimeError("trabalhadora de tinta legada falhou") from worker.error
-        records.append(
-            {
-                "frame": idx,
-                "present": loop.tracker.corners is not None,
-                "corners": (
-                    None
-                    if loop.tracker.corners is None
-                    else np.asarray(loop.tracker.corners, float).tolist()
-                ),
-            }
+    try:
+        for idx, frame in iter_frames(args.corpus, args.frames):
+            clock.t = idx * clock.dt
+            loop.step(frame, clock.t * 1000.0)
+            worker.pump()
+            loop.collect_ink()
+            if worker.error is not None:
+                raise RuntimeError(
+                    "trabalhadora de tinta legada falhou"
+                ) from worker.error
+            records.append(
+                {
+                    "frame": idx,
+                    "present": loop.tracker.corners is not None,
+                    "corners": (
+                        None
+                        if loop.tracker.corners is None
+                        else np.asarray(loop.tracker.corners, float).tolist()
+                    ),
+                }
+            )
+            canvases.append(
+                np.zeros((1, 1), bool)
+                if loop.clean_mask is None
+                else (np.asarray(loop.clean_mask) > 0)
+            )
+        hand_samples = presence_worker.real_samples if presence_worker else 0
+        (out / "telemetry.json").write_text(
+            json.dumps(
+                {
+                    "frames": records,
+                    "flags": sorted(VALIDATED_FLAGS),
+                    "hand_samples": hand_samples,
+                },
+                indent=1,
+            )
         )
-        canvases.append(
-            np.zeros((1, 1), bool)
-            if loop.clean_mask is None
-            else (np.asarray(loop.clean_mask) > 0)
-        )
-    hand_samples = presence_worker.real_samples if presence_worker else 0
-    (out / "telemetry.json").write_text(
-        json.dumps(
-            {
-                "frames": records,
-                "flags": sorted(VALIDATED_FLAGS),
-                "hand_samples": hand_samples,
-            },
-            indent=1,
-        )
-    )
-    np.savez_compressed(out / "canvas.npz", *canvases)
-    print(json.dumps({"frames": len(records), "out": str(out)}))
+        np.savez_compressed(out / "canvas.npz", *canvases)
+        print(json.dumps({"frames": len(records), "out": str(out)}))
+    finally:
+        _close_hand_masker(hand_masker)
+        _close_hand_masker(presence_masker)
     return 0
 
 

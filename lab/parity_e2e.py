@@ -413,11 +413,12 @@ def main(argv=None):
     report["sheet_model"] = str(sheet_model)
     report["ink_model"] = str(ink_model)
     report["hand_model"] = str(hand_model)
-    # Zero amostras reais de presença = mediapipe/modelo ausente no
-    # ambiente: os caminhos dependentes de mão ficaram conectados,
-    # mas nada foi medido — um "ok" aqui não cobre a mão.
+    # Só conta como medida quando os DOIS lados produziram amostras
+    # reais de presença: com um lado a zero (mediapipe/modelo ausente
+    # ou sinal indisponível) o caminho de mão desse lado ficou ligado
+    # mas nada foi medido — um "ok" não cobre a mão nele.
     report["hand_samples"] = {"new": new_hand_samples, "legacy": old_hand_samples}
-    report["hand_measured"] = bool(new_hand_samples or old_hand_samples)
+    report["hand_measured"] = bool(new_hand_samples and old_hand_samples)
     (out / "parity.json").write_text(json.dumps(report, indent=1))
     print(json.dumps(report, indent=1))
     return 0 if report["ok"] else 2
