@@ -142,6 +142,37 @@ def test_accept_loop_survives_capture_failure_and_serves_next_client():
         _stop_loop(thread, stop, server)
 
 
+def test_accept_loop_closes_capture_generator_on_disconnect():
+    """Cliente caindo fecha o gerador de captura (stop no produtor).
+
+    Antes, um OSError no sendall abandonava o gerador de captura: o
+    finally dele (stop da thread produtora + release do VideoCapture)
+    so rodava quando o GC coletasse — a camera podia ficar refem ate
+    la. O accept loop agora chama close() no gerador ao fim de cada
+    cliente, em qualquer caminho de saida.
+    """
+    server = _serve_one_client()
+    closed = threading.Event()
+
+    def _gen():
+        try:
+            while True:
+                yield b"x" * 8
+        finally:
+            closed.set()
+
+    thread, stop, _logs = _start_loop(server, lambda: _gen())
+    try:
+        conn = _client(server)
+        conn.recv(4)  # ACCEPT
+        conn.recv(wh.HEADER.size + 8)
+        conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        conn.close()  # RST: o proximo sendall do servidor levanta OSError
+        assert closed.wait(2.0)  # gerador fechado pelo accept loop
+    finally:
+        _stop_loop(thread, stop, server)
+
+
 def test_accept_loop_stop_event_shuts_down_between_accepts():
     """O stop cooperativo encerra o laco sem cliente nenhum."""
     server = _serve_one_client()

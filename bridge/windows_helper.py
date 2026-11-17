@@ -370,7 +370,9 @@ def capture_frames(
     finally:
         stop.set()
         # Em produtor saudavel o join e imediato; num read()
-        # encalhado o daemon vaza em vez de segurar o encerramento.
+        # encalhado o daemon vaza em vez de segurar o encerramento —
+        # a camera pode ficar refem ate o processo inteiro sair
+        # (limite do cv2: nao ha como abortar um read() bloqueado).
         thread.join(timeout=1.0)
 
 
@@ -541,14 +543,22 @@ def _accept_loop(
             log(f"Conexao de {addr[0]} recusada: handshake/token invalido.")
             conn.close()
             continue
+        frames = make_frames()
         try:
-            sent = _handle_client(conn, make_frames(), start_ns, clock)
+            sent = _handle_client(conn, frames, start_ns, clock)
             log(f"Cliente {addr[0]} desconectou apos {sent} frames.")
         except CaptureError as exc:
             log(f"Captura falhou para {addr[0]} ({exc}); voltando a escutar.")
         except (OSError, ConnectionError):
             log(f"Conexao com {addr[0]} caiu; voltando a escutar.")
         finally:
+            # Sem isso, um OSError no sendall abandonava o gerador de
+            # captura — o finally dele (stop da thread produtora +
+            # release do VideoCapture) so rodava no GC, e a camera
+            # podia ficar refem ate la.
+            close = getattr(frames, "close", None)
+            if close is not None:
+                close()
             conn.close()
 
 
