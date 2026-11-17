@@ -84,6 +84,12 @@ class LatestFrameCapture:
         self._dead = False
         self._stopped = False
         self._error = None
+        # Metadados do emissor (HelperCapture): o último id/ts publicado
+        # no pacote, o último id visto e o total descartado na fonte.
+        self._source_frame_id = None
+        self._source_ts_ms = None
+        self._last_source_id = None
+        self._source_dropped = 0
 
     def start(self):
         self._thread.start()
@@ -117,14 +123,34 @@ class LatestFrameCapture:
                 # read() retorna — o consumidor ve o instante de
                 # publicacao, nao o do proprio relogio.
                 captured_at = time.monotonic()
+                # Identidade do emissor quando a fonte a expõe
+                # (HelperCapture): entra no pacote e alimenta a
+                # contagem de descarte na origem.
+                source_frame_id = getattr(self._capture, "last_frame_id", None)
+                source_ts_ms = getattr(self._capture, "last_capture_ts_ms", None)
                 with self._condition:
                     if self._stopped:
                         return
                     if self._seq > self._taken_seq:
                         self._dropped += 1
+                    if source_frame_id is not None:
+                        # frame_id nunca repete e só cresce: um pulo
+                        # são quadros que o emissor descartou na fonte
+                        # (PROTOCOL.md) — outro contador que o
+                        # capture_dropped do consumidor.
+                        if (
+                            self._last_source_id is not None
+                            and source_frame_id > self._last_source_id + 1
+                        ):
+                            self._source_dropped += (
+                                source_frame_id - self._last_source_id - 1
+                            )
+                        self._last_source_id = source_frame_id
                     self._seq += 1
                     self._frame = frame
                     self._captured_at = captured_at
+                    self._source_frame_id = source_frame_id
+                    self._source_ts_ms = source_ts_ms
                     self._failures = 0
                     self._condition.notify_all()
             else:
@@ -157,6 +183,8 @@ class LatestFrameCapture:
                     image=self._frame,
                     captured_at=self._captured_at,
                     sequence=self._seq,
+                    source_frame_id=self._source_frame_id,
+                    source_ts_ms=self._source_ts_ms,
                 )
             return None
 
@@ -174,13 +202,18 @@ class LatestFrameCapture:
         """Contadores para a telemetria de sessao (1 registro/s).
 
         capture_dropped: publicados substituidos antes do consumo
-        (a fila do slot).
+        (a fila do slot). capture_source_dropped: quadros que o
+        emissor descartou na fonte (saltos de frame_id), presente so
+        quando a fonte publica identidade propria.
         """
         with self._condition:
-            return {
+            fields = {
                 "capture_seq": self._seq,
                 "capture_dropped": self._dropped,
             }
+            if self._last_source_id is not None:
+                fields["capture_source_dropped"] = self._source_dropped
+            return fields
 
     @property
     def failures(self):

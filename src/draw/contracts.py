@@ -42,11 +42,20 @@ class FramePacket:
     sequence é o número de sequência da fonte, >= 0. image é guardada
     como visão somente-leitura do buffer recebido (sem copiar o frame):
     o produtor não pode mutar o buffer depois de publicar o pacote.
+
+    source_frame_id e source_ts_ms são a identidade dada pelo emissor
+    quando a fonte a expõe (ajudante Windows/.drawcap): o frame_id da
+    sessão dele e o relógio monotônico de captura em milissegundos.
+    É outro domínio de relógio — só serve para diferenças dentro da
+    mesma sessão, nunca para comparar com captured_at. None para
+    fontes sem identidade própria (webcam local, URLs genéricas).
     """
 
     image: np.ndarray
     captured_at: float
     sequence: int
+    source_frame_id: int | None = None
+    source_ts_ms: int | None = None
 
     def __post_init__(self):
         if not isinstance(self.image, np.ndarray) or self.image.ndim != 3:
@@ -57,6 +66,12 @@ class FramePacket:
             raise ValueError(f"image precisa ser uint8: {self.image.dtype}")
         if self.sequence < 0:
             raise ValueError(f"sequence precisa ser >= 0: {self.sequence}")
+        if self.source_frame_id is not None and self.source_frame_id < 0:
+            raise ValueError(
+                f"source_frame_id precisa ser >= 0: {self.source_frame_id}"
+            )
+        if self.source_ts_ms is not None and self.source_ts_ms < 0:
+            raise ValueError(f"source_ts_ms precisa ser >= 0: {self.source_ts_ms}")
         image = self.image.view()
         image.flags.writeable = False
         object.__setattr__(self, "image", image)

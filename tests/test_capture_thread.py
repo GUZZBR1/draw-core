@@ -398,6 +398,85 @@ def test_on_done_error_does_not_kill_writer(tmp_path):
     assert done == [second]
 
 
+class _HelperLikeCapture:
+    """Fonte que expõe identidade do emissor, como HelperCapture."""
+
+    def __init__(self, records):
+        # records: [(frame_id, capture_ts_ms), ...]
+        self._records = list(records)
+        self.last_frame_id = None
+        self.last_capture_ts_ms = None
+
+    def read(self):
+        if not self._records:
+            time.sleep(0.05)
+            return False, None
+        self.last_frame_id, self.last_capture_ts_ms = self._records.pop(0)
+        frame = np.full((8, 8, 3), 7, dtype=np.uint8)
+        return True, frame
+
+    def release(self):
+        pass
+
+
+@pytest.mark.slow
+def test_source_metadata_reaches_packet():
+    capture = _HelperLikeCapture([(10, 42_000), (11, 42_033)])
+    source = LatestFrameCapture(capture).start()
+    time.sleep(0.2)
+    item = source.wait_next(0, timeout=2.0)
+    check("pacote chegou", item is not None)
+    check(
+        "frame_id do emissor vai no pacote",
+        item.source_frame_id == 11,
+        f"source_frame_id={item.source_frame_id}",
+    )
+    check(
+        "ts do emissor vai no pacote",
+        item.source_ts_ms == 42_033,
+        f"source_ts_ms={item.source_ts_ms}",
+    )
+    check(
+        "sem saltos, nada descartado na fonte",
+        source.stats()["capture_source_dropped"] == 0,
+    )
+    source.stop()
+
+
+@pytest.mark.slow
+def test_source_gaps_count_as_source_dropped():
+    capture = _HelperLikeCapture([(0, 0), (1, 33), (4, 100), (5, 133)])
+    source = LatestFrameCapture(capture).start()
+    time.sleep(0.2)
+    item = source.wait_next(0, timeout=2.0)
+    check("pacote chegou", item is not None)
+    stats = source.stats()
+    check(
+        "salto 1->4 conta 2 quadros descartados na fonte",
+        stats["capture_source_dropped"] == 2,
+        f"stats={stats}",
+    )
+    source.stop()
+
+
+@pytest.mark.slow
+def test_plain_capture_has_no_source_metadata():
+    capture = _PacedCapture(0.01)
+    source = LatestFrameCapture(capture).start()
+    time.sleep(0.1)
+    item = source.wait_next(0, timeout=2.0)
+    check("pacote chegou", item is not None)
+    check(
+        "fonte sem identidade deixa campos None",
+        item.source_frame_id is None and item.source_ts_ms is None,
+    )
+    check(
+        "sem fonte identificada nao ha contador de origem",
+        "capture_source_dropped" not in source.stats(),
+    )
+    source.stop()
+
+
 if __name__ == "__main__":
     test_latest_only_and_no_reprocess()
     test_no_reprocess_without_new_frame()
