@@ -23,6 +23,7 @@ from pathlib import Path
 import cv2
 
 from .contracts import FramePacket
+from .protocol import HelperCapture, is_helper_source
 
 # Limite de falhas seguidas de leitura que declara a fonte morta.
 # Era a contagem do laco principal (15 read() falhos seguidos e o app
@@ -435,9 +436,24 @@ def _local_open_hint(source):
     )
 
 
-def open_capture(source, capture_factory=None):
+def open_capture(source, capture_factory=None, helper_token_file=None):
     global _LAST_OPEN_PROBE
     _LAST_OPEN_PROBE = None
+    if is_helper_source(source):
+        # Fonte do ajudante Windows (bridge/PROTOCOL.md): arquivo
+        # .drawcap gravado ou stream tcp:// ao vivo. AuthenticationError
+        # sobe direto — o operador precisa ver que o token faltou ou
+        # foi recusado, nao um "nao consegui abrir" generico.
+        capture = HelperCapture(source, token_file=helper_token_file)
+        if capture.isOpened():
+            return capture
+        capture.release()
+        raise RuntimeError(
+            f"Nao consegui abrir a fonte do ajudante: {source!r}. "
+            "Confira se o arquivo .drawcap existe e e legivel, ou se o "
+            "ajudante esta escutando na porta TCP (o token vem de "
+            "--helper-token-file; veja bridge/PROTOCOL.md)."
+        )
     if capture_factory is None:
         capture_factory = cv2.VideoCapture
     capture = capture_factory(source)

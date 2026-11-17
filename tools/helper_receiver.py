@@ -1,5 +1,10 @@
 """Receptor do protocolo do ajudante Windows, lado WSL.
 
+O núcleo do protocolo mora em `draw.protocol` (runtime); este módulo
+reexporta essa superfície e acrescenta o que é de ferramenta: o
+fallback de token para DRAW_HELPER_TOKEN (o runtime não lê o
+ambiente — regra do repositório), o --selfcheck e a CLI.
+
 Implementa o contrato de bridge/PROTOCOL.md: um fluxo de registros
 (cabeçalho binário de 28 bytes + payload JPEG) que chega por socket
 TCP ou por arquivo gravado, sem o consumidor distinguir a fonte.
@@ -27,11 +32,11 @@ Como biblioteca:
 """
 
 import argparse
-import hmac
 import os
+import secrets
 import socket
-import struct
 import sys
+import tempfile
 import threading
 from pathlib import Path
 
@@ -40,251 +45,81 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from draw.infra.safe_io import decode_image, image_format  # noqa: E402
+from draw.protocol import (  # noqa: E402  # noqa: E402,F401
+    ACCEPT,
+    DEFAULT_PORT,
+    HANDSHAKE_TIMEOUT_S,
+    HEADER,
+    HEADER_SIZE,
+    HELLO,
+    HELLO_MAGIC,
+    HELLO_VERSION,
+    MAGIC,
+    MAX_FRAME_PIXELS,
+    MAX_FRAME_SIDE,
+    MAX_PAYLOAD_LEN,
+    TOKEN_ENV,
+    TOKEN_MAX_LEN,
+    TOKEN_MIN_LEN,
+    VERSION,
+    AuthenticationError,
+    ProtocolError,
+    _connect,
+    _iter_records,
+    _read_exact,
+    client_handshake,
+    decode_jpeg,
+    frames_from_file,
+    frames_from_socket,
+    is_complete_jpeg,
+    pack_record,
+    record,
+    server_handshake,
+)
+from draw.protocol import resolve_token as _resolve_token  # noqa: E402
 
-MAGIC = b"DRAW"
-VERSION = 1
-# magic, versao, reservado, frame_id, capture_ts_us, payload_len.
-HEADER = struct.Struct("<4sHHQqI")
-HEADER_SIZE = HEADER.size  # 28 bytes
-DEFAULT_PORT = 8765
-
-# Teto de payload_len: conferido ANTES de ler/alocar o payload. Um
-# JPEG 4K de qualidade alta fica bem abaixo disso.
-MAX_PAYLOAD_LEN = 16 << 20
-MAX_FRAME_SIDE = 8192
-MAX_FRAME_PIXELS = 40_000_000
-
-# Handshake de autenticação (PROTOCOL.md): o cliente envia
-# HELLO(magic, versão, len) + token; o ajudante responde ACCEPT ou fecha.
-HELLO_MAGIC = b"DRAH"
-HELLO_VERSION = 1
-HELLO = struct.Struct("<4sHH")
-ACCEPT = b"DROK"
-TOKEN_ENV = "DRAW_HELPER_TOKEN"
-TOKEN_MIN_LEN = 16
-TOKEN_MAX_LEN = 256
-HANDSHAKE_TIMEOUT_S = 5.0
-
-
-class ProtocolError(Exception):
-    """O fluxo violou bridge/PROTOCOL.md (magic, versão ou truncamento)."""
-
-
-class AuthenticationError(ProtocolError):
-    """Token ausente, inválido ou recusado pelo ajudante."""
+__all__ = [
+    "ACCEPT",
+    "AuthenticationError",
+    "DEFAULT_PORT",
+    "HANDSHAKE_TIMEOUT_S",
+    "HEADER",
+    "HEADER_SIZE",
+    "HELLO",
+    "HELLO_MAGIC",
+    "HELLO_VERSION",
+    "MAGIC",
+    "MAX_FRAME_PIXELS",
+    "MAX_FRAME_SIDE",
+    "MAX_PAYLOAD_LEN",
+    "ProtocolError",
+    "TOKEN_ENV",
+    "TOKEN_MAX_LEN",
+    "TOKEN_MIN_LEN",
+    "VERSION",
+    "_connect",
+    "_iter_records",
+    "_read_exact",
+    "client_handshake",
+    "decode_jpeg",
+    "frames_from_file",
+    "frames_from_socket",
+    "is_complete_jpeg",
+    "pack_record",
+    "record",
+    "resolve_token",
+    "server_handshake",
+]
 
 
 def resolve_token(token=None, token_file=None):
     """Token como bytes: argumento, depois --token-file, depois o ambiente."""
-    if token is None and token_file:
-        token = Path(token_file).read_text(encoding="utf-8").strip()
-    if token is None:
+    if token is None and token_file is None:
         token = os.environ.get(TOKEN_ENV, "")
-    if isinstance(token, str):
-        token = token.encode("utf-8")
-    if not TOKEN_MIN_LEN <= len(token) <= TOKEN_MAX_LEN:
-        raise AuthenticationError(
-            f"token do ajudante ausente ou fora de {TOKEN_MIN_LEN}..{TOKEN_MAX_LEN} "
-            f"bytes; defina {TOKEN_ENV} ou use --token-file"
-        )
-    return token
-
-
-def client_handshake(sock, token):
-    """Lado WSL: envia o token e exige ACCEPT antes de qualquer frame."""
-    token = resolve_token(token)
-    sock.sendall(HELLO.pack(HELLO_MAGIC, HELLO_VERSION, len(token)) + token)
     try:
-        reply = _read_exact(sock.recv, len(ACCEPT))
-    except (ProtocolError, OSError) as error:
-        raise AuthenticationError(f"ajudante fechou o handshake: {error}") from error
-    if reply != ACCEPT:
-        raise AuthenticationError("ajudante recusou o token (handshake sem ACCEPT)")
-
-
-def server_handshake(conn, token, timeout=HANDSHAKE_TIMEOUT_S):
-    """Lado ajudante: True e ACCEPT enviado se o token confere.
-
-    Espelha bridge/windows_helper.authenticate_client (usado no
-    selfcheck e nos testes). Qualquer falha devolve False sem
-    responder; quem chamou fecha a conexão.
-    """
-    expected = resolve_token(token)
-    previous = conn.gettimeout()
-    conn.settimeout(timeout)
-    try:
-        hello = _read_exact(conn.recv, HELLO.size)
-        if hello is None:
-            return False
-        magic, version, length = HELLO.unpack(hello)
-        if magic != HELLO_MAGIC or version != HELLO_VERSION:
-            return False
-        if not TOKEN_MIN_LEN <= length <= TOKEN_MAX_LEN:
-            return False
-        offered = _read_exact(conn.recv, length)
-        if offered is None or not hmac.compare_digest(offered, expected):
-            return False
-        conn.sendall(ACCEPT)
-        return True
-    except (ProtocolError, OSError):
-        return False
-    finally:
-        conn.settimeout(previous)
-
-
-def _connect(host, port, token, timeout):
-    token = resolve_token(token)
-    sock = socket.create_connection(
-        (host, port), timeout=timeout if timeout is not None else HANDSHAKE_TIMEOUT_S
-    )
-    try:
-        client_handshake(sock, token)
-        sock.settimeout(timeout)
-    except BaseException:
-        sock.close()
-        raise
-    return sock
-
-
-def pack_record(frame_id, capture_ts_us, payload):
-    """Monta um registro completo (cabeçalho + payload) para escrever."""
-    return (
-        HEADER.pack(MAGIC, VERSION, 0, frame_id, capture_ts_us, len(payload)) + payload
-    )
-
-
-def _read_exact(read, size):
-    """Lê exatamente size bytes via read(n) -> bytes.
-
-    Retorna None se a fonte acabar limpa antes do primeiro byte.
-    Levanta ProtocolError se acabar no meio.
-    """
-    chunks = []
-    remaining = size
-    while remaining > 0:
-        chunk = read(remaining)
-        if not chunk:
-            if not chunks:
-                return None
-            raise ProtocolError(f"fluxo truncado: faltaram {remaining} de {size} bytes")
-        chunks.append(chunk)
-        remaining -= len(chunk)
-    return b"".join(chunks)
-
-
-def _iter_records(read, max_payload=MAX_PAYLOAD_LEN):
-    """Itera registros sobre uma função read(n) -> bytes.
-
-    Produz (frame_id, capture_ts_us, payload, bruto), onde bruto é o
-    registro byte a byte como chegou (o que o gravador escreve).
-    payload_len fora de 1..max_payload é erro de protocolo antes de
-    qualquer leitura do payload.
-    """
-    while True:
-        header = _read_exact(read, HEADER_SIZE)
-        if header is None:
-            return
-        magic, version, _reserved, frame_id, capture_ts_us, payload_len = HEADER.unpack(
-            header
-        )
-        if magic != MAGIC:
-            raise ProtocolError(
-                f"magic invalido: {magic!r} (esperado {MAGIC!r}); "
-                "fluxo dessincronizado ou arquivo de outro formato"
-            )
-        if version != VERSION:
-            raise ProtocolError(f"versao {version} nao suportada (esperada {VERSION})")
-        if payload_len == 0 or payload_len > max_payload:
-            raise ProtocolError(
-                f"payload_len {payload_len} fora de 1..{max_payload} "
-                f"(frame_id {frame_id}); fluxo corrompido ou hostil"
-            )
-        payload = _read_exact(read, payload_len)
-        if payload is None:
-            raise ProtocolError(
-                "fluxo truncado: cabecalho sem payload "
-                f"(frame_id {frame_id}, {payload_len} bytes esperados)"
-            )
-        yield frame_id, capture_ts_us, payload, header + payload
-
-
-def frames_from_file(path, max_payload=MAX_PAYLOAD_LEN):
-    """Itera (frame_id, capture_ts_us, jpeg_bytes) de um arquivo gravado."""
-    with open(path, "rb") as handle:
-        for frame_id, capture_ts_us, payload, _raw in _iter_records(
-            handle.read, max_payload
-        ):
-            yield frame_id, capture_ts_us, payload
-
-
-def frames_from_socket(
-    host, port=DEFAULT_PORT, timeout=None, token=None, max_payload=MAX_PAYLOAD_LEN
-):
-    """Itera (frame_id, capture_ts_us, jpeg_bytes) do ajudante via TCP.
-
-    Autentica com o token (argumento ou DRAW_HELPER_TOKEN) antes de ler.
-    """
-    with _connect(host, port, token, timeout) as sock:
-        for frame_id, capture_ts_us, payload, _raw in _iter_records(
-            sock.recv, max_payload
-        ):
-            yield frame_id, capture_ts_us, payload
-
-
-def record(
-    host,
-    port,
-    out_path,
-    max_frames=None,
-    timeout=None,
-    token=None,
-    max_payload=MAX_PAYLOAD_LEN,
-):
-    """Grava o fluxo do socket byte a byte num arquivo. Retorna n.
-
-    max_frames<=0 é rejeitado: zero frames não exige conexão, e
-    aceitar o valor faria o laço gravar um frame antes de parar.
-    """
-    if max_frames is not None and max_frames <= 0:
-        raise ValueError("max_frames precisa ser um inteiro positivo")
-    count = 0
-    with _connect(host, port, token, timeout) as sock:
-        with open(out_path, "wb") as handle:
-            for _fid, _ts, _payload, raw in _iter_records(sock.recv, max_payload):
-                handle.write(raw)
-                count += 1
-                if max_frames is not None and count >= max_frames:
-                    break
-    return count
-
-
-def is_complete_jpeg(payload):
-    """True se o payload começa em FF D8 e termina em FF D9."""
-    return (
-        len(payload) >= 4
-        and image_format(payload) == "jpeg"
-        and bytes(payload[-2:]) == b"\xff\xd9"
-    )
-
-
-def decode_jpeg(jpeg_bytes, max_side=MAX_FRAME_SIDE, max_pixels=MAX_FRAME_PIXELS):
-    """Decodifica um payload em imagem BGR (numpy) ou None se inválido.
-
-    Payload truncado, sem cabeçalho SOF, com dimensões acima do teto
-    ou que o decoder recuse devolve None; nunca levanta.
-    """
-    import cv2
-
-    if not is_complete_jpeg(jpeg_bytes):
-        return None
-    return decode_image(
-        bytes(jpeg_bytes),
-        cv2.IMREAD_COLOR,
-        max_bytes=MAX_PAYLOAD_LEN,
-        max_side=max_side,
-        max_pixels=max_pixels,
-    )
+        return _resolve_token(token, token_file)
+    except AuthenticationError as error:
+        raise AuthenticationError(f"{error}; defina {TOKEN_ENV}") from error
 
 
 def _synthetic_frames(n, base_id=1000, base_ts_us=5_000_000):
@@ -332,9 +167,6 @@ def _check_roundtrip(expected, received, label):
 
 
 def _selfcheck():
-    import secrets
-    import tempfile
-
     n = 64
     expected = _synthetic_frames(n)
     failures = []

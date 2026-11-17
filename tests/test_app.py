@@ -171,7 +171,7 @@ def test_check_models_falha_em_divergencia(monkeypatch, tmp_path, capsys):
 def test_main_check_chama_run_check(monkeypatch):
     seen = {}
 
-    def fake_check(source):
+    def fake_check(source, helper_token_file=None):
         seen["s"] = source
         return 0
 
@@ -186,7 +186,7 @@ def test_main_check_chama_run_check(monkeypatch):
 def test_main_check_com_url_passa_url(monkeypatch):
     seen = {}
 
-    def fake_check(source):
+    def fake_check(source, helper_token_file=None):
         seen["s"] = source
         return 0
 
