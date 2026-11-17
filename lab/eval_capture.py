@@ -240,6 +240,7 @@ def run_pipeline(
     )
     frame_index = 0
     anchors = []
+    registrations = []
     try:
         while True:
             ok, frame = capture.read()
@@ -251,14 +252,31 @@ def run_pipeline(
                     image=frame, captured_at=clock.now, sequence=frame_index + 1
                 )
             )
-            if worker.pump() and outcome is None:
+            pumped = worker.pump()
+            if pumped and outcome is None:
                 outcome = loop.collect_ink()
-                # A âncora de CADA publicação: a tinta de uma folha que
-                # se moveu caiu na pose daquele quadro, não da última —
-                # a avaliação do GT projeta por todas elas.
-                anchor = worker.anchor_corners
-                if anchor is not None:
-                    anchors.append(np.asarray(anchor, np.float32).copy())
+            if pumped:
+                # O par (âncora, quad de registro) de CADA passada:
+                # a tinta cai na grade pela matriz daquele par, e a
+                # pose da passada diverge da pose final quando a
+                # folha anda. A avaliação do GT projeta pela mesma
+                # matriz de registro, unida sobre as passadas.
+                registration = worker.last_registration
+                if registration is not None:
+                    anchor, reg_corners = registration
+                    if anchor is None:
+                        anchor = reg_corners
+                    if anchor is not None:
+                        anchor = np.asarray(anchor, np.float32)
+                        anchors.append(anchor.copy())
+                        registrations.append(
+                            (
+                                anchor,
+                                None
+                                if reg_corners is None
+                                else np.asarray(reg_corners, np.float32).copy(),
+                            )
+                        )
             if worker.error is not None:
                 raise RuntimeError("worker de tinta falhou") from worker.error
             if outcome is not None:
@@ -281,6 +299,7 @@ def run_pipeline(
     return {
         "mask": mask,
         "anchors": anchors,
+        "registrations": registrations,
         "corners": None if corners is None else np.asarray(corners).copy(),
         "frames": frame_index,
         "fps": fps,
@@ -329,16 +348,22 @@ def evaluate_canvas(
     canvas_space="page",
     corners=None,
     anchors=None,
+    registrations=None,
     stroke_recall=0.5,
 ):
     """Alinha GT por homografia conhecida, nunca por ajuste ao desenho.
 
     page sem corners pressupõe retificação ideal (bundle necessário).
-    page com corners usa a âncora real detectada. `anchors` recebe a
-    âncora de CADA publicação de tinta — num vídeo com folha móvel o
-    GT é projetado por todas elas e unido, nunca só pela pose final.
-    scene exige a mesma grade de câmera que ink_full. NPY simples não
-    tem traços individuais.
+    `registrations` recebe o par (âncora, quad de registro) de CADA
+    passada do worker: a grade do canvas é indexada pela retificação
+    da âncora, mas cada evidência entra pela matriz P(âncora)·P(quad)⁻¹
+    da SUA passada — com a folha móvel, a pose de cada publicação
+    diverge da pose final e da pose da âncora. O GT é projetado pela
+    mesma matriz de registro e unido sobre as passadas. `anchors` e
+    `corners` isolados viram pares (âncora, âncora): sem o quad da
+    passada não há como saber o deslocamento — retificação canônica
+    é a leitura honesta de um canvas salvo. scene exige a mesma
+    grade de câmera que ink_full. NPY simples não tem traços.
     """
     from draw.paper import perspective_matrix
 
@@ -433,44 +458,86 @@ def evaluate_canvas(
             stroke_mats = [None]
             stroke_page_mats = [page_matrix]
     elif canvas_space == "page":
-        anchor_list = []
-        for anchor in anchors or ():
-            anchor_list.append(np.asarray(anchor, np.float32))
-        if corners is not None:
-            anchor_list.append(np.asarray(corners, np.float32))
-        # Dedup por bytes: vídeo estático repete a mesma âncora a cada
-        # publicação e uma projeção por repetição seria desperdício.
-        anchor_list = list({a.tobytes(): a for a in anchor_list}.values())
-        if anchor_list:
+        # Pares (âncora, quad de registro): a tinta confirmada sob a
+        # passada i ficou na posição M_i⁻¹·g da grade, com
+        # M_i = P(âncora_i)·P(quad_i)⁻¹ — a mesma matriz que o worker
+        # usou para registrar a evidência. registrations traz o par
+        # real da passada; âncoras/cantos soltos viram (quad, quad),
+        # registro identidade.
+        pairs = list(registrations or ())
+        if not pairs:
+            for anchor in anchors or ():
+                pairs.append((anchor, anchor))
+            if corners is not None:
+                pairs.append((corners, corners))
+        # Dedup por bytes do par: vídeo estático repete o mesmo
+        # (âncora, quad) a cada passada e uma projeção por repetição
+        # seria desperdício.
+        seen = {}
+        for anchor, pass_quad in pairs:
+            key = (
+                None if anchor is None else np.asarray(anchor, np.float32).tobytes(),
+                None
+                if pass_quad is None
+                else np.asarray(pass_quad, np.float32).tobytes(),
+            )
+            seen.setdefault(
+                key,
+                (
+                    None if anchor is None else np.asarray(anchor, np.float32),
+                    None if pass_quad is None else np.asarray(pass_quad, np.float32),
+                ),
+            )
+        pairs = list(seen.values())
+        if pairs:
             destination = np.float32([[0, 0], [width, 0], [width, height], [0, height]])
+            truth_src = page_truth if bundle is not None else truth
+            # Página→grade do canvas seguido do registro da passada:
+            # o mesmo caminho da evidência — prob na grade da
+            # passada, warpPerspective pela matriz P(âncora)·P(quad)⁻¹.
+            page_to_grid = np.diag(
+                [
+                    width / truth_src.shape[1],
+                    height / truth_src.shape[0],
+                    1.0,
+                ]
+            )
             projections = []
             stroke_mats = []
             stroke_page_mats = []
-            for anchor in anchor_list:
-                if anchor.shape != (4, 2) or not np.isfinite(anchor).all():
-                    raise ValueError(
-                        "corners precisa ter formato (4, 2) e valores finitos"
-                    )
-                matrix = perspective_matrix(anchor, destination)
-                stroke_mats.append(matrix)
-                if bundle is not None:
-                    page_matrix = matrix @ bundle[page_to_scene_key]
-                    stroke_page_mats.append(page_matrix)
-                    projections.append(project(page_truth, matrix, page_matrix))
-                else:
-                    projections.append(
-                        cv2.warpPerspective(
-                            truth, matrix, (width, height), flags=cv2.INTER_NEAREST
+            for anchor, pass_quad in pairs:
+                for quad in (anchor, pass_quad):
+                    if quad is not None and (
+                        quad.shape != (4, 2) or not np.isfinite(quad).all()
+                    ):
+                        raise ValueError(
+                            "corners precisa ter formato (4, 2) e valores finitos"
                         )
+                if anchor is None or pass_quad is None:
+                    # Sem um lado do registro a evidência entra na
+                    # própria geometria — a grade é a da passada.
+                    reg_matrix = np.eye(3, dtype=np.float64)
+                else:
+                    reg_matrix = perspective_matrix(
+                        anchor, destination
+                    ) @ np.linalg.inv(perspective_matrix(pass_quad, destination))
+                page_matrix = reg_matrix @ page_to_grid
+                stroke_mats.append(None)
+                stroke_page_mats.append(page_matrix)
+                projections.append(
+                    cv2.warpPerspective(
+                        truth_src,
+                        page_matrix,
+                        (width, height),
+                        flags=cv2.INTER_NEAREST,
                     )
+                )
             truth = (
                 projections[0]
                 if len(projections) == 1
                 else np.maximum.reduce(projections)
             )
-            alignment = (
-                "per_frame_anchors" if len(anchor_list) > 1 else "detected_anchor"
-            )
+            alignment = "per_frame_anchors" if len(pairs) > 1 else "detected_anchor"
         elif bundle is not None:
             ph, pw = bundle["page_ink_full"].shape
             page_matrix = np.diag([width / pw, height / ph, 1.0])
@@ -535,7 +602,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         pipeline = None
-        anchors = None
+        registrations = None
         corners = (
             None if args.corners is None else np.load(args.corners, allow_pickle=False)
         )
@@ -559,8 +626,10 @@ def main(argv=None):
             prediction = pipeline.pop("mask")
             corners = pipeline.pop("corners")
             anchors = pipeline.pop("anchors")
+            registrations = pipeline.pop("registrations")
             pipeline["anchor_corners"] = None if corners is None else corners.tolist()
             pipeline["anchor_count"] = len(anchors)
+            pipeline["registration_count"] = len(registrations)
         else:
             prediction = load_canvas(args.canvas, args.canvas_kind)
         report = evaluate_canvas(
@@ -568,7 +637,7 @@ def main(argv=None):
             args.gt,
             canvas_space=args.canvas_space,
             corners=corners,
-            anchors=anchors,
+            registrations=registrations,
             stroke_recall=args.stroke_recall,
         )
         if pipeline is not None:

@@ -205,6 +205,12 @@ def test_run_pipeline_dirige_pipeline_real(tmp_path, monkeypatch):
     # O modelo didático (logit = luminância) deve ter confirmado a
     # região escura como tinta.
     assert result["mask"] is not None and result["mask"].any()
+    # Cada passada deixa o par (âncora, quad de registro) que a
+    # avaliação usa para projetar o GT.
+    assert result["registrations"]
+    for anchor, pass_quad in result["registrations"]:
+        assert np.asarray(anchor).shape == (4, 2)
+        assert pass_quad is None or np.asarray(pass_quad).shape == (4, 2)
 
 
 def test_run_pipeline_rejeita_captura_fechada(tmp_path):
@@ -225,40 +231,68 @@ def test_run_pipeline_rejeita_fps_invalido(tmp_path):
         ec.run_pipeline(_NoFps(1), page_clean_model="x.onnx", verify=None)
 
 
-def test_evaluate_canvas_projeta_gt_por_cada_ancora(tmp_path):
-    # Folha andou no meio do vídeo: a tinta confirmada caiu nas duas
-    # poses. Projetar o GT só pela âncora final perderia a metade
-    # inicial — a união por quadro é a comparação justa.
+def test_evaluate_canvas_projeta_gt_pelo_registro_da_passada(tmp_path):
+    # Folha andou +4 com a âncora presa na pose inicial: o registro
+    # da passada deposita a tinta deslocada +4 na grade (a grade é
+    # a vista da câmera pela âncora velha — a folha anda sob ela).
+    # O GT tem de ser projetado pelo par (âncora, quad) da passada —
+    # a pose final ou a âncora sozinha erram o lugar.
     from lab.eval_capture import evaluate_canvas
 
     h, w = 40, 60
-    scene_gt = np.zeros((h, w), np.uint8)
-    scene_gt[5:15, 5:15] = 1
-    scene_gt[20:30, 20:30] = 1
+    truth = np.zeros((h, w), np.uint8)
+    truth[5:15, 5:15] = 1
     gt_path = tmp_path / "gt.npy"
-    np.save(gt_path, scene_gt)
+    np.save(gt_path, truth)
 
-    a1 = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
-    a2 = np.float32([[4, 0], [w + 4, 0], [w + 4, h], [4, h]])
-    # Canvas: o traço 1 ficou sob a1, o traço 2 sob a2 (pose nova).
+    a0 = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
+    c1 = np.float32([[4, 0], [w + 4, 0], [w + 4, h], [4, h]])
     prediction = np.zeros((h, w), np.uint8)
-    prediction[5:15, 5:15] = 1
-    prediction[20:30, 24:34] = 1
+    prediction[5:15, 9:19] = 1  # a tinta registrou deslocada +4
+
+    final_pose = evaluate_canvas(prediction, gt_path, canvas_space="page", corners=c1)
+    registered = evaluate_canvas(
+        prediction, gt_path, canvas_space="page", registrations=[(a0, c1)]
+    )
+    assert registered["recall"] == 1.0
+    assert registered["iou"] > final_pose["iou"]
+
+
+def test_evaluate_canvas_registros_se_unem_sobre_passadas(tmp_path):
+    # Dois pares de registro (âncora parada, quad andou): a tinta
+    # entrou na grade nas duas colocações — a união cobre as duas.
+    from lab.eval_capture import evaluate_canvas
+
+    h, w = 40, 60
+    truth = np.zeros((h, w), np.uint8)
+    truth[5:15, 5:15] = 1
+    gt_path = tmp_path / "gt.npy"
+    np.save(gt_path, truth)
+
+    a0 = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
+    c1 = np.float32([[4, 0], [w + 4, 0], [w + 4, h], [4, h]])
+    prediction = np.zeros((h, w), np.uint8)
+    prediction[5:15, 5:19] = 1  # canônica (a0,a0) + deslocada (a0,c1)
 
     single = evaluate_canvas(
-        prediction, gt_path, canvas_space="page", corners=a2, anchors=None
+        prediction,
+        gt_path,
+        canvas_space="page",
+        registrations=[(a0, a0)],
     )
     multi = evaluate_canvas(
-        prediction, gt_path, canvas_space="page", corners=a2, anchors=[a1]
+        prediction,
+        gt_path,
+        canvas_space="page",
+        registrations=[(a0, a0), (a0, c1)],
     )
     assert multi["alignment"] == "per_frame_anchors"
     assert multi["iou"] > single["iou"]
 
 
-def test_evaluate_canvas_bundle_mantem_uniao_de_ancoras(tmp_path):
-    # Bundle em espaco de pagina + folha que andou: a uniao por
-    # ancora nao pode ser sobrescrita pela pose final (o bloco
-    # ideal_page so roda sem ancoras).
+def test_evaluate_canvas_bundle_projeta_pelo_registro(tmp_path):
+    # Bundle em espaço de página + folha que andou sob a âncora
+    # velha: a projeção segue o par de registro, não a pose final.
     h, w = 40, 60
     page_gt = np.zeros((h, w), np.uint8)
     page_gt[5:15, 5:15] = 1
@@ -269,17 +303,60 @@ def test_evaluate_canvas_bundle_mantem_uniao_de_ancoras(tmp_path):
         page_ink_full=page_gt,
         page_to_scene=np.eye(3, dtype=np.float64),
     )
-    a1 = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
-    a2 = np.float32([[4, 0], [w + 4, 0], [w + 4, h], [4, h]])
+    a0 = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
+    c1 = np.float32([[4, 0], [w + 4, 0], [w + 4, h], [4, h]])
     prediction = np.zeros((h, w), np.uint8)
-    prediction[5:15, 5:15] = 1
-    prediction[20:30, 24:34] = 1
+    prediction[5:15, 9:19] = 1  # traço 1 registrou +4
+    prediction[20:30, 24:34] = 1  # traço 2 também
 
-    single = ec.evaluate_canvas(
-        prediction, bundle_path, canvas_space="page", corners=a2, anchors=None
+    registered = ec.evaluate_canvas(
+        prediction,
+        bundle_path,
+        canvas_space="page",
+        registrations=[(a0, c1)],
     )
-    multi = ec.evaluate_canvas(
-        prediction, bundle_path, canvas_space="page", corners=a2, anchors=[a1]
+    assert registered["recall"] == 1.0
+    assert registered["iou"] == 1.0
+
+
+def test_evaluate_canvas_projecao_igual_ao_registro_do_worker(tmp_path):
+    # Invariante do conserto: a projeção do GT na grade armazenada
+    # é EXATAMENTE a matriz que _register_ink_probability aplica à
+    # evidência — aqui com página 30×30 ≠ grade 40×60, para a
+    # composição página→grade→âncora ficar distinguível.
+    import cv2
+
+    from draw.ink import registration as reg
+
+    h, w = 40, 60
+    ph, pw = 30, 30
+    page_gt = np.zeros((ph, pw), np.uint8)
+    page_gt[5:15, 5:15] = 1
+    page_gt[20:25, 20:28] = 1
+    bundle_path = tmp_path / "gt.npz"
+    _write_bundle(
+        bundle_path,
+        page_ink_full=page_gt,
+        page_to_scene=np.eye(3, dtype=np.float64),
     )
-    assert multi["alignment"] == "per_frame_anchors"
-    assert multi["iou"] > single["iou"]
+    a0 = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
+    c1 = np.float32([[4, 0], [w + 4, 0], [w + 4, h], [4, h]])
+
+    # O que o worker produziria: página retificada na grade e
+    # registrada sob (âncora=a0, quad da passada=c1).
+    truth_grid = cv2.warpPerspective(
+        page_gt.astype(np.float32),
+        np.diag([w / pw, h / ph, 1.0]),
+        (w, h),
+        flags=cv2.INTER_NEAREST,
+    )
+    stored = reg._register_ink_probability(truth_grid, a0, c1)[0] > 0
+
+    report = ec.evaluate_canvas(
+        stored,
+        bundle_path,
+        canvas_space="page",
+        registrations=[(a0, c1)],
+    )
+    assert report["iou"] == 1.0
+    assert report["recall"] == 1.0

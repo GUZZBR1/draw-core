@@ -210,6 +210,12 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         # aos quads posicionais (0 = posicional; k = cantos rolados
         # por k apos um pouso rodado julgado pela arbitragem).
         self._anchor_roll = 0
+        # Par (ancora, quad de registro) efetivamente usado pela
+        # ultima passada: a ancora sozinha nao diz em que pose a
+        # grade estava quando cada evidencia votou — deadband
+        # congela o quad, pouso/follow trocam a ancora no meio da
+        # passada. Telemetria de leitura (last_registration).
+        self._last_registration = None
         self._identity_reference = None
         self._identity_reference_corners = None
         self._identity_recovery_requested = False
@@ -315,6 +321,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._follow_streak_quads = []
             self._follow_hold = False
             self._anchor_roll = 0
+            self._last_registration = None
             self._still_passes = 0
             self._generation_passes = 0
             self._quiet_passes = 0
@@ -865,6 +872,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     prob, anchor, registration_corners, visible
                 )
             )
+            self._last_registration = (
+                None if anchor is None else anchor.copy(),
+                (None if registration_corners is None else registration_corners.copy()),
+            )
             if coverage is not None and coverage.shape == prob.shape:
                 # Gate de re-confirmacao (cobertura de folha do loop): onde
                 # o warp nao e folha, so a tinta que a ancora JA
@@ -1168,6 +1179,19 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                             visible,
                         )
                     )
+                    self._last_registration = (
+                        None
+                        if self._anchor_corners is None
+                        else self._anchor_corners.copy(),
+                        (
+                            None
+                            if (self._reg_frozen_corners if reg_deadband else corners)
+                            is None
+                            else (
+                                self._reg_frozen_corners if reg_deadband else corners
+                            ).copy()
+                        ),
+                    )
                     force_publish = True
             follow_abstain = False
             if anchor_follow:
@@ -1209,6 +1233,19 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                             (self._reg_frozen_corners if reg_deadband else corners),
                             visible,
                         )
+                    )
+                    self._last_registration = (
+                        None
+                        if self._anchor_corners is None
+                        else self._anchor_corners.copy(),
+                        (
+                            None
+                            if (self._reg_frozen_corners if reg_deadband else corners)
+                            is None
+                            else (
+                                self._reg_frozen_corners if reg_deadband else corners
+                            ).copy()
+                        ),
                     )
                     arbitration_abstain = False
                     force_publish = True
@@ -1393,6 +1430,27 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         """
         with self._condition:
             return None if self._anchor_corners is None else self._anchor_corners.copy()
+
+    @property
+    def last_registration(self):
+        """Par (âncora, quad de registro) da última passada — cópias.
+
+        A grade armazenada e indexada pela retificacao da ancora,
+        mas cada evidencia entra pelo par (âncora, quad) da SUA
+        passada: a folha pode andar entre o pouso da ancora e a
+        passada seguinte, e o deadband/pouso/follow trocam os dois
+        lados no meio do caminho. Avaliadores projetam o GT pela
+        mesma matriz de registro; a ancora sozinha nao basta.
+        None enquanto nenhuma passada registrou.
+        """
+        with self._condition:
+            if self._last_registration is None:
+                return None
+            anchor, corners = self._last_registration
+            return (
+                None if anchor is None else anchor.copy(),
+                None if corners is None else corners.copy(),
+            )
 
     def stop(self):
         # O teto cobre uma passada em voo: a trabalhadora so ve o
