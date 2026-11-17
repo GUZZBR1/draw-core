@@ -1,19 +1,20 @@
 # ============================================================
-#  NAO TESTADO. NAO EXECUTADO. ESBOCO.
+#  CAPTURA IMPLEMENTADA (cv2/DirectShow); INJECAO AINDA ESBOCO.
 #
-#  Este arquivo nunca rodou numa webcam Windows real: foi
-#  escrito no WSL, sem maquina Windows disponivel. Ele existe
-#  para fixar a forma do ajudante (injecao de cursor e laco de
-#  captura) antes da primeira sessao real no Windows, onde cada
-#  funcao precisa ser conferida uma a uma. Nao trate nenhuma
-#  parte como verificada — excecao: a logica de rede (handshake,
-#  laco de accept, bind e timestamp) e coberta por
-#  tests/test_bridge.py com sockets reais de loopback.
+#  Estado de cada metade, conferido na primeira sessao real:
+#  - Rede (handshake, accept, bind, timestamp): coberta por
+#    tests/test_bridge.py com sockets reais de loopback.
+#  - Captura (capture_frames): implementada via cv2.VideoCapture
+#    DirectShow + imencode, exercida em webcam real no Windows.
+#  - Injecao de cursor (SendInput/ctypes): NUNCA dirigiu uma
+#    sessao real. So a forma esta testada — conferir cada funcao
+#    antes de confiar nas coordenadas.
 #
 #  Regras do projeto que este arquivo respeita por desenho:
 #  - NENHUM ML no Windows. Este ajudante captura e injeta;
 #    todo o processamento e todo o ML ficam no WSL.
-#  - Somente biblioteca padrao (ctypes). Nada para instalar.
+#  - Injecao: somente biblioteca padrao (ctypes). Captura: cv2
+#    (importado tarde — sem cv2, o modulo importa e injeta normal).
 # ============================================================
 """Esboço do ajudante Draw no Windows (ver bridge/PROTOCOL.md).
 
@@ -25,13 +26,11 @@ Duas metades:
    de estruturas Win32 documentadas.
 
 2. Laço captura -> JPEG -> socket conforme o PROTOCOL.md. A
-   captura DirectShow/MSMF e a codificação JPEG são STUBS
-   comentados: exigem uma sessão real no Windows para escolher e
-   conferir a API (MSMF via ctypes é verbosa; uma rota interim é
-   reusar um ffmpeg no Windows como fonte de frames e
-   carimbar na entrega, o que mede a latência da entrega, não a
-   da exposição; a diferença precisa ser declarada quando o passo
-   0 rodar).
+   captura usa cv2.VideoCapture (DirectShow) pedindo MJPG
+   1280x720 — a camera entrega JPEG nativo — e cv2.imencode faz o
+   JPEG do frame. O carimbo sai na entrega do frame ao socket
+   (mede a entrega, não a exposição do sensor; a diferença entra
+   no relatorio quando o passo de latencia rodar).
 
 Uso pretendido (no Windows, quando testado):
   set DRAW_HELPER_TOKEN=<token compartilhado com o WSL>
@@ -241,27 +240,49 @@ def click(down=True):
     _send_mouse(MOUSEEVENTF_LEFTDOWN if down else MOUSEEVENTF_LEFTUP)
 
 
-# --- Captura: STUBS (exigem sessao real no Windows) ---
+# --- Captura: cv2/DirectShow ---
 
 
-def capture_frames():
-    """Produz (jpeg_bytes) por frame capturado. STUB, nao implementado.
+def capture_frames(index=0, width=None, height=None, quality=85):
+    """Produz (jpeg_bytes) por frame capturado via cv2/DirectShow.
 
-    Na versao real, a captura e DirectShow/MSMF: enumerar o
-    dispositivo de video, abrir em MJPG 1280x720 (o formato que o
-    app ja pede na rota usbipd), e ler os samples na cadencia da
-    camera. O carimbo de captura sai na entrega do sample, sobre
-    (time.perf_counter_ns() - start_ns) // 1000 (monotonico, epoca =
-    inicio do processo), como manda o PROTOCOL.md.
+    Abre o dispositivo `index` no formato nativo da camera e le na
+    cadencia dela: `read()` bloqueia ate o proximo sample. O carimbo
+    sai na entrega (quem envia, em `_handle_client`), nao na
+    exposicao do sensor — ressalva declarada do cabecalho.
 
-    Rota interim possivel: ler o MJPEG de um ffmpeg no
-    Windows e carimbar na leitura. Mais simples, mas o
-    carimbo mede a entrega do ffmpeg, nao a exposicao; se o passo 0
-    usar essa rota, a ressalva entra no relatorio da medida.
+    `cv2` e dependencia so desta metade: importa-se tarde para a
+    injecao de cursor (stdlib pura) continuar utilizavel sem ele.
+    Num consumidor lento, o buffer do DirectShow devolve frames
+    velhos — latencia declarada, nao descarte.
+
+    width/height sao None por padrao e NAO se negocia FOURCC:
+    numa webcam real (DirectShow, 2026) cap.set(FOURCC=MJPG,
+    1280x720) travou dentro da chamada de driver — processo
+    impossivel de matar e dispositivo refem ate reboot. Pedir
+    formato ao driver so e seguro quando o operador confirmou
+    suporte naquele hardware; por isso --width/--height sao opt-in
+    no CLI e o FOURCC nao se expoe de jeito nenhum.
     """
-    raise NotImplementedError(
-        "captura DirectShow/MSMF: implementar e testar numa sessao real no Windows"
-    )
+    import cv2  # tardio: opcional; so a captura precisa dele
+
+    cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+    if not cap.isOpened():
+        raise RuntimeError(f"camera {index} indisponivel ou em uso")
+    if width:
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+    if height:
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                raise RuntimeError(f"leitura da camera {index} falhou")
+            ok, jpeg = cv2.imencode(".jpg", frame, (cv2.IMWRITE_JPEG_QUALITY, quality))
+            if ok:
+                yield jpeg.tobytes()
+    finally:
+        cap.release()
 
 
 def resolve_bind_host(host=DEFAULT_HOST, allow_all_interfaces=False):
@@ -446,18 +467,20 @@ def serve(
     token=None,
     allow_all_interfaces=False,
     frames=None,
+    make_frames=None,
     clock=time.perf_counter_ns,
     stop=None,
 ):
-    """Laco principal: escuta, autentica o WSL, envia frames. ESBOCO.
+    """Laco principal: escuta, autentica o WSL, envia frames.
 
     O ajudante escuta e o WSL conecta (PROTOCOL.md, "Transporte").
     Conexoes sem o token sao fechadas antes de qualquer frame.
     frame_id comeca em 0 a cada sessao; a epoca do timestamp e o
     inicio do processo (start_ns abaixo). O laco e residente: cada
     cliente caido/recusado volta ao accept; so um sinal encerra.
-    frames/clock/stop existem para os testes injetarem fonte,
-    relogio e uma saida cooperativa.
+    frames/make_frames/clock/stop existem para os testes (e a linha
+    de comando) injetarem fonte, fabrica de captura, relogio e uma
+    saida cooperativa.
     """
     import socket
 
@@ -470,15 +493,16 @@ def serve(
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((bind_host, port))
     server.listen(1)
-    print(f"Ajudante Draw (ESBOCO) escutando em {bind_host}:{port}.")
-    make_frames = (lambda: frames) if frames is not None else capture_frames
+    print(f"Ajudante Draw escutando em {bind_host}:{port}.")
+    if make_frames is None:
+        make_frames = (lambda: frames) if frames is not None else capture_frames
     _accept_loop(server, token, make_frames, start_ns, clock, stop=stop)
 
 
 def main():
     _require_windows()
     parser = argparse.ArgumentParser(
-        description="Ajudante Draw no Windows (ESBOCO NAO TESTADO)"
+        description="Ajudante Draw no Windows (captura cv2; injecao esboco)"
     )
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument(
@@ -497,12 +521,31 @@ def main():
         default=None,
         help=f"arquivo com o token compartilhado (padrao: ${TOKEN_ENV})",
     )
+    parser.add_argument(
+        "--camera", type=int, default=0, help="indice do dispositivo de captura"
+    )
+    parser.add_argument(
+        "--width",
+        type=int,
+        default=None,
+        help="largura pedida ao driver (opt-in; ver capture_frames)",
+    )
+    parser.add_argument(
+        "--height",
+        type=int,
+        default=None,
+        help="altura pedida ao driver (opt-in; ver capture_frames)",
+    )
+    parser.add_argument("--jpeg-quality", type=int, default=85, metavar="0-100")
     args = parser.parse_args()
     serve(
         args.port,
         host=args.host,
         token=resolve_token(token_file=args.token_file),
         allow_all_interfaces=args.allow_all_interfaces,
+        make_frames=lambda: capture_frames(
+            args.camera, args.width, args.height, args.jpeg_quality
+        ),
     )
 
 
