@@ -205,12 +205,18 @@ def test_run_pipeline_dirige_pipeline_real(tmp_path, monkeypatch):
     # O modelo didático (logit = luminância) deve ter confirmado a
     # região escura como tinta.
     assert result["mask"] is not None and result["mask"].any()
-    # Cada passada deixa o par (âncora, quad de registro) que a
-    # avaliação usa para projetar o GT.
+    # Cada passada que votou deixa o registro (âncora, quad de
+    # registro, quad submetido, frame) que a avaliação usa para
+    # projetar o GT.
     assert result["registrations"]
-    for anchor, pass_quad in result["registrations"]:
-        assert np.asarray(anchor).shape == (4, 2)
-        assert pass_quad is None or np.asarray(pass_quad).shape == (4, 2)
+    for record in result["registrations"]:
+        assert np.asarray(record["anchor"]).shape == (4, 2)
+        assert record["quad"] is None or np.asarray(record["quad"]).shape == (4, 2)
+        assert record["submitted"] is None or np.asarray(record["submitted"]).shape == (
+            4,
+            2,
+        )
+        assert record["frame"] is None or 0 <= record["frame"] < result["frames"]
 
 
 def test_run_pipeline_rejeita_captura_fechada(tmp_path):
@@ -360,3 +366,63 @@ def test_evaluate_canvas_projecao_igual_ao_registro_do_worker(tmp_path):
     )
     assert report["iou"] == 1.0
     assert report["recall"] == 1.0
+
+
+def test_evaluate_canvas_usa_pose_verdadeira_do_bundle(tmp_path):
+    # Detector enviesado: a folha está parada na pose canônica, mas
+    # o quad submetido empurra a borda esquerda +4 — o warp que o
+    # modelo viu tem a tinta deslocada −4, e o GT tem de comparar
+    # na geometria distorcida, não na canônica.
+    import cv2
+
+    h, w = 40, 60
+    page_gt = np.zeros((h, w), np.uint8)
+    page_gt[5:15, 5:15] = 1
+    true_pose = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
+    sub_biased = np.float32([[4, 0], [w + 4, 0], [w + 4, h], [4, h]])
+    bundle_path = tmp_path / "gt.npz"
+    _write_bundle(
+        bundle_path,
+        page_ink_full=page_gt,
+        page_to_scene=np.eye(3, dtype=np.float64),
+        quads=true_pose[None],
+    )
+
+    destination = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
+    from draw.paper import perspective_matrix
+
+    # O que o modelo viu e o worker armazenou: página na pose
+    # verdadeira retificada pelo quad enviesado (âncora = reg = sub).
+    input_map = perspective_matrix(sub_biased, destination) @ perspective_matrix(
+        np.float32([[0, 0], [w, 0], [w, h], [0, h]]), true_pose
+    )
+    stored = (
+        cv2.warpPerspective(
+            page_gt.astype(np.float32), input_map, (w, h), flags=cv2.INTER_NEAREST
+        )
+        > 0
+    )
+
+    record = {
+        "frame": 0,
+        "anchor": sub_biased,
+        "quad": sub_biased,
+        "submitted": sub_biased,
+    }
+    report = ec.evaluate_canvas(
+        stored, bundle_path, canvas_space="page", registrations=[record]
+    )
+    assert report["iou"] == 1.0
+    assert report["recall"] == 1.0
+
+    # Controle: sem a pose verdadeira no bundle a mesma passada
+    # cai na leitura canônica e o viés é cobrado como erro.
+    _write_bundle(
+        bundle_path,
+        page_ink_full=page_gt,
+        page_to_scene=np.eye(3, dtype=np.float64),
+    )
+    canonical = ec.evaluate_canvas(
+        stored, bundle_path, canvas_space="page", registrations=[record]
+    )
+    assert canonical["iou"] < 1.0

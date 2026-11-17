@@ -244,3 +244,55 @@ def test_identity_decision_deferred_when_prior_mostly_occluded(
         assert np.array_equal(recovered.confirmed, canvas_before)
     finally:
         worker.stop()
+
+
+def test_last_registration_segue_o_voto_nao_a_medicao(monkeypatch):
+    """Passada abstida nao tem par de registro; new_page grava (corners)³.
+
+    O avaliador projeta o GT pelo par da passada: abstencao por
+    consenso de troca nao deposita (None), e a passada que decide
+    "pagina nova" vota sem registro, na propria geometria — o par
+    (referencia, quad atual) descreveria uma matriz que a tinta
+    nunca percorreu.
+    """
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0.02)
+    ink = _HalfInk()
+    both = np.zeros((H, W), dtype=np.float32)
+    both[10:20, 10:15] = 0.95
+    both[10:20, 30:35] = 0.95
+    ink.content = both
+    worker = worker_mod.PageCleanWorker(ink).start()
+    try:
+        _, canvas_before = _confirm_first_generation(worker, ink)
+        assert canvas_before is not None
+        # A 1a passada da geracao funda a ancora com um reset do
+        # acumulador (vazio, mas e o mesmo caminho) — a epoca sobe.
+        assert worker.canvas_epoch == 1
+        assert worker.last_registration is not None
+
+        # Metade do conteudo de referencia: consenso de troca em
+        # curso — as passadas medem mas se abstem do voto.
+        left = np.zeros((H, W), dtype=np.float32)
+        left[10:20, 10:15] = 0.95
+        ink.content = left
+        generation = worker.new_generation(preserve_identity=True)
+        for _ in range(2):
+            _drive_visible(worker, generation, _all_visible())
+            assert _identity_events(worker)[-1]["decision"] == (
+                "deferred_switch_consensus"
+            )
+            assert worker.last_registration is None
+
+        # A decisao sai na terceira: pagina nova — a passada vota
+        # sem registro, na propria geometria do warp, e o reset
+        # sobe a epoca do canvas.
+        _drive_visible(worker, generation, _all_visible())
+        assert _identity_events(worker)[-1]["decision"] == "new_page"
+        anchor, registration, submitted = worker.last_registration
+        np.testing.assert_allclose(anchor, Q0)
+        np.testing.assert_allclose(registration, Q0)
+        np.testing.assert_allclose(submitted, Q0)
+        assert worker.canvas_epoch == 2
+    finally:
+        worker.stop()

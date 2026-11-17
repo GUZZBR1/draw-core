@@ -241,6 +241,18 @@ def run_pipeline(
     frame_index = 0
     anchors = []
     registrations = []
+    submit_frames = []
+    canvas_epoch = worker.canvas_epoch
+    _submit = worker.submit
+
+    def _tagged_submit(page):
+        # O frame que originou o job consumido: a pose verdadeira
+        # da passada mora no bundle GT sob este índice — latest-
+        # wins garante que o pendente é sempre o último submit.
+        submit_frames.append(frame_index)
+        return _submit(page)
+
+    worker.submit = _tagged_submit
     try:
         while True:
             ok, frame = capture.read()
@@ -252,30 +264,46 @@ def run_pipeline(
                     image=frame, captured_at=clock.now, sequence=frame_index + 1
                 )
             )
+            passes_before = worker.stats()["passes_total"]
             pumped = worker.pump()
             if pumped and outcome is None:
                 outcome = loop.collect_ink()
-            if pumped:
-                # O par (âncora, quad de registro) de CADA passada:
-                # a tinta cai na grade pela matriz daquele par, e a
-                # pose da passada diverge da pose final quando a
-                # folha anda. A avaliação do GT projeta pela mesma
-                # matriz de registro, unida sobre as passadas.
+            if worker.canvas_epoch != canvas_epoch:
+                # O acumulador foi zerado (timeout de identidade
+                # ou página nova): os registros anteriores
+                # projetavam tinta que não existe mais.
+                registrations.clear()
+                canvas_epoch = worker.canvas_epoch
+            if pumped and worker.stats()["passes_total"] != passes_before:
+                # A geometria de CADA passada que votou: a tinta
+                # cai na grade por X = P(âncora)·P(reg)⁻¹·P(sub)·H,
+                # com H a pose verdadeira da folha no frame —
+                # P(sub)·H leva a página ao warp que o modelo viu
+                # e o registro à âncora. Passadas abstidas vêm com
+                # last_registration None e não projetam GT.
                 registration = worker.last_registration
                 if registration is not None:
-                    anchor, reg_corners = registration
+                    anchor, reg_corners, sub_corners = registration
                     if anchor is None:
                         anchor = reg_corners
                     if anchor is not None:
                         anchor = np.asarray(anchor, np.float32)
                         anchors.append(anchor.copy())
                         registrations.append(
-                            (
-                                anchor,
-                                None
-                                if reg_corners is None
-                                else np.asarray(reg_corners, np.float32).copy(),
-                            )
+                            {
+                                "frame": (submit_frames[-1] if submit_frames else None),
+                                "anchor": anchor.copy(),
+                                "quad": (
+                                    None
+                                    if reg_corners is None
+                                    else np.asarray(reg_corners, np.float32).copy()
+                                ),
+                                "submitted": (
+                                    None
+                                    if sub_corners is None
+                                    else np.asarray(sub_corners, np.float32).copy()
+                                ),
+                            }
                         )
             if worker.error is not None:
                 raise RuntimeError("worker de tinta falhou") from worker.error
@@ -354,16 +382,19 @@ def evaluate_canvas(
     """Alinha GT por homografia conhecida, nunca por ajuste ao desenho.
 
     page sem corners pressupõe retificação ideal (bundle necessário).
-    `registrations` recebe o par (âncora, quad de registro) de CADA
-    passada do worker: a grade do canvas é indexada pela retificação
-    da âncora, mas cada evidência entra pela matriz P(âncora)·P(quad)⁻¹
-    da SUA passada — com a folha móvel, a pose de cada publicação
-    diverge da pose final e da pose da âncora. O GT é projetado pela
-    mesma matriz de registro e unido sobre as passadas. `anchors` e
-    `corners` isolados viram pares (âncora, âncora): sem o quad da
-    passada não há como saber o deslocamento — retificação canônica
-    é a leitura honesta de um canvas salvo. scene exige a mesma
-    grade de câmera que ink_full. NPY simples não tem traços.
+    `registrations` recebe o registro de CADA passada do worker que
+    votou — dicts com "anchor", "quad" (quad usado no registro),
+    "submitted" (quad que retificou o warp) e "frame" (índice no
+    vídeo): a grade do canvas é indexada pela retificação da âncora,
+    mas cada evidência entra pela cadeia
+    P(âncora)·P(quad)⁻¹·P(sub)·H da SUA passada, com H a pose
+    verdadeira da folha naquele frame (campo "quads" do bundle;
+    sem ele o quad submetido a estima e o termo colapsa na escala
+    página→grade). O GT é projetado pela mesma cadeia e unido sobre
+    as passadas. `anchors`/`corners` isolados e tuplas (âncora,
+    quad) viram registros sem submetido/frame — retificação
+    canônica é a leitura honesta de um canvas salvo. scene exige a
+    mesma grade de câmera que ink_full. NPY simples não tem traços.
     """
     from draw.paper import perspective_matrix
 
@@ -458,43 +489,57 @@ def evaluate_canvas(
             stroke_mats = [None]
             stroke_page_mats = [page_matrix]
     elif canvas_space == "page":
-        # Pares (âncora, quad de registro): a tinta confirmada sob a
-        # passada i ficou na posição M_i⁻¹·g da grade, com
-        # M_i = P(âncora_i)·P(quad_i)⁻¹ — a mesma matriz que o worker
-        # usou para registrar a evidência. registrations traz o par
-        # real da passada; âncoras/cantos soltos viram (quad, quad),
-        # registro identidade.
-        pairs = list(registrations or ())
-        if not pairs:
+        # Registros das passadas que VOTARAM: a tinta confirmada sob
+        # a passada i ficou na posição X_i·p da grade, com
+        #   X_i = P(âncora_i)·P(reg_i)⁻¹ · P(sub_i)·H_i
+        # — a matriz de registro daquela passada (a mesma do worker)
+        # sobre o mapa página→warp-submetido. H_i é a pose
+        # verdadeira da folha no frame da passada (bundle["quads"]);
+        # sem ela o quad submetido a estima e P(sub)·H colapsa na
+        # escala página→grade. Registros/tuplas antigas sem
+        # submetido/frame e âncoras soltas seguem o caminho
+        # estimado, como antes.
+        records = []
+        for record in registrations or ():
+            if isinstance(record, dict):
+                records.append(
+                    (
+                        record.get("anchor"),
+                        record.get("quad"),
+                        record.get("submitted"),
+                        record.get("frame"),
+                    )
+                )
+            else:
+                anchor, reg = record
+                records.append((anchor, reg, None, None))
+        if not records:
             for anchor in anchors or ():
-                pairs.append((anchor, anchor))
+                records.append((anchor, anchor, None, None))
             if corners is not None:
-                pairs.append((corners, corners))
-        # Dedup por bytes do par: vídeo estático repete o mesmo
-        # (âncora, quad) a cada passada e uma projeção por repetição
-        # seria desperdício.
+                records.append((corners, corners, None, None))
+        true_quads = (
+            np.asarray(bundle["quads"], np.float32)
+            if bundle is not None and "quads" in bundle
+            else None
+        )
+        # Dedup por bytes: vídeo estático repete a mesma geometria
+        # a cada passada e uma projeção por repetição seria
+        # desperdício — o frame só distingue quando a pose
+        # verdadeira do bundle entra na projeção.
         seen = {}
-        for anchor, pass_quad in pairs:
+        for anchor, reg, sub, frame in records:
             key = (
                 None if anchor is None else np.asarray(anchor, np.float32).tobytes(),
-                None
-                if pass_quad is None
-                else np.asarray(pass_quad, np.float32).tobytes(),
+                None if reg is None else np.asarray(reg, np.float32).tobytes(),
+                None if sub is None else np.asarray(sub, np.float32).tobytes(),
+                frame if true_quads is not None else None,
             )
-            seen.setdefault(
-                key,
-                (
-                    None if anchor is None else np.asarray(anchor, np.float32),
-                    None if pass_quad is None else np.asarray(pass_quad, np.float32),
-                ),
-            )
-        pairs = list(seen.values())
-        if pairs:
+            seen.setdefault(key, (anchor, reg, sub, frame))
+        records = list(seen.values())
+        if records:
             destination = np.float32([[0, 0], [width, 0], [width, height], [0, height]])
             truth_src = page_truth if bundle is not None else truth
-            # Página→grade do canvas seguido do registro da passada:
-            # o mesmo caminho da evidência — prob na grade da
-            # passada, warpPerspective pela matriz P(âncora)·P(quad)⁻¹.
             page_to_grid = np.diag(
                 [
                     width / truth_src.shape[1],
@@ -502,26 +547,52 @@ def evaluate_canvas(
                     1.0,
                 ]
             )
+            page_corners_px = np.float32(
+                [
+                    [0, 0],
+                    [truth_src.shape[1], 0],
+                    [truth_src.shape[1], truth_src.shape[0]],
+                    [0, truth_src.shape[0]],
+                ]
+            )
             projections = []
             stroke_mats = []
             stroke_page_mats = []
-            for anchor, pass_quad in pairs:
-                for quad in (anchor, pass_quad):
+            for anchor, reg, sub, frame in records:
+                for quad in (anchor, reg, sub):
                     if quad is not None and (
-                        quad.shape != (4, 2) or not np.isfinite(quad).all()
+                        np.asarray(quad).shape != (4, 2) or not np.isfinite(quad).all()
                     ):
                         raise ValueError(
                             "corners precisa ter formato (4, 2) e valores finitos"
                         )
-                if anchor is None or pass_quad is None:
+                if anchor is None or reg is None:
                     # Sem um lado do registro a evidência entra na
                     # própria geometria — a grade é a da passada.
                     reg_matrix = np.eye(3, dtype=np.float64)
                 else:
                     reg_matrix = perspective_matrix(
                         anchor, destination
-                    ) @ np.linalg.inv(perspective_matrix(pass_quad, destination))
-                page_matrix = reg_matrix @ page_to_grid
+                    ) @ np.linalg.inv(perspective_matrix(reg, destination))
+                if (
+                    sub is not None
+                    and true_quads is not None
+                    and frame is not None
+                    and 0 <= frame < len(true_quads)
+                    and np.asarray(true_quads[frame]).shape == (4, 2)
+                    and np.isfinite(true_quads[frame]).all()
+                ):
+                    # Pose verdadeira do frame: a página entra no
+                    # warp pelo quad SUBMETIDO aplicado sobre a
+                    # pose real — viés de detecção vira medida.
+                    input_map = perspective_matrix(
+                        sub, destination
+                    ) @ perspective_matrix(page_corners_px, true_quads[frame])
+                else:
+                    # Estimativa pelo quad submetido: P(sub)·H
+                    # colapsa na escala página→grade.
+                    input_map = page_to_grid
+                page_matrix = reg_matrix @ input_map
                 stroke_mats.append(None)
                 stroke_page_mats.append(page_matrix)
                 projections.append(
@@ -537,7 +608,7 @@ def evaluate_canvas(
                 if len(projections) == 1
                 else np.maximum.reduce(projections)
             )
-            alignment = "per_frame_anchors" if len(pairs) > 1 else "detected_anchor"
+            alignment = "per_frame_anchors" if len(records) > 1 else "detected_anchor"
         elif bundle is not None:
             ph, pw = bundle["page_ink_full"].shape
             page_matrix = np.diag([width / pw, height / ph, 1.0])
