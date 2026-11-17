@@ -49,9 +49,11 @@ import argparse
 import hmac
 import ipaddress
 import os
+import queue
 import secrets
 import struct
 import sys
+import threading
 import time
 
 # --- Constantes do protocolo (espelham bridge/PROTOCOL.md) ---
@@ -254,18 +256,85 @@ class CaptureError(RuntimeError):
     """
 
 
-def capture_frames(index=0, width=None, height=None, quality=85):
+STALL_TIMEOUT_S = 5.0
+
+
+def _enqueue_put(out, item, stop):
+    """Enfileira respeitando backpressure; sai cedo se o consumidor morreu.
+
+    O protocolo e push — cada frame produzido precisa chegar ao fio
+    (frame pulado = furo na gravacao .drawcap), entao nada se
+    descarta: fila cheia segura o produtor, que retoma quando o
+    consumidor drena. O recheco do stop impede um consumidor morto
+    de prender a thread.
+    """
+    while not stop.is_set():
+        try:
+            out.put(item, timeout=0.2)
+            return
+        except queue.Full:
+            continue
+
+
+def _camera_jpeg_producer(index, width, height, quality, out, stop):
+    """Corpo da thread produtora: dona do VideoCapture, enfileira JPEGs.
+
+    A captura roda fora da thread consumidora de proposito: um
+    cap.read() do DirectShow que nunca retorna so encalha ESTE
+    daemon — nunca o laco de accept do ajudante residente.
+    """
+    import cv2  # tardio: opcional; so a captura precisa dele
+
+    cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+    try:
+        if not cap.isOpened():
+            _enqueue_put(
+                out, CaptureError(f"camera {index} indisponivel ou em uso"), stop
+            )
+            return
+        if width:
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        if height:
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        while not stop.is_set():
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                _enqueue_put(
+                    out, CaptureError(f"leitura da camera {index} falhou"), stop
+                )
+                return
+            ok, jpeg = cv2.imencode(".jpg", frame, (cv2.IMWRITE_JPEG_QUALITY, quality))
+            if ok:
+                _enqueue_put(out, jpeg.tobytes(), stop)
+    finally:
+        cap.release()
+
+
+def capture_frames(
+    index=0,
+    width=None,
+    height=None,
+    quality=85,
+    stall_timeout=STALL_TIMEOUT_S,
+    _producer=_camera_jpeg_producer,
+):
     """Produz (jpeg_bytes) por frame capturado via cv2/DirectShow.
 
-    Abre o dispositivo `index` no formato nativo da camera e le na
-    cadencia dela: `read()` bloqueia ate o proximo sample. O carimbo
-    sai na entrega (quem envia, em `_handle_client`), nao na
-    exposicao do sensor — ressalva declarada do cabecalho.
+    O VideoCapture vive numa thread produtora daemon alimentando uma
+    fila pequena com backpressure (fila cheia segura o produtor —
+    ver _enqueue_put).
+    O gerador consome com prazo: `stall_timeout` segundos sem frame
+    nenhum = camera travada numa chamada que nunca retorna, e isso
+    vira CaptureError como qualquer outra falha — so o cliente cai,
+    o ajudante volta ao accept. Foi o modo de falha visto em
+    hardware: read() do DirectShow pode bloquear para sempre, e sem
+    watchdog o helper inteiro congelava (cliente seguinte nem
+    completava o handshake).
 
-    `cv2` e dependencia so desta metade: importa-se tarde para a
-    injecao de cursor (stdlib pura) continuar utilizavel sem ele.
-    Num consumidor lento, o buffer do DirectShow devolve frames
-    velhos — latencia declarada, nao descarte.
+    O carimbo sai na entrega (quem envia, em `_handle_client`), nao
+    na exposicao do sensor — ressalva declarada do cabecalho. `cv2`
+    e dependencia so desta metade: importa-se tarde para a injecao
+    de cursor (stdlib pura) continuar utilizavel sem ele.
 
     width/height sao None por padrao e NAO se negocia FOURCC:
     numa webcam real (DirectShow, 2026) cap.set(FOURCC=MJPG,
@@ -274,26 +343,35 @@ def capture_frames(index=0, width=None, height=None, quality=85):
     formato ao driver so e seguro quando o operador confirmou
     suporte naquele hardware; por isso --width/--height sao opt-in
     no CLI e o FOURCC nao se expoe de jeito nenhum.
-    """
-    import cv2  # tardio: opcional; so a captura precisa dele
 
-    cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
-    if not cap.isOpened():
-        raise CaptureError(f"camera {index} indisponivel ou em uso")
-    if width:
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-    if height:
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    `_producer`/`stall_timeout` existem para os testes injetarem um
+    produtor falso e um prazo curto, sem cv2 nem camera.
+    """
+    pending = queue.Queue(maxsize=2)
+    stop = threading.Event()
+    thread = threading.Thread(
+        target=_producer,
+        args=(index, width, height, quality, pending, stop),
+        daemon=True,
+    )
+    thread.start()
     try:
         while True:
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                raise CaptureError(f"leitura da camera {index} falhou")
-            ok, jpeg = cv2.imencode(".jpg", frame, (cv2.IMWRITE_JPEG_QUALITY, quality))
-            if ok:
-                yield jpeg.tobytes()
+            try:
+                item = pending.get(timeout=stall_timeout)
+            except queue.Empty as empty:
+                raise CaptureError(
+                    f"camera {index} parou de entregar frames "
+                    f"(>{stall_timeout:g}s sem leitura)"
+                ) from empty
+            if isinstance(item, Exception):
+                raise item
+            yield item
     finally:
-        cap.release()
+        stop.set()
+        # Em produtor saudavel o join e imediato; num read()
+        # encalhado o daemon vaza em vez de segurar o encerramento.
+        thread.join(timeout=1.0)
 
 
 def resolve_bind_host(host=DEFAULT_HOST, allow_all_interfaces=False):

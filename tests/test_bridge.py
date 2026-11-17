@@ -323,3 +323,50 @@ def test_capture_frames_raises_on_read_failure(monkeypatch):
     with pytest.raises(RuntimeError, match="leitura"):
         next(gen)
     assert cap.released
+
+
+def test_enqueue_put_never_drops_and_honors_stop():
+    """Protocolo push: nada se descarta; stop destrava o produtor."""
+    import queue as _queue
+
+    q = _queue.Queue(maxsize=1)
+    wh._enqueue_put(q, b"frame", threading.Event())
+    assert q.get_nowait() == b"frame"
+
+    full = _queue.Queue(maxsize=1)
+    full.put(b"stuck")
+    stop = threading.Event()
+    stop.set()
+    wh._enqueue_put(full, b"item", stop)  # retorna sem bloquear
+    assert full.get_nowait() == b"stuck"  # nada evictado
+
+
+def test_capture_frames_stalled_camera_becomes_capture_error():
+    """read() encalhado no DirectShow: o prazo vira CaptureError.
+
+    Reproduz a falha vista em hardware (o stream morreu no meio da
+    sessao e o cliente seguinte nem completava o handshake porque o
+    accept loop ficou preso no _handle_client): o produtor nunca
+    entrega, o consumidor nao pode congelar — estoura CaptureError
+    que so derruba aquele cliente.
+    """
+
+    def _stalled(index, width, height, quality, out, stop):
+        stop.wait(5.0)  # simula cap.read() bloqueado para sempre
+
+    gen = wh.capture_frames(stall_timeout=0.05, _producer=_stalled)
+    with pytest.raises(wh.CaptureError, match="parou de entregar"):
+        next(gen)
+    gen.close()
+
+
+def test_capture_frames_propagates_producer_error():
+    """Erro do produtor (camera indisponivel) chega ao consumidor."""
+
+    def _dead(index, width, height, quality, out, stop):
+        wh._enqueue_put(out, wh.CaptureError("camera 0 indisponivel ou em uso"), stop)
+
+    gen = wh.capture_frames(_producer=_dead)
+    with pytest.raises(wh.CaptureError, match="indisponivel"):
+        next(gen)
+    gen.close()
