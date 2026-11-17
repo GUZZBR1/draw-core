@@ -195,3 +195,93 @@ def test_drawcap_read_respeita_release(tmp_path):
     capture.release()
     ok, frame = capture.read()
     assert not ok and frame is None
+
+
+def test_drawcap_replay_respeita_cadencia_gravada(tmp_path, monkeypatch):
+    """Replay não vaza quadros: read() espera o intervalo entre
+    capture_ts_us em vez de consumir na velocidade do disco."""
+    sleeps = []
+    monkeypatch.setattr("draw.protocol.time.sleep", sleeps.append)
+    frames = [
+        (0, 1_000_000, _jpeg()),
+        (1, 1_040_000, _jpeg()),
+        (2, 1_080_000, _jpeg()),
+    ]
+    capture = HelperCapture(str(_drawcap(tmp_path / "s.drawcap", frames)))
+    for _ in range(3):
+        ok, _frame = capture.read()
+        assert ok
+    capture.release()
+    assert sleeps == [pytest.approx(0.04), pytest.approx(0.04)]
+
+
+def test_drawcap_primeiro_frame_sem_espera(tmp_path, monkeypatch):
+    sleeps = []
+    monkeypatch.setattr("draw.protocol.time.sleep", sleeps.append)
+    capture = HelperCapture(
+        str(_drawcap(tmp_path / "s.drawcap", [(7, 9_000_000, _jpeg())]))
+    )
+    ok, _frame = capture.read()
+    assert ok and sleeps == []
+    capture.release()
+
+
+def test_drawcap_pace_desligado_nao_espera(tmp_path, monkeypatch):
+    sleeps = []
+    monkeypatch.setattr("draw.protocol.time.sleep", sleeps.append)
+    frames = [(0, 0, _jpeg()), (1, 5_000_000, _jpeg())]
+    capture = HelperCapture(str(_drawcap(tmp_path / "s.drawcap", frames)), pace=False)
+    capture.read()
+    capture.read()
+    capture.release()
+    assert sleeps == []
+
+
+def test_drawcap_ts_fora_de_ordem_nao_espera(tmp_path, monkeypatch):
+    sleeps = []
+    monkeypatch.setattr("draw.protocol.time.sleep", sleeps.append)
+    frames = [(0, 5_000_000, _jpeg()), (1, 1_000_000, _jpeg())]
+    capture = HelperCapture(str(_drawcap(tmp_path / "s.drawcap", frames)))
+    capture.read()
+    capture.read()
+    capture.release()
+    assert sleeps == []
+
+
+def test_token_file_ilegivel_vira_erro_de_autenticacao(tmp_path):
+    from draw.protocol import resolve_token
+
+    with pytest.raises(AuthenticationError, match="arquivo de token"):
+        resolve_token(token_file=str(tmp_path / "ausente.txt"))
+
+
+def test_check_helper_source_token_file_ruim(tmp_path, capsys):
+    from draw.app import _check_helper_source
+
+    result = _check_helper_source(
+        "tcp://127.0.0.1:1", token_file=str(tmp_path / "ausente.txt")
+    )
+    assert result == 0
+    assert "FAIL" in capsys.readouterr().out
+
+
+def test_tools_frames_from_socket_respeita_env(monkeypatch):
+    """O fallback de DRAW_HELPER_TOKEN continua valendo no tools."""
+    from tools import helper_receiver as rx
+
+    monkeypatch.delenv(rx.TOKEN_ENV, raising=False)
+    with pytest.raises(rx.AuthenticationError):
+        list(rx.frames_from_socket("127.0.0.1", 1, timeout=1))
+    # Com o env, a resolução passa e a falha é de conexão (OSError),
+    # não de autenticação.
+    monkeypatch.setenv(rx.TOKEN_ENV, TOKEN)
+    with pytest.raises(OSError):
+        list(rx.frames_from_socket("127.0.0.1", 1, timeout=1))
+
+
+def test_tools_record_rejeita_max_frames_antes_do_token(tmp_path, monkeypatch):
+    from tools import helper_receiver as rx
+
+    monkeypatch.delenv(rx.TOKEN_ENV, raising=False)
+    with pytest.raises(ValueError, match="max_frames"):
+        rx.record("127.0.0.1", 1, tmp_path / "x.drawcap", max_frames=0)

@@ -45,7 +45,8 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from draw.protocol import (  # noqa: E402  # noqa: E402,F401
+import draw.protocol as _protocol  # noqa: E402
+from draw.protocol import (  # noqa: E402
     ACCEPT,
     DEFAULT_PORT,
     HANDSHAKE_TIMEOUT_S,
@@ -70,13 +71,14 @@ from draw.protocol import (  # noqa: E402  # noqa: E402,F401
     client_handshake,
     decode_jpeg,
     frames_from_file,
-    frames_from_socket,
     is_complete_jpeg,
     pack_record,
-    record,
     server_handshake,
 )
-from draw.protocol import resolve_token as _resolve_token  # noqa: E402
+
+_frames_from_socket = _protocol.frames_from_socket
+_record = _protocol.record
+_resolve_token = _protocol.resolve_token
 
 __all__ = [
     "ACCEPT",
@@ -120,6 +122,49 @@ def resolve_token(token=None, token_file=None):
         return _resolve_token(token, token_file)
     except AuthenticationError as error:
         raise AuthenticationError(f"{error}; defina {TOKEN_ENV}") from error
+
+
+def frames_from_socket(
+    host, port=DEFAULT_PORT, timeout=None, token=None, max_payload=MAX_PAYLOAD_LEN
+):
+    """Itera (frame_id, capture_ts_us, jpeg_bytes) do ajudante via TCP.
+
+    Autentica com o token (argumento ou DRAW_HELPER_TOKEN) antes de ler.
+    """
+    return _frames_from_socket(
+        host,
+        port,
+        timeout=timeout,
+        token=resolve_token(token),
+        max_payload=max_payload,
+    )
+
+
+def record(
+    host,
+    port,
+    out_path,
+    max_frames=None,
+    timeout=None,
+    token=None,
+    max_payload=MAX_PAYLOAD_LEN,
+):
+    """Grava o fluxo do socket byte a byte num arquivo. Retorna n.
+
+    max_frames<=0 é rejeitado antes de qualquer conexão ou resolução
+    de token.
+    """
+    if max_frames is not None and max_frames <= 0:
+        raise ValueError("max_frames precisa ser um inteiro positivo")
+    return _record(
+        host,
+        port,
+        out_path,
+        max_frames=max_frames,
+        timeout=timeout,
+        token=resolve_token(token),
+        max_payload=max_payload,
+    )
 
 
 def _synthetic_frames(n, base_id=1000, base_ts_us=5_000_000):

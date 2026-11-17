@@ -342,7 +342,7 @@ def _check_helper_source(source, token_file=None):
     print(f"PASS: fonte do ajudante informada: {source}.")
     try:
         capture = HelperCapture(source, timeout=5.0, token_file=token_file)
-    except ProtocolError as error:
+    except (ProtocolError, OSError) as error:
         print(f"FAIL: {error}")
         return 0
     if not capture.isOpened():

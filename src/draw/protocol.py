@@ -23,6 +23,7 @@ carimbo monotônico real de captura em last_capture_ts_ms.
 import hmac
 import socket
 import struct
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -69,7 +70,12 @@ def resolve_token(token=None, token_file=None):
     wrapper de ferramentas (tools/helper_receiver.py).
     """
     if token is None and token_file:
-        token = Path(token_file).read_text(encoding="utf-8").strip()
+        try:
+            token = Path(token_file).read_text(encoding="utf-8").strip()
+        except OSError as error:
+            raise AuthenticationError(
+                f"nao consegui ler o arquivo de token {token_file!r}: {error}"
+            ) from error
     if token is None:
         token = ""
     if isinstance(token, str):
@@ -309,12 +315,18 @@ class HelperCapture:
     acumulador com o relógio real de captura do emissor.
     """
 
-    def __init__(self, source, timeout=5.0, token=None, token_file=None):
+    def __init__(self, source, timeout=5.0, token=None, token_file=None, pace=True):
         self.source = str(source).strip()
         self._handle = None
         self._sock = None
         self._iter = None
         self._opened = False
+        # Replay de arquivo respeita a cadência gravada (capture_ts_us):
+        # sem pacing o read() consome a velocidade do disco e o
+        # LatestFrameCapture descarta os quadros intermediários.
+        self._pace = pace
+        self._pace_stream = False
+        self._pace_ts_us = None
         self.last_frame_id = None
         self.last_capture_ts_ms = None
         self._open(timeout, token, token_file)
@@ -343,6 +355,7 @@ class HelperCapture:
         self._handle = open(path, "rb")
         self._iter = _iter_records(self._handle.read)
         self._opened = True
+        self._pace_stream = True
 
     def isOpened(self):
         return self._opened
@@ -354,6 +367,11 @@ class HelperCapture:
             frame_id, capture_ts_us, payload, _raw = next(self._iter)
         except (StopIteration, ProtocolError, OSError):
             return False, None
+        if self._pace and self._pace_stream and self._pace_ts_us is not None:
+            delay = (capture_ts_us - self._pace_ts_us) / 1e6
+            if delay > 0:
+                time.sleep(delay)
+        self._pace_ts_us = capture_ts_us
         frame = decode_jpeg(payload)
         if frame is None:
             return False, None
