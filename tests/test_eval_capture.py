@@ -182,6 +182,11 @@ def test_run_pipeline_dirige_pipeline_real(tmp_path, monkeypatch):
     onnx_path = onnx_fixtures.page_clean_model(
         tmp_path / "pc.onnx", patch=256, dynamic_batch=True
     )
+    # neural_model=None cai no default instalado (models/draw_seg_v3_dyn.onnx)
+    # quando ele existe — e aí a detecção grampeada é ignorada. Aponta o
+    # default para um caminho ausente: o laço segue pelo clássico que o
+    # monkeypatch controla, com ou sem binário real no repo.
+    monkeypatch.setattr(ec, "_DEFAULT_SHEET_MODEL", tmp_path / "missing.onnx")
     corners = np.array([[20, 10], [200, 10], [200, 150], [20, 150]], dtype=np.float32)
     monkeypatch.setattr(
         paper_module,
