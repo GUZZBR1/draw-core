@@ -754,3 +754,49 @@ def test_project_via_registrations_usa_quad_submetido_e_pose_real():
         flags=cv2.INTER_NEAREST,
     )
     assert not np.array_equal(out > 0, naive > 0)
+
+
+def test_project_via_registrations_min_frame_descarta_registros_antigos():
+    """Traço de fase 1 projetado só por passadas que já o podiam
+    ver: registro anterior à segunda escrita não entra na união."""
+    from lab.eval_scenario import _project_via_registrations
+
+    mask = np.zeros((30, 30), np.uint8)
+    mask[5:15, 5:15] = 255
+    anchor_a = np.float32([[0, 0], [40, 0], [40, 40], [0, 40]])
+    anchor_b = anchor_a + np.float32([8, 0])
+    early = {"anchor": anchor_a, "quad": anchor_a, "submitted": None, "frame": 2}
+    late = {"anchor": anchor_b, "quad": anchor_a, "submitted": None, "frame": 6}
+    union = (
+        _project_via_registrations(
+            mask, [early, late], 9, canvas_hw=(60, 80), min_frame=4
+        )
+        > 0
+    )
+    only_late = _project_via_registrations(mask, [late], 9, canvas_hw=(60, 80)) > 0
+    # O registro de frame 2 ficou de fora da união com min_frame=4.
+    assert np.array_equal(union, only_late)
+    # E se nada passa do corte, cai fora para o fallback da pose.
+    assert (
+        _project_via_registrations(mask, [early], 9, canvas_hw=(60, 80), min_frame=4)
+        is None
+    )
+
+
+def test_project_via_registrations_curvo_sem_pose_cai_no_fallback():
+    """Bundle curvo sem histórico de quads (GT salvo antes de
+    consumir o vídeo): a escala plana página→grade mentiria pior que
+    o mapa denso do checkpoint — o registro é pulado e a função cai
+    fora para o _project de sempre."""
+    from lab.eval_scenario import _project_via_registrations
+
+    mask = np.zeros((30, 30), np.uint8)
+    mask[5:15, 5:15] = 255
+    anchor = np.float32([[0, 0], [40, 0], [40, 40], [0, 40]])
+    reg = {"anchor": anchor, "quad": anchor, "submitted": None, "frame": None}
+    assert (
+        _project_via_registrations(mask, [reg], 5, canvas_hw=(60, 80), curved=True)
+        is None
+    )
+    # Sem a marca de curvatura o mesmo registro projeta plano.
+    assert _project_via_registrations(mask, [reg], 5, canvas_hw=(60, 80)) is not None

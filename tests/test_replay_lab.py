@@ -173,9 +173,17 @@ def test_build_panel_sobrepoe_canvas_confirmado():
     warp = np.full((40, 30, 3), 128, np.uint8)
     ink = np.zeros((40, 30), np.uint8)
     canvas = np.zeros((40, 30), np.uint8)
-    canvas[5:15, 5:15] = 255  # confirmado acumulado sem tinta no frame
+    # O rótulo cobre as ~26 primeiras linhas do ladrilho 30×40 —
+    # o confirmado tem de cair na faixa visível de baixo (warp
+    # rows ≥34 → ladrilho rows ≥26) para a prova não se satisfazer
+    # com o branco do texto.
+    canvas[34:39, 2:28] = 255
     panel = build_panel(frame, None, warp, ink, canvas)
-    # O ladrilho warp+tinta ocupa o quadrante superior-direito:
-    # lá dentro, o retângulo do canvas ficou ciano (B e G altos).
-    tile = panel[0:30, 40:80]
-    assert tile[..., 0].max() > 200 and tile[..., 1].max() > 200
+    # O ladrilho warp+tinta ocupa o quadrante superior-direito; a
+    # faixa de baixo, livre do rótulo, tem de ficar ciana — B e G
+    # altos e R baixo (o texto branco do rótulo teria R=255).
+    strip = panel[27:30, 41:79]
+    # Blend ciano sobre warp 128: B/G ≈ 0.55·128+0.45·255 ≈ 185,
+    # R ≈ 70 — branco do rótulo teria os três em 255.
+    assert strip[..., 0].max() > 150 and strip[..., 1].max() > 150
+    assert strip[..., 2].mean() < 120

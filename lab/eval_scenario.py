@@ -68,6 +68,36 @@ def _page_expected(bundle, applied_upto, erased):
     return expected
 
 
+def _page_expected_phases(bundle, applied_upto, erased):
+    """(fase 0 pós-borracha, fase 1) separadas por era de existência.
+
+    A projeção por registros é por passada: um traço só pode estar
+    onde uma passada capaz de vê-lo o depositou. Separar por fase é
+    o que permite projetar o redesenho só por registros a partir da
+    segunda escrita — projetá-lo por passadas anteriores criava
+    verdade fantasma e derrubava o recall medido.
+    """
+    shape = bundle["page_ink_full"].shape
+    mask0 = np.zeros(shape, np.uint8)
+    mask1 = np.zeros(shape, np.uint8)
+    points, offsets = bundle["points"], bundle["offsets"]
+    stroke_phase = bundle["stroke_phase"]
+    for index in range(applied_upto):
+        geo = points[offsets[index] : offsets[index + 1]]
+        target = mask0 if stroke_phase[index] == 0 else mask1
+        cv2.polylines(
+            target,
+            [geo.astype(np.int32)],
+            False,
+            255,
+            int(bundle["thickness"][index]),
+        )
+    if erased:
+        x, y, w, h = (int(v) for v in bundle["erase_rect"])
+        mask0[y : y + h, x : x + w] = 0
+    return mask0, mask1
+
+
 def _final_checkpoint(checkpoints, events):
     """O checkpoint do ÚLTIMO evento declarado — nunca um anterior.
 
@@ -121,7 +151,16 @@ def _project(mask, corners, page_to_scene, canvas_hw, scene_map=None):
 
 
 def _project_via_registrations(
-    mask, registrations, frame, *, canvas_hw, quads=None, curl=None, page_corners=None
+    mask,
+    registrations,
+    frame,
+    *,
+    canvas_hw,
+    quads=None,
+    curl=None,
+    page_corners=None,
+    min_frame=None,
+    curved=False,
 ):
     """GT na grade do canvas pela cadeia das passadas até `frame`.
 
@@ -138,6 +177,15 @@ def _project_via_registrations(
     no eval_capture. Folha curvada remapa página→cena pelo mapa
     denso sintetizado da pose daquela passada.
 
+    ``min_frame`` restringe a passadas que já podiam ver a máscara:
+    traço de fase 1 projetado por registro anterior ao redesenho
+    ocupa posição que nenhuma passada depositou — verdade fantasma
+    que derruba a métrica de recall do redesenho. ``curved`` marca
+    bundle de folha curvada: sem a pose verdadeira do frame o mapa
+    plano página→grade mentiria pior que a projeção pelo mapa denso
+    do checkpoint — o registro é pulado e, sem nenhum projetável,
+    a função cai fora para o fallback do chamador.
+
     Retorna None quando não há registro utilizável — o chamador cai
     na projeção pela pose do checkpoint, como antes.
     """
@@ -147,7 +195,9 @@ def _project_via_registrations(
     valid = [
         r
         for r in registrations
-        if isinstance(r, dict) and (r.get("frame") is None or r["frame"] <= frame)
+        if isinstance(r, dict)
+        and (r.get("frame") is None or r["frame"] <= frame)
+        and (min_frame is None or r.get("frame") is None or r["frame"] >= min_frame)
     ]
     if not valid:
         return None
@@ -191,6 +241,11 @@ def _project_via_registrations(
             and np.asarray(true_quads[rframe]).shape == (4, 2)
             and np.isfinite(true_quads[rframe]).all()
         )
+        if curved and not has_true_pose:
+            # Folha curvada sem pose por frame (bundle salvo antes
+            # de consumir o vídeo): a escala plana página→grade
+            # mentiria pior que o mapa denso do checkpoint.
+            continue
         if curl is not None and has_true_pose and page_corners is not None:
             scene_map = sim_isp.scene_to_page_map(
                 np.linalg.inv(
@@ -231,6 +286,8 @@ def _project_via_registrations(
                 mask, reg_matrix @ input_map, (width, height), flags=cv2.INTER_NEAREST
             )
         )
+    if not projections:
+        return None
     if len(projections) == 1:
         return projections[0]
     return np.maximum.reduce(projections)
@@ -375,7 +432,10 @@ def audit(video, gt_path, *, fps=None, models=None, save_masks=None, verify="man
                 bundle[f"scene_to_page_{tag}x"],
                 bundle[f"scene_to_page_{tag}y"],
             )
-        expected = _page_expected(bundle, applied_upto, erased)
+        expected0, expected1 = _page_expected_phases(bundle, applied_upto, erased)
+        write_starts = [p["start"] for p in events if p["kind"] == "write"]
+        redraw_era = write_starts[1] if len(write_starts) > 1 else None
+        curved = curl is not None or "scene_to_page_x" in bundle
         entry = {
             "frame": frame,
             "phase": phase["kind"],
@@ -413,10 +473,12 @@ def audit(video, gt_path, *, fps=None, models=None, save_masks=None, verify="man
         def project_truth(
             page_mask,
             *,
+            min_frame=None,
             frame=frame,
             corners=corners,
             page_to_scene=page_to_scene,
             scene_map=scene_map,
+            curved=curved,
         ):
             # Registros das passadas até o frame do checkpoint: a
             # tinta persistida de fases antigas (pré-lift/move) fica
@@ -431,12 +493,19 @@ def audit(video, gt_path, *, fps=None, models=None, save_masks=None, verify="man
                 quads=bundle.get("quads"),
                 curl=curl,
                 page_corners=page_corners,
+                min_frame=min_frame,
+                curved=curved,
             )
             if projected is not None:
                 return projected > 0
             return _project(page_mask, corners, page_to_scene, canvas_hw, scene_map) > 0
 
-        truth = project_truth(expected)
+        truth = project_truth(expected0)
+        if expected1.any():
+            # Redesenho só por passadas a partir da segunda escrita:
+            # registros anteriores nunca o viram — projetá-lo por eles
+            # criaria verdade fantasma e derrubaria o recall medido.
+            truth |= project_truth(expected1, min_frame=redraw_era)
         entry.update(pixel_metrics(confirmed, truth))
         entry["confirmed_px"] = int(confirmed.sum())
         entry["provisional_px"] = int(provisional.sum())
@@ -449,7 +518,7 @@ def audit(video, gt_path, *, fps=None, models=None, save_masks=None, verify="man
             redraw = np.zeros(shape, np.uint8)
             for mask in redraw_masks:
                 redraw |= mask
-            redraw_canvas = project_truth(redraw)
+            redraw_canvas = project_truth(redraw, min_frame=redraw_era)
             denom = max(1, int(redraw_canvas.sum()))
             entry["redraw_confirmed_recall"] = (
                 float((confirmed & redraw_canvas).sum()) / denom
