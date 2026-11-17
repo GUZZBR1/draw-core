@@ -158,7 +158,7 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
 
   useMotionValueEvent(scrollY, 'change', (value) => {
     setIsScrolled(!isHome || value > 8);
-    if (isHome && value <= 0 && headerPeek.get() > 0 && !headerPeek.isAnimating() && !document.querySelector('.site-header')?.contains(document.activeElement)) {
+    if (isHome && value <= 0 && headerPeek.get() > 0 && !headerPeek.isAnimating() && !(document.querySelector('.site-header')?.contains(document.activeElement) && document.activeElement?.matches(':focus-visible'))) {
       if (reduceMotion) headerPeek.set(0);
       else animate(headerPeek, 0, { duration: 0.3 });
     }
@@ -301,6 +301,12 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
           if (!isHome || headerPeek.get() >= 1) return;
           if (reduceMotion) headerPeek.set(1);
           else animate(headerPeek, 1, { duration: 0.25 });
+        }}
+        onBlurCapture={(event) => {
+          if (!isHome || window.scrollY > 0 || headerPeek.get() <= 0) return;
+          if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return;
+          if (reduceMotion) headerPeek.set(0);
+          else animate(headerPeek, 0, { duration: 0.3 });
         }}
         style={{ width: headerWidth, maxWidth: headerMaxWidth, x: '-50%', y: headerY, opacity: headerOpacity, pointerEvents: headerPointer }}
       >
