@@ -12,6 +12,8 @@ Uso:
   python -m draw --source sessao.drawcap          # gravacao do ajudante
   python -m draw --source tcp://192.168.0.10      # ajudante ao vivo
       --helper-token-file token.txt               # token do ajudante
+  python -m draw --source hvcam://                # webcam do Windows via vsock
+  python -m draw --source hvcam+tcp://10.0.0.2    # idem, fallback TCP
 
 Sem nenhuma flag, o caminho e o de producao: folha pelo detector
 neural (models/draw_seg_v3_dyn.onnx, com o classico de reserva) e
@@ -25,6 +27,9 @@ recusa para aviso.
 
 A fonte via rede (MJPEG/RTSP) e o caminho recomendado no WSL. O WSL nao
 enxerga webcams USB do Windows por padrao, mas enxerga streams de rede.
+A alternativa nativa e a fonte hvcam://, que puxa os quadros da webcam
+do Windows por Hyper-V socket (hvcam-host.exe, santleme/hvcam) — sem
+IP, sem firewall e sem usbipd.
 Assim todo o processamento (e o ML futuro) fica no Linux. A camera so
 envia os frames. Ela pode ser um celular, outro computador ou uma camera IP.
 
@@ -59,6 +64,7 @@ from .camera import (
 )
 from .hand import HandMasker, hand_model_available
 from .hand_presence import HandPresenceWorker, make_hand_presence
+from .hvcam import HvcamCapture, is_hvcam_source
 from .infra import manifest as manifest_module
 from .infra import session_report as session_report_module
 from .infra import telemetry as telemetry_module
@@ -229,6 +235,8 @@ def run_check(source=0, helper_token_file=None):
     all_ok = _check_models()
 
     if not isinstance(source, int):
+        if is_hvcam_source(source):
+            return 0 if _check_hvcam_source(source) and all_ok else 1
         if is_helper_source(source):
             return (
                 0 if _check_helper_source(source, helper_token_file) and all_ok else 1
@@ -359,6 +367,29 @@ def _check_helper_source(source, token_file=None):
         return 0
     print(
         "PASS: quadro lido da fonte do ajudante. "
+        f"Formato (altura, largura, canais): {frame.shape}."
+    )
+    return 1
+
+
+def _check_hvcam_source(source):
+    """Abre uma fonte hvcam:// e confere que um quadro chega. 0/1."""
+    print(f"PASS: fonte hvcam informada: {source}.")
+    capture = HvcamCapture(source, timeout_ms=5000)
+    if not capture.isOpened():
+        print(
+            "FAIL: nao consegui conectar na fonte hvcam. Confira se o "
+            "hvcam-host.exe esta rodando no Windows; fora do WSL use "
+            "--source hvcam+tcp://<host>:<porta>."
+        )
+        return 0
+    ok, frame = capture.read()
+    capture.release()
+    if not ok or frame is None:
+        print("FAIL: a fonte abriu, mas nenhum quadro chegou em 5 segundos.")
+        return 0
+    print(
+        "PASS: quadro lido da fonte hvcam. "
         f"Formato (altura, largura, canais): {frame.shape}."
     )
     return 1
@@ -1040,8 +1071,9 @@ def main():
         "--source",
         default="0",
         help="indice da webcam local (0, 1...), URL do stream "
-        "(ex.: http://192.168.0.10:8080/video), gravacao .drawcap ou "
-        "stream tcp://host[:porta] do ajudante. Padrao: 0",
+        "(ex.: http://192.168.0.10:8080/video), gravacao .drawcap, "
+        "stream tcp://host[:porta] do ajudante ou camera do Windows "
+        "via hvcam:// (hvcam+tcp://host fora do WSL). Padrao: 0",
     )
     parser.add_argument(
         "--helper-token-file",
