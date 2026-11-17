@@ -29,7 +29,7 @@ Draw is a bridge from a person’s paper sketch to digital tools that can interp
 - Keep `Draw` centered in the header as the page scrolls. It begins as the large home-page wordmark and settles into the compact header position without jumping.
 - The navigation becomes a narrow, light glass surface while scrolling: subtle blur, fine border, soft shadow, and a shorter height.
 - The header, centered wordmark, and definition card must remain legible and within the viewport at browser zoom and at 320 px CSS width.
-- Hover feedback should be small and clear: a fine underline, slight color change, or a one-pixel lift. Avoid jitter, looping motion, and pointer-driven movement of content.
+- Hover feedback should be small and clear: a fine underline, slight color change, or a one-pixel lift. Avoid jitter, looping motion, and pointer-driven movement of content. The one exception is the webcam's red recording dot, which blinks only while the pointer or keyboard focus is on the webcam and stops (steady red under reduced motion) when it leaves.
 - The definition opens from the Draw wordmark only. It stays open while the pointer moves from the wordmark onto the card and closes when moving to Product or another control.
 - The custom page scrubber is a visible, compact glass capsule with a readable track and thumb. Keep pointer dragging and keyboard navigation; do not reduce it to a tiny line.
 - Respect reduced-motion preferences.

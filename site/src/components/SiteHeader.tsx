@@ -14,7 +14,6 @@ import { Link, useLocation } from 'react-router-dom';
 
 const MORPH_DISTANCE = 130;
 const HEADER_REVEAL = 36;
-const MORPH_START = 0;
 const LIFT_RANGE = 60;
 const HOME_LIFT = 32;
 const TEAR_STEPS = 24;
@@ -99,7 +98,7 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
   }
 
   const progress = useTransform(scrollY, (value) =>
-    isHome ? scrollProgress(Math.max(0, value - MORPH_START)) : 1,
+    isHome ? scrollProgress(value) : 1,
   );
   const headerPeek = useMotionValue(0);
   const headerOpacity = useTransform(() =>
@@ -367,7 +366,7 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
                     { duration: TEAR_DURATION, fill: 'forwards', pseudoElement: '::view-transition-new(root)' },
                   );
                 });
-                transition.finished.finally(() => root.classList.remove('theme-tearing'));
+                transition.finished.catch(() => undefined).finally(() => root.classList.remove('theme-tearing'));
               }}
             >
               {dark ? 'light' : 'dark'}
