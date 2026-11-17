@@ -96,13 +96,17 @@ def _lib():
 
 
 class Camera:
-    """Uma conexao hvcam; puxa o quadro mais novo sob demanda."""
+    """Uma conexao hvcam; puxa o quadro mais novo sob demanda.
 
-    def __init__(self, port=DEFAULT_PORT, tcp=None):
+    Diverge do binding upstream num ponto: host e porta chegam
+    separados (host=None = vsock), em vez de uma string "host:port"
+    repartida no ':' — que quebrava IPv6 (`[::1]` -> "::1:8765").
+    """
+
+    def __init__(self, port=DEFAULT_PORT, host=None):
         lib = _lib()
-        if tcp is not None:
-            host, _, p = tcp.partition(":")
-            self.fd = lib.hvcam_connect_tcp(host.encode() or None, int(p or port))
+        if host is not None:
+            self.fd = lib.hvcam_connect_tcp(host.encode(), port)
         else:
             self.fd = lib.hvcam_connect(port)
         if self.fd < 0:
@@ -188,7 +192,6 @@ class Camera:
             img = cv2.imdecode(frame, cv2.IMREAD_COLOR)
             if img is None:
                 raise ValueError("hvcam: payload MJPEG falhou no decode")
-            return img
         else:
             img = cv2.cvtColor(frame.reshape(hgt, w, 4), cv2.COLOR_BGRA2BGR)
         return cv2.flip(img, 0) if flags & 2 else img
@@ -255,21 +258,27 @@ class HvcamCapture:
         self.last_capture_ts_ms = None
         self.source_dropped = 0
         self._last_seq = None
+        # Por que a fonte nao abriu (URL invalida, libhvcam.so ausente
+        # ou connect recusado): os chamadores exibem isso em vez de um
+        # "host fora do ar" generico.
+        self.open_error = None
         self._open(camera_factory or Camera)
 
     def _open(self, camera_factory):
         try:
             host, port = parse_hvcam_endpoint(self.source)
-        except ValueError:
+        except ValueError as error:
+            self.open_error = error
             return
         try:
             self._cam = (
-                camera_factory(tcp=f"{host}:{port}")
+                camera_factory(host=host, port=port)
                 if host is not None
                 else camera_factory(port=port)
             )
-        except OSError:
+        except OSError as error:
             self._cam = None
+            self.open_error = error
             return
         self._opened = True
 

@@ -8,11 +8,13 @@ o contrato read()/release() do adaptador e a fiacao de open_capture
 e _check_hvcam_source.
 """
 
+import cv2
 import numpy as np
 import pytest
 
 from draw import app as app_module
 from draw import camera as camera_module
+from draw import hvcam as hvcam_module
 from draw.hvcam import HvcamCapture, is_hvcam_source, parse_hvcam_endpoint
 
 
@@ -142,7 +144,14 @@ def test_hvcam_capture_tcp_endpoint_passed():
     cam = FakeCamera([])
     seen = []
     HvcamCapture("hvcam+tcp://10.0.0.5:9999", camera_factory=_factory(cam, seen))
-    assert seen == [{"tcp": "10.0.0.5:9999"}]
+    assert seen == [{"host": "10.0.0.5", "port": 9999}]
+
+
+def test_hvcam_capture_tcp_ipv6_endpoint_passed():
+    cam = FakeCamera([])
+    seen = []
+    HvcamCapture("hvcam+tcp://[::1]:9999", camera_factory=_factory(cam, seen))
+    assert seen == [{"host": "::1", "port": 9999}]
 
 
 def test_hvcam_capture_counts_seq_gaps_as_source_dropped():
@@ -195,6 +204,7 @@ def test_hvcam_capture_unopened_when_connect_fails():
     cam = FakeCamera([], fail=OSError("connect failed (-110)"))
     capture = HvcamCapture("hvcam://", camera_factory=_factory(cam))
     assert not capture.isOpened()
+    assert "connect failed" in str(capture.open_error)
     ok, frame = capture.read()
     assert not ok and frame is None
 
@@ -202,6 +212,7 @@ def test_hvcam_capture_unopened_when_connect_fails():
 def test_hvcam_capture_unopened_on_bad_url():
     capture = HvcamCapture("hvcam://10.0.0.5", camera_factory=_factory(FakeCamera([])))
     assert not capture.isOpened()
+    assert "vsock" in str(capture.open_error)
 
 
 def test_hvcam_capture_release_without_open():
@@ -225,14 +236,17 @@ def test_open_capture_accepts_hvcam(monkeypatch):
         capture.release()
 
 
-def test_open_capture_hvcam_raises_when_unreachable(monkeypatch):
-    cam = FakeCamera([], fail=OSError("connect failed (-110)"))
+def test_open_capture_hvcam_raises_with_open_error(monkeypatch):
+    cam = FakeCamera([], fail=OSError("libhvcam.so nao encontrada"))
     monkeypatch.setattr(
         camera_module,
         "HvcamCapture",
         lambda source: HvcamCapture(source, camera_factory=_factory(cam)),
     )
-    with pytest.raises(RuntimeError, match="fonte hvcam"):
+    # O erro real (lib ausente) aparece na mensagem — nunca um
+    # "hvcam-host fora do ar" generico que mandaria a pessoa no caminho
+    # errado.
+    with pytest.raises(RuntimeError, match="libhvcam.so nao encontrada"):
         camera_module.open_capture("hvcam://")
 
 
@@ -259,4 +273,86 @@ def test_check_hvcam_source_fails_unopened(monkeypatch, capsys):
         ),
     )
     assert app_module._check_hvcam_source("hvcam://") == 0
-    assert "FAIL" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "FAIL" in out and "connect failed" in out
+
+
+class _FakeLib:
+    """Conector nativo falso: registra host/porta exatos repassados."""
+
+    def __init__(self, fd=3):
+        self.calls = []
+        self.fd = fd
+        self.closed = []
+
+    def hvcam_connect(self, port):
+        self.calls.append(("vsock", port))
+        return self.fd
+
+    def hvcam_connect_tcp(self, host, port):
+        self.calls.append((host, port))
+        return self.fd
+
+    def hvcam_close(self, fd):
+        self.closed.append(fd)
+
+
+def test_camera_tcp_passes_host_and_port(monkeypatch):
+    lib = _FakeLib()
+    monkeypatch.setattr(hvcam_module, "_LIB", lib)
+    cam = hvcam_module.Camera(host="::1", port=9999)
+    # IPv6 chega intacto ao conector nativo — sem repartir ":"
+    assert lib.calls == [(b"::1", 9999)]
+    cam.close()
+    assert lib.closed == [3]
+
+
+def test_camera_vsock_connect_without_host(monkeypatch):
+    lib = _FakeLib()
+    monkeypatch.setattr(hvcam_module, "_LIB", lib)
+    cam = hvcam_module.Camera(port=9100)
+    assert lib.calls == [("vsock", 9100)]
+    cam.close()
+
+
+def test_camera_connect_failure_raises_oserror(monkeypatch):
+    lib = _FakeLib(fd=-1)
+    monkeypatch.setattr(hvcam_module, "_LIB", lib)
+    with pytest.raises(OSError, match="connect failed"):
+        hvcam_module.Camera(port=8765)
+
+
+def test_camera_to_bgr_mjpeg_honors_bottom_up():
+    top = np.zeros((24, 32, 3), dtype=np.uint8)
+    bottom = np.full((24, 32, 3), 255, dtype=np.uint8)
+    img = np.concatenate([top, bottom])
+    ok, encoded = cv2.imencode(".jpg", img)
+    assert ok
+    cam = hvcam_module.Camera.__new__(hvcam_module.Camera)
+    info = {
+        "seq": 1,
+        "ts_us": 0,
+        "flags": 3,  # bit0 presente + bit1 bottom-up
+        "width": 32,
+        "height": 48,
+        "format": 4,
+        "payload": encoded.size,
+    }
+    out = cam.to_bgr(info, np.frombuffer(encoded.tobytes(), dtype=np.uint8))
+    expected = cv2.flip(cv2.imdecode(encoded, cv2.IMREAD_COLOR), 0)
+    np.testing.assert_array_equal(out, expected)
+
+
+def test_camera_to_bgr_rejects_wrong_payload_size():
+    cam = hvcam_module.Camera.__new__(hvcam_module.Camera)
+    info = {
+        "seq": 1,
+        "ts_us": 0,
+        "flags": 1,
+        "width": 64,
+        "height": 48,
+        "format": 1,
+        "payload": 64 * 48 * 3 + 8,
+    }
+    with pytest.raises(ValueError, match="payload"):
+        cam.to_bgr(info, np.zeros(64 * 48 * 3 + 8, dtype=np.uint8))

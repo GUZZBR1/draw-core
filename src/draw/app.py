@@ -377,11 +377,14 @@ def _check_hvcam_source(source):
     print(f"PASS: fonte hvcam informada: {source}.")
     capture = HvcamCapture(source, timeout_ms=5000)
     if not capture.isOpened():
-        print(
-            "FAIL: nao consegui conectar na fonte hvcam. Confira se o "
-            "hvcam-host.exe esta rodando no Windows; fora do WSL use "
-            "--source hvcam+tcp://<host>:<porta>."
-        )
+        if capture.open_error is not None:
+            print(f"FAIL: {capture.open_error}")
+        else:
+            print(
+                "FAIL: nao consegui conectar na fonte hvcam. Confira se o "
+                "hvcam-host.exe esta rodando no Windows; fora do WSL use "
+                "--source hvcam+tcp://<host>:<porta>."
+            )
         return 0
     ok, frame = capture.read()
     capture.release()

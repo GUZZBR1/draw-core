@@ -468,7 +468,10 @@ def open_capture(source, capture_factory=None, helper_token_file=None):
         capture = HvcamCapture(source)
         if capture.isOpened():
             return capture
+        detail = capture.open_error
         capture.release()
+        if detail is not None:
+            raise RuntimeError(f"Nao consegui abrir a fonte hvcam: {detail}")
         raise RuntimeError(
             f"Nao consegui abrir a fonte hvcam: {source!r}. Confira se "
             "o hvcam-host.exe esta rodando no Windows e, fora do WSL, "
