@@ -114,6 +114,34 @@ def test_accept_loop_survives_client_disconnect_mid_stream():
         _stop_loop(thread, stop, server)
 
 
+def test_accept_loop_survives_capture_failure_and_serves_next_client():
+    """Camera falhando para um cliente nao mata o ajudante residente.
+
+    O generador da primeira conexao levanta CaptureError (camera em
+    uso/desconectada); a conexao morre, o laco volta ao accept e o
+    proximo cliente recebe frames normalmente.
+    """
+    server = _serve_one_client()
+
+    def _fail():
+        raise wh.CaptureError("camera 0 indisponivel ou em uso")
+        yield  # pragma: no cover — inalcancavel; mantem gerador
+
+    gens = [_fail(), iter([b"x" * 8])]
+    thread, stop, logs = _start_loop(server, lambda: gens.pop(0))
+    try:
+        conn = _client(server)
+        assert conn.recv(4) == wh.ACCEPT
+        while conn.recv(4096):  # a falha de captura fecha a conexao
+            pass
+        with _client(server) as again:
+            assert again.recv(4) == wh.ACCEPT
+            assert again.recv(wh.HEADER.size + 8)
+        assert any("Captura falhou" in line for line in logs)
+    finally:
+        _stop_loop(thread, stop, server)
+
+
 def test_accept_loop_stop_event_shuts_down_between_accepts():
     """O stop cooperativo encerra o laco sem cliente nenhum."""
     server = _serve_one_client()
@@ -199,3 +227,99 @@ def test_resolve_bind_host_wildcard_with_opt_in(host):
 def test_resolve_bind_host_keeps_specific_addresses():
     assert wh.resolve_bind_host("127.0.0.1") == "127.0.0.1"
     assert wh.resolve_bind_host("localhost") == "localhost"
+
+
+# --- capture_frames: cv2 falso (sem camera nem Windows) ---
+
+
+class _Encoded:
+    def tobytes(self):
+        return b"jpeg"
+
+
+class _FakeCap:
+    def __init__(self, frames, opens=True):
+        self._frames = list(frames)
+        self._opens = opens
+        self.sets = []
+        self.released = False
+
+    def isOpened(self):
+        return self._opens
+
+    def set(self, prop, val):
+        self.sets.append((prop, val))
+        return True
+
+    def read(self):
+        if not self._frames:
+            return False, None
+        return True, self._frames.pop(0)
+
+    def release(self):
+        self.released = True
+
+
+def _fake_cv2(monkeypatch, frames, opens=True):
+    import sys
+    import types
+
+    cap = _FakeCap(frames, opens)
+    fake = types.SimpleNamespace(
+        CAP_DSHOW=700,
+        CAP_PROP_FOURCC=6,
+        CAP_PROP_FRAME_WIDTH=3,
+        CAP_PROP_FRAME_HEIGHT=4,
+        IMWRITE_JPEG_QUALITY=1,
+        VideoCapture=lambda *args: cap,
+        VideoWriter_fourcc=lambda *args: 0,
+        imencode=lambda ext, img, params: (True, _Encoded()),
+    )
+    monkeypatch.setitem(sys.modules, "cv2", fake)
+    return cap
+
+
+def test_capture_frames_yields_jpeg_per_frame_and_releases(monkeypatch):
+    import itertools
+
+    cap = _fake_cv2(monkeypatch, frames=["f0", "f1", "f2"])
+    gen = wh.capture_frames()
+    jpegs = list(itertools.islice(gen, 3))
+    assert jpegs == [b"jpeg"] * 3
+    gen.close()
+    assert cap.released
+
+
+def test_capture_frames_defaults_to_no_format_negotiation(monkeypatch):
+    """Sem width/height nao se chama cap.set: negociar formato (ex.:
+    FOURCC=MJPG) ja travou o driver DirectShow de uma webcam real e
+    deixou o dispositivo refem. Padrao seguro e o formato nativo."""
+    cap = _fake_cv2(monkeypatch, frames=["f0"])
+    gen = wh.capture_frames()
+    next(gen)
+    gen.close()
+    assert cap.sets == []
+
+
+def test_capture_frames_sets_resolution_only_when_asked(monkeypatch):
+    cap = _fake_cv2(monkeypatch, frames=["f0"])
+    gen = wh.capture_frames(index=1, width=640, height=480, quality=70)
+    next(gen)
+    gen.close()
+    assert cap.sets == [(3, 640), (4, 480)]  # FRAME_WIDTH, FRAME_HEIGHT
+
+
+def test_capture_frames_raises_when_camera_unavailable(monkeypatch):
+    _fake_cv2(monkeypatch, frames=[], opens=False)
+    gen = wh.capture_frames()
+    with pytest.raises(RuntimeError, match="indisponivel"):
+        next(gen)
+
+
+def test_capture_frames_raises_on_read_failure(monkeypatch):
+    cap = _fake_cv2(monkeypatch, frames=["f0"])
+    gen = wh.capture_frames()
+    assert next(gen) == b"jpeg"
+    with pytest.raises(RuntimeError, match="leitura"):
+        next(gen)
+    assert cap.released
