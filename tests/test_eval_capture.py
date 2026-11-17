@@ -253,3 +253,33 @@ def test_evaluate_canvas_projeta_gt_por_cada_ancora(tmp_path):
     )
     assert multi["alignment"] == "per_frame_anchors"
     assert multi["iou"] > single["iou"]
+
+
+def test_evaluate_canvas_bundle_mantem_uniao_de_ancoras(tmp_path):
+    # Bundle em espaco de pagina + folha que andou: a uniao por
+    # ancora nao pode ser sobrescrita pela pose final (o bloco
+    # ideal_page so roda sem ancoras).
+    h, w = 40, 60
+    page_gt = np.zeros((h, w), np.uint8)
+    page_gt[5:15, 5:15] = 1
+    page_gt[20:30, 20:30] = 1
+    bundle_path = tmp_path / "gt.npz"
+    _write_bundle(
+        bundle_path,
+        page_ink_full=page_gt,
+        page_to_scene=np.eye(3, dtype=np.float64),
+    )
+    a1 = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
+    a2 = np.float32([[4, 0], [w + 4, 0], [w + 4, h], [4, h]])
+    prediction = np.zeros((h, w), np.uint8)
+    prediction[5:15, 5:15] = 1
+    prediction[20:30, 24:34] = 1
+
+    single = ec.evaluate_canvas(
+        prediction, bundle_path, canvas_space="page", corners=a2, anchors=None
+    )
+    multi = ec.evaluate_canvas(
+        prediction, bundle_path, canvas_space="page", corners=a2, anchors=[a1]
+    )
+    assert multi["alignment"] == "per_frame_anchors"
+    assert multi["iou"] > single["iou"]

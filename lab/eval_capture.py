@@ -427,6 +427,8 @@ def evaluate_canvas(
         if prediction.shape != truth.shape:
             raise ValueError("canvas da cena e ink_full têm grades diferentes")
         if bundle is not None:
+            # Em scene o GT ja vem na grade da camera; page_matrix
+            # so serve aos tracos individuais (strokes()).
             page_matrix = bundle[page_to_scene_key]
             stroke_mats = [None]
             stroke_page_mats = [page_matrix]
@@ -472,13 +474,12 @@ def evaluate_canvas(
         elif bundle is not None:
             ph, pw = bundle["page_ink_full"].shape
             page_matrix = np.diag([width / pw, height / ph, 1.0])
-            alignment = "ideal_page"
-        else:
-            raise ValueError("GT NPY em espaço de página exige --corners; use o bundle")
-        if page_matrix is not None:
             stroke_mats = [None]
             stroke_page_mats = [page_matrix]
             truth = project(page_truth, None, page_matrix)
+            alignment = "ideal_page"
+        else:
+            raise ValueError("GT NPY em espaço de página exige --corners; use o bundle")
     else:
         raise ValueError("canvas_space precisa ser page ou scene")
 
