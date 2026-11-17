@@ -249,24 +249,61 @@ def test_save_stamp_unico_por_processo():
 
 
 def test_require_gui_backend_levanta_sem_highgui(monkeypatch):
-    def _headless(*a, **kw):
-        raise app_module.cv2.error("sem GUI")
-
-    monkeypatch.setattr(app_module.cv2, "namedWindow", _headless)
+    monkeypatch.setattr(app_module, "_gui_backend_compiled", lambda: False)
     with pytest.raises(RuntimeError, match="draw-core\[gui\]"):
         app_module._require_gui_backend()
 
 
-def test_require_gui_backend_ok_com_highgui(monkeypatch):
+def test_require_gui_backend_levanta_sem_display(monkeypatch):
+    import subprocess
+
+    monkeypatch.setattr(app_module, "_gui_backend_compiled", lambda: True)
+
+    def _aborted(*a, **kw):
+        # O Qt morre por sinal sem display: rc != 0, sem excecao.
+        return subprocess.CompletedProcess(a[0], -6, "", "")
+
+    monkeypatch.setattr(app_module.subprocess, "run", _aborted)
+    with pytest.raises(RuntimeError, match="display"):
+        app_module._require_gui_backend()
+
+
+def test_require_gui_backend_ok_com_display(monkeypatch):
+    import subprocess
+
     calls = []
+    monkeypatch.setattr(app_module, "_gui_backend_compiled", lambda: True)
     monkeypatch.setattr(
-        app_module.cv2, "namedWindow", lambda *a, **k: calls.append("n")
-    )
-    monkeypatch.setattr(
-        app_module.cv2, "destroyWindow", lambda *a, **k: calls.append("d")
+        app_module.subprocess,
+        "run",
+        lambda cmd, **kw: (
+            calls.append(cmd) or subprocess.CompletedProcess(cmd, 0, "", "")
+        ),
     )
     app_module._require_gui_backend()
-    assert calls == ["n", "d"]
+    # A sonda de janela roda isolada: Qt pode abortar o filho, nunca o app.
+    assert len(calls) == 1
+    assert calls[0][1] == "-c"
+    assert "namedWindow" in calls[0][2]
+
+
+def test_gui_backend_compiled_le_buildinfo(monkeypatch):
+    fake_info = (
+        "General configuration for OpenCV 4.9.0\n"
+        "  GUI:\n"
+        "    QT:                          YES (ver 5.15.13)\n"
+        "    GTK+:                        NO\n"
+        "  Media I/O:\n"
+        "    JPEG:                        YES\n"
+    )
+    monkeypatch.setattr(app_module.cv2, "getBuildInformation", lambda: fake_info)
+    assert app_module._gui_backend_compiled() is True
+
+    headless = fake_info.replace("YES (ver 5.15.13)", "NO").replace(
+        "JPEG:                        YES", "JPEG:                        NO"
+    )
+    monkeypatch.setattr(app_module.cv2, "getBuildInformation", lambda: headless)
+    assert app_module._gui_backend_compiled() is False
 
 
 def test_check_models_divergencia_nao_estrita_vira_aviso(monkeypatch, tmp_path, capsys):

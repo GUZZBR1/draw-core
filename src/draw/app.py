@@ -33,6 +33,8 @@ import argparse
 import glob
 import itertools
 import os
+import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -427,28 +429,66 @@ def _save_stamp():
     return f"{time.time_ns() // 1_000_000}_{next(_SNAPSHOT_SEQ)}"
 
 
-def _require_gui_backend():
-    """Falha cedo e claro quando o OpenCV instalado não tem HighGUI.
+_GUI_PROBE = (
+    "import cv2;"
+    "cv2.namedWindow('draw-gui-probe', cv2.WINDOW_NORMAL);"
+    "cv2.destroyWindow('draw-gui-probe')"
+)
 
-    A roda headless (a dependência padrão, pensada para CI) abre
-    VideoCapture, mas cv2.imshow levanta cv2.error na primeira frame.
-    Quem desenha na tela instala o extra: pip install 'draw-core[gui]'.
-    A sonda abre e fecha uma janela: no headless o namedWindow já
-    levanta, e num build com GUI sem display acontece o mesmo — nas
-    duas situações a mensagem abaixo é a correta.
+
+def _gui_backend_compiled():
+    """True se a roda instalada tem backend de janela compilado.
+
+    A seção GUI de cv2.getBuildInformation lista QT/GTK/Win32/Cocoa
+    com YES/NO; a roda headless sai de fábrica com tudo NO. Formato
+    desconhecido não bloqueia — a sonda de display decide em seguida.
     """
-    try:
-        probe = "draw-gui-probe"
-        cv2.namedWindow(probe, cv2.WINDOW_NORMAL)
-        cv2.destroyWindow(probe)
-    except cv2.error as error:
+    info = cv2.getBuildInformation()
+    marker = re.search(r"GUI:\s*\n", info)
+    if marker is None:
+        return True
+    section = []
+    for line in info[marker.end() :].splitlines():
+        stripped = line.strip()
+        if stripped and not line.startswith((" ", "\t")):
+            break
+        if stripped:
+            section.append(stripped)
+    if not section:
+        return False
+    return any("YES" in line for line in section)
+
+
+def _require_gui_backend():
+    """Falha cedo e claro quando a janela do Draw nao pode abrir.
+
+    Dois motivos distintos: a roda headless nao compila HighGUI
+    (detectado pelo build info, sem abrir janela) e um build COM GUI
+    sem display utilizavel — o Qt aborta o processo inteiro nesse
+    caso, entao a sonda de janela roda num subprocesso descartavel.
+    """
+    if not _gui_backend_compiled():
         raise RuntimeError(
             "O OpenCV instalado nao tem backend de janela (HighGUI) "
-            "utilizavel — a roda headless nao abre cv2.imshow e um "
-            "build com GUI sem display falha igual. Para desenhar na "
-            "tela: pip install 'draw-core[gui]'. Sem tela (CI/servidor), "
-            "use as ferramentas de lab/."
-        ) from error
+            "compilado — a roda headless nao abre cv2.imshow. Para "
+            "desenhar na tela: pip install 'draw-core[gui]'. Sem tela "
+            "(CI/servidor), use as ferramentas de lab/."
+        )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", _GUI_PROBE],
+            timeout=15,
+            capture_output=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        result = None
+    if result is None or result.returncode != 0:
+        raise RuntimeError(
+            "O OpenCV tem backend de janela compilado, mas nenhum "
+            "display utilizavel (o Qt encerraria o processo ao abrir "
+            "a janela). Conecte um display, use X11 forwarding ou "
+            "rode as ferramentas de lab/ que nao precisam de tela."
+        )
 
 
 def _report_format_suggestion(telemetry, suggestion):
