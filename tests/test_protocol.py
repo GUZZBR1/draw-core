@@ -197,11 +197,31 @@ def test_drawcap_read_respeita_release(tmp_path):
     assert not ok and frame is None
 
 
+class _FakeClock:
+    """Relógio determinístico: avança no sleep() e pelo 'decode' do teste."""
+
+    def __init__(self, start=100.0):
+        self.now = start
+        self.sleeps = []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, delay):
+        self.sleeps.append(delay)
+        self.now += delay
+
+
+def _patch_clock(monkeypatch, clock):
+    monkeypatch.setattr("draw.protocol.time.monotonic", clock.monotonic)
+    monkeypatch.setattr("draw.protocol.time.sleep", clock.sleep)
+
+
 def test_drawcap_replay_respeita_cadencia_gravada(tmp_path, monkeypatch):
     """Replay não vaza quadros: read() espera o intervalo entre
     capture_ts_us em vez de consumir na velocidade do disco."""
-    sleeps = []
-    monkeypatch.setattr("draw.protocol.time.sleep", sleeps.append)
+    clock = _FakeClock()
+    _patch_clock(monkeypatch, clock)
     frames = [
         (0, 1_000_000, _jpeg()),
         (1, 1_040_000, _jpeg()),
@@ -212,40 +232,65 @@ def test_drawcap_replay_respeita_cadencia_gravada(tmp_path, monkeypatch):
         ok, _frame = capture.read()
         assert ok
     capture.release()
-    assert sleeps == [pytest.approx(0.04), pytest.approx(0.04)]
+    assert clock.sleeps == [pytest.approx(0.04), pytest.approx(0.04)]
+
+
+def test_drawcap_replay_nao_acumula_decode(tmp_path, monkeypatch):
+    """O prazo é absoluto: 10 ms de decode por quadro não somam 10 ms
+    a cada intervalo de 40 ms — a cadência entregue fica em 40 ms."""
+    clock = _FakeClock()
+    _patch_clock(monkeypatch, clock)
+    decode_s = 0.010
+    frames = [(i, 1_000_000 + i * 40_000, _jpeg()) for i in range(3)]
+    capture = HelperCapture(str(_drawcap(tmp_path / "s.drawcap", frames)))
+    delivered = []
+    for _ in range(3):
+        ok, _frame = capture.read()
+        assert ok
+        delivered.append(clock.now)
+        clock.now += decode_s  # o decode do quadro "gasta" 10 ms
+    capture.release()
+    # Entregas ancoradas na cadência de 40 ms da gravação.
+    assert delivered == [
+        pytest.approx(100.0),
+        pytest.approx(100.04),
+        pytest.approx(100.08),
+    ]
+    assert clock.sleeps == [pytest.approx(0.03), pytest.approx(0.03)]
 
 
 def test_drawcap_primeiro_frame_sem_espera(tmp_path, monkeypatch):
-    sleeps = []
-    monkeypatch.setattr("draw.protocol.time.sleep", sleeps.append)
+    clock = _FakeClock()
+    _patch_clock(monkeypatch, clock)
     capture = HelperCapture(
         str(_drawcap(tmp_path / "s.drawcap", [(7, 9_000_000, _jpeg())]))
     )
     ok, _frame = capture.read()
-    assert ok and sleeps == []
+    assert ok and clock.sleeps == []
     capture.release()
 
 
 def test_drawcap_pace_desligado_nao_espera(tmp_path, monkeypatch):
-    sleeps = []
-    monkeypatch.setattr("draw.protocol.time.sleep", sleeps.append)
+    clock = _FakeClock()
+    _patch_clock(monkeypatch, clock)
     frames = [(0, 0, _jpeg()), (1, 5_000_000, _jpeg())]
     capture = HelperCapture(str(_drawcap(tmp_path / "s.drawcap", frames)), pace=False)
     capture.read()
     capture.read()
     capture.release()
-    assert sleeps == []
+    assert clock.sleeps == []
 
 
-def test_drawcap_ts_fora_de_ordem_nao_espera(tmp_path, monkeypatch):
-    sleeps = []
-    monkeypatch.setattr("draw.protocol.time.sleep", sleeps.append)
+def test_drawcap_atrasado_nao_espera(tmp_path, monkeypatch):
+    """Prazo já vencido (ts no passado ou consumo lento) não dorme."""
+    clock = _FakeClock()
+    _patch_clock(monkeypatch, clock)
     frames = [(0, 5_000_000, _jpeg()), (1, 1_000_000, _jpeg())]
     capture = HelperCapture(str(_drawcap(tmp_path / "s.drawcap", frames)))
     capture.read()
     capture.read()
     capture.release()
-    assert sleeps == []
+    assert clock.sleeps == []
 
 
 def test_token_file_ilegivel_vira_erro_de_autenticacao(tmp_path):

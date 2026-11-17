@@ -326,7 +326,11 @@ class HelperCapture:
         # LatestFrameCapture descarta os quadros intermediários.
         self._pace = pace
         self._pace_stream = False
-        self._pace_ts_us = None
+        # Âncora do primeiro registro: ts gravado + relógio local. Os
+        # prazos seguintes são absolutos — o tempo de decodificação
+        # não se soma ao intervalo gravado.
+        self._pace_origin_us = None
+        self._pace_clock_s = None
         self.last_frame_id = None
         self.last_capture_ts_ms = None
         self._open(timeout, token, token_file)
@@ -367,11 +371,17 @@ class HelperCapture:
             frame_id, capture_ts_us, payload, _raw = next(self._iter)
         except (StopIteration, ProtocolError, OSError):
             return False, None
-        if self._pace and self._pace_stream and self._pace_ts_us is not None:
-            delay = (capture_ts_us - self._pace_ts_us) / 1e6
-            if delay > 0:
-                time.sleep(delay)
-        self._pace_ts_us = capture_ts_us
+        if self._pace and self._pace_stream:
+            if self._pace_origin_us is None:
+                self._pace_origin_us = capture_ts_us
+                self._pace_clock_s = time.monotonic()
+            else:
+                deadline = (
+                    self._pace_clock_s + (capture_ts_us - self._pace_origin_us) / 1e6
+                )
+                delay = deadline - time.monotonic()
+                if delay > 0:
+                    time.sleep(delay)
         frame = decode_jpeg(payload)
         if frame is None:
             return False, None
