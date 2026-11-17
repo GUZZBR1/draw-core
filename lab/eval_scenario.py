@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -68,22 +69,64 @@ def _page_expected(bundle, applied_upto, erased):
     return expected
 
 
-def _page_expected_phases(bundle, applied_upto, erased):
-    """(fase 0 pós-borracha, fase 1) separadas por era de existência.
+def _stroke_reveals(bundle, events):
+    """Janela de revelação de cada traço pelo relógio da fase write.
 
-    A projeção por registros é por passada: um traço só pode estar
-    onde uma passada capaz de vê-lo o depositou. Separar por fase é
-    o que permite projetar o redesenho só por registros a partir da
-    segunda escrita — projetá-lo por passadas anteriores criava
-    verdade fantasma e derrubava o recall medido.
+    O simulador aplica ``frames_per_stroke`` frames por traço dentro
+    da fase (``completed = (local + 1) // frames_per_stroke``): o
+    traço do slot i começa a aparecer em ``start + i*fps`` e está
+    completo em ``start + (i+1)*fps - 1``. Devolve por índice de
+    traço ``(start, end, fps)`` absolutos — ``None`` quando a fase
+    do grupo não existe na linha do tempo.
+
+    A fronteira por FASE não basta: dentro da mesma escrita a âncora
+    pode mudar antes do último traço, e projetar o traço atrasado
+    pela passada anterior à revelação dele cria cópia fantasma em
+    posição que nenhuma passada depositou.
+    """
+    stroke_phase = bundle["stroke_phase"]
+    write_phases = [p for p in events if p["kind"] == "write"]
+    reveals = [None] * int(stroke_phase.size)
+    for group, phase in zip((0, 1), write_phases[:2], strict=False):
+        indices = np.nonzero(stroke_phase == group)[0]
+        if not indices.size:
+            continue
+        per = (phase["end"] - phase["start"]) / indices.size
+        for slot, index in enumerate(indices):
+            reveals[int(index)] = (
+                phase["start"] + slot * per,
+                phase["start"] + (slot + 1) * per - 1,
+                per,
+            )
+    return reveals
+
+
+def _revealed_page_mask(bundle, reveals, frame, erase_phase, erase_rect):
+    """Tinta visível na folha no instante `frame` — o que uma passada
+    daquele frame poderia depositar na grade.
+
+    Traços entram progressivamente: antes de ``start`` não existem,
+    entre ``start`` e ``end`` valem como prefixo da polilinha (o
+    sim desenha ``ceil(len * fração)`` pontos), depois completos. A
+    borracha zera os traços de fase 0 à esquerda da frente dela no
+    mesmo relógio do ``_step_erase``; traços de fase 1 nascem depois
+    e nunca são apagados.
     """
     shape = bundle["page_ink_full"].shape
-    mask0 = np.zeros(shape, np.uint8)
-    mask1 = np.zeros(shape, np.uint8)
     points, offsets = bundle["points"], bundle["offsets"]
     stroke_phase = bundle["stroke_phase"]
-    for index in range(applied_upto):
+    mask0 = np.zeros(shape, np.uint8)
+    mask1 = np.zeros(shape, np.uint8)
+    for index, reveal in enumerate(reveals):
+        if reveal is None:
+            continue
+        start, end, per = reveal
+        if frame < start:
+            continue
         geo = points[offsets[index] : offsets[index + 1]]
+        if frame < end:
+            frac = (frame - start + 1) / per
+            geo = geo[: max(2, math.ceil(len(geo) * frac))]
         target = mask0 if stroke_phase[index] == 0 else mask1
         cv2.polylines(
             target,
@@ -92,10 +135,17 @@ def _page_expected_phases(bundle, applied_upto, erased):
             255,
             int(bundle["thickness"][index]),
         )
-    if erased:
-        x, y, w, h = (int(v) for v in bundle["erase_rect"])
-        mask0[y : y + h, x : x + w] = 0
-    return mask0, mask1
+    if erase_phase is not None and frame >= erase_phase["start"]:
+        x, y, w, h = erase_rect
+        t = min(
+            1.0,
+            (frame - erase_phase["start"] + 1)
+            / (erase_phase["end"] - erase_phase["start"]),
+        )
+        front = x + int(round(w * t))
+        if front > x:
+            mask0[y : y + h, x : min(x + w, front)] = 0
+    return mask0 | mask1
 
 
 def _final_checkpoint(checkpoints, events):
@@ -161,6 +211,8 @@ def _project_via_registrations(
     page_corners=None,
     min_frame=None,
     curved=False,
+    epoch=None,
+    content_by_frame=None,
 ):
     """GT na grade do canvas pela cadeia das passadas até `frame`.
 
@@ -177,14 +229,19 @@ def _project_via_registrations(
     no eval_capture. Folha curvada remapa página→cena pelo mapa
     denso sintetizado da pose daquela passada.
 
-    ``min_frame`` restringe a passadas que já podiam ver a máscara:
-    traço de fase 1 projetado por registro anterior ao redesenho
-    ocupa posição que nenhuma passada depositou — verdade fantasma
-    que derruba a métrica de recall do redesenho. ``curved`` marca
-    bundle de folha curvada: sem a pose verdadeira do frame o mapa
-    plano página→grade mentiria pior que a projeção pelo mapa denso
-    do checkpoint — o registro é pulado e, sem nenhum projetável,
-    a função cai fora para o fallback do chamador.
+    ``epoch`` restringe aos registros da mesma geração do canvas do
+    checkpoint: depois de um reset do acumulador os registros novos
+    descrevem outra tinta — projetá-los no checkpoint antigo perde
+    a história que o produziu (o snapshot guarda a época dele).
+    ``content_by_frame`` devolve a tinta da folha revelada até o
+    frame da passada: cada registro projeta só o que ele pôde ver —
+    um traço que ainda não existia quando a passada votou não ganha
+    cópia fantasma na âncora dela. ``min_frame`` segue para as
+    máscaras espaciais (retângulo da borracha, área do redesenho).
+    ``curved`` marca bundle de folha curvada: sem a pose verdadeira
+    do frame o mapa plano página→grade mentiria pior que a projeção
+    pelo mapa denso do checkpoint — o registro é pulado e, sem
+    nenhum projetável, a função cai fora para o fallback do chamador.
 
     Retorna None quando não há registro utilizável — o chamador cai
     na projeção pela pose do checkpoint, como antes.
@@ -198,10 +255,13 @@ def _project_via_registrations(
         if isinstance(r, dict)
         and (r.get("frame") is None or r["frame"] <= frame)
         and (min_frame is None or r.get("frame") is None or r["frame"] >= min_frame)
+        and (epoch is None or r.get("epoch") is None or r["epoch"] == epoch)
     ]
     if not valid:
         return None
     # Dedup por bytes — repetições da mesma geometria projetam igual.
+    # Com conteúdo por frame a máscara fonte muda entre passadas,
+    # então o frame entra na chave mesmo sem pose verdadeira.
     seen = {}
     for reg in valid:
         key = (
@@ -214,7 +274,9 @@ def _project_via_registrations(
             None
             if reg.get("submitted") is None
             else np.asarray(reg["submitted"], np.float32).tobytes(),
-            reg.get("frame") if true_quads is not None else None,
+            reg.get("frame")
+            if (true_quads is not None or content_by_frame is not None)
+            else None,
         )
         seen.setdefault(key, reg)
     page_to_grid = np.diag([width / mask.shape[1], height / mask.shape[0], 1.0])
@@ -225,6 +287,14 @@ def _project_via_registrations(
     for reg in seen.values():
         anchor, quad, sub = reg.get("anchor"), reg.get("quad"), reg.get("submitted")
         rframe = reg.get("frame")
+        # A passada só depositou o que a folha mostrava no frame
+        # dela — a máscara do checkpoint inteiro através do registro
+        # antigo cria verdade em posição que ele nunca viu.
+        src = (
+            content_by_frame(rframe)
+            if (content_by_frame is not None and rframe is not None)
+            else mask
+        )
         if anchor is None or quad is None:
             reg_matrix = np.eye(3, dtype=np.float64)
         else:
@@ -253,12 +323,12 @@ def _project_via_registrations(
                         page_corners, np.asarray(true_quads[rframe], np.float32)
                     )
                 ),
-                mask.shape[1],
-                mask.shape[0],
+                src.shape[1],
+                src.shape[0],
                 curl,
             )
             scene = cv2.remap(
-                mask,
+                src,
                 scene_map[0],
                 scene_map[1],
                 cv2.INTER_NEAREST,
@@ -283,7 +353,7 @@ def _project_via_registrations(
             input_map = page_to_grid
         projections.append(
             cv2.warpPerspective(
-                mask, reg_matrix @ input_map, (width, height), flags=cv2.INTER_NEAREST
+                src, reg_matrix @ input_map, (width, height), flags=cv2.INTER_NEAREST
             )
         )
     if not projections:
@@ -306,12 +376,14 @@ def _pipeline_summary(pipeline):
     corners = summary.pop("corners", None)
     anchors = summary.pop("anchors", ()) or ()
     registrations = summary.pop("registrations", []) or []
+    history = summary.pop("registration_history", []) or []
     summary["final_confirmed_px"] = (
         None if final_mask is None else int((np.asarray(final_mask) > 0).sum())
     )
     summary["anchor_corners"] = None if corners is None else corners.tolist()
     summary["anchor_count"] = len(anchors)
     summary["registration_count"] = len(registrations)
+    summary["registration_history_count"] = len(history)
     return summary
 
 
@@ -346,6 +418,11 @@ def audit(video, gt_path, *, fps=None, models=None, save_masks=None, verify="man
                     else loop.clean_provisional_mask.copy()
                 ),
                 "corners": (None if worker is None else worker.anchor_corners),
+                # A época do acumulador no instante do checkpoint:
+                # depois de um reset os registros novos descrevem
+                # outra tinta — o GT deste checkpoint projeta só
+                # pela história da época dele.
+                "epoch": (None if worker is None else worker.canvas_epoch),
             }
 
         pipeline = run_pipeline(
@@ -360,7 +437,11 @@ def audit(video, gt_path, *, fps=None, models=None, save_masks=None, verify="man
     finally:
         capture.release()
 
-    registrations = list(pipeline.get("registrations") or [])
+    # História completa epochada (sobrevive aos resets) — fallback
+    # para bundles de run_pipeline antigos sem o campo novo.
+    registrations = list(
+        pipeline.get("registration_history") or pipeline.get("registrations") or []
+    )
     pipeline = _pipeline_summary(pipeline)
     canvas_hw = tuple(pipeline["canvas_shape"])
     stroke_phase = bundle["stroke_phase"]
@@ -389,6 +470,23 @@ def audit(video, gt_path, *, fps=None, models=None, save_masks=None, verify="man
     has_quad_end = any("quad_end" in p for p in events)
     moved = False
     curl = json.loads(str(bundle["page_curl"])) if "page_curl" in bundle else None
+    # Linha do tempo da tinta na folha: cada passada só depositou o
+    # que existia no frame dela — traços revelam-se por slot dentro
+    # da escrita e a borracha avança pela frente dela. Cache por
+    # frame: passadas diferentes no mesmo instante veem a mesma
+    # página.
+    reveals = _stroke_reveals(bundle, events)
+    erase_phase = next((p for p in events if p["kind"] == "erase"), None)
+    erase_rect = tuple(int(v) for v in bundle["erase_rect"])
+    reveal_cache = {}
+
+    def content_for(rframe):
+        if rframe not in reveal_cache:
+            reveal_cache[rframe] = _revealed_page_mask(
+                bundle, reveals, rframe, erase_phase, erase_rect
+            )
+        return reveal_cache[rframe]
+
     for phase in events:
         frame = phase["end"] - 1
         if phase["kind"] == "write":
@@ -432,7 +530,7 @@ def audit(video, gt_path, *, fps=None, models=None, save_masks=None, verify="man
                 bundle[f"scene_to_page_{tag}x"],
                 bundle[f"scene_to_page_{tag}y"],
             )
-        expected0, expected1 = _page_expected_phases(bundle, applied_upto, erased)
+        expected = _page_expected(bundle, applied_upto, erased)
         write_starts = [p["start"] for p in events if p["kind"] == "write"]
         redraw_era = write_starts[1] if len(write_starts) > 1 else None
         curved = curl is not None or "scene_to_page_x" in bundle
@@ -470,21 +568,27 @@ def audit(video, gt_path, *, fps=None, models=None, save_masks=None, verify="man
             else np.asarray(snap["provisional"]) > 0
         )
 
+        snap_epoch = snap.get("epoch")
+
         def project_truth(
             page_mask,
             *,
             min_frame=None,
+            content_by_frame=None,
             frame=frame,
+            snap_epoch=snap_epoch,
             corners=corners,
             page_to_scene=page_to_scene,
             scene_map=scene_map,
             curved=curved,
         ):
-            # Registros das passadas até o frame do checkpoint: a
-            # tinta persistida de fases antigas (pré-lift/move) fica
-            # onde a cadeia de registro dela a depositou — projetar
-            # pela pose do checkpoint deslocaria a verdade para fora
-            # da grade e marcaria ausência injusta.
+            # Registros das passadas até o frame do checkpoint NA
+            # ÉPOCA do canvas dele: a tinta persistida de fases
+            # antigas (pré-lift/move) fica onde a cadeia de registro
+            # dela a depositou — projetar pela pose do checkpoint
+            # deslocaria a verdade para fora da grade e marcaria
+            # ausência injusta, e registros de época posterior ao
+            # reset descrevem tinta que não existia ali.
             projected = _project_via_registrations(
                 page_mask,
                 registrations,
@@ -495,17 +599,17 @@ def audit(video, gt_path, *, fps=None, models=None, save_masks=None, verify="man
                 page_corners=page_corners,
                 min_frame=min_frame,
                 curved=curved,
+                epoch=snap_epoch,
+                content_by_frame=content_by_frame,
             )
             if projected is not None:
                 return projected > 0
             return _project(page_mask, corners, page_to_scene, canvas_hw, scene_map) > 0
 
-        truth = project_truth(expected0)
-        if expected1.any():
-            # Redesenho só por passadas a partir da segunda escrita:
-            # registros anteriores nunca o viram — projetá-lo por eles
-            # criaria verdade fantasma e derrubaria o recall medido.
-            truth |= project_truth(expected1, min_frame=redraw_era)
+        # Cada passada projeta a tinta que a folha já mostrava no
+        # frame dela — um traço não revelado não ganha cópia na
+        # âncora anterior à existência dele.
+        truth = project_truth(expected, content_by_frame=content_for)
         entry.update(pixel_metrics(confirmed, truth))
         entry["confirmed_px"] = int(confirmed.sum())
         entry["provisional_px"] = int(provisional.sum())

@@ -647,6 +647,7 @@ def test_pipeline_summary_eh_json_serializavel():
         "corners": quad,
         "anchors": [quad.copy()],
         "registrations": [reg],
+        "registration_history": [reg, dict(reg, frame=7)],
         "canvas_shape": [60, 80],
         "frames": 10,
         "status": "ok",
@@ -655,10 +656,12 @@ def test_pipeline_summary_eh_json_serializavel():
     json.dumps(summary)  # não levanta
     assert summary["anchor_count"] == 1
     assert summary["registration_count"] == 1
+    assert summary["registration_history_count"] == 2
     assert summary["anchor_corners"] == [[0, 0], [10, 0], [10, 10], [0, 10]]
     assert summary["final_confirmed_px"] == 16
     assert "mask" not in summary and "registrations" not in summary
     assert "anchors" not in summary and "corners" not in summary
+    assert "registration_history" not in summary
     assert pipeline["mask"] is not None  # não muta o original
 
 
@@ -800,3 +803,148 @@ def test_project_via_registrations_curvo_sem_pose_cai_no_fallback():
     )
     # Sem a marca de curvatura o mesmo registro projeta plano.
     assert _project_via_registrations(mask, [reg], 5, canvas_hw=(60, 80)) is not None
+
+
+def test_project_via_registrations_filtra_por_epoca():
+    """Checkpoint de época 2 não projeta pelos registros da época 1:
+    depois do reset do acumulador a história anterior descreve tinta
+    que não existe mais — e o checkpoint anterior ao reset não pode
+    ver os registros novos."""
+    from lab.eval_scenario import _project_via_registrations
+
+    mask = np.zeros((30, 30), np.uint8)
+    mask[5:15, 5:15] = 255
+    anchor_a = np.float32([[0, 0], [40, 0], [40, 40], [0, 40]])
+    anchor_b = anchor_a + np.float32([8, 0])
+    old = {"anchor": anchor_a, "quad": anchor_a, "submitted": None, "frame": 2}
+    old["epoch"] = 1
+    new = {"anchor": anchor_b, "quad": anchor_a, "submitted": None, "frame": 6}
+    new["epoch"] = 2
+    union = (
+        _project_via_registrations(mask, [old, new], 9, canvas_hw=(60, 80), epoch=2) > 0
+    )
+    only_new = _project_via_registrations(mask, [new], 9, canvas_hw=(60, 80)) > 0
+    assert np.array_equal(union, only_new)
+    # Checkpoint da época 1 (antes do reset) vê só a história dela.
+    old_only = (
+        _project_via_registrations(mask, [old, new], 9, canvas_hw=(60, 80), epoch=1) > 0
+    )
+    assert np.array_equal(
+        old_only,
+        _project_via_registrations(mask, [old], 9, canvas_hw=(60, 80)) > 0,
+    )
+    # Registro sem marca de época não é excluído por filtro nenhum.
+    legacy = {"anchor": anchor_a, "quad": anchor_a, "submitted": None, "frame": 1}
+    assert (
+        _project_via_registrations(mask, [legacy], 9, canvas_hw=(60, 80), epoch=3)
+        is not None
+    )
+
+
+def _timeline_bundle():
+    """Dois traços de fase 0 + um de fase 1, com relógio write
+    determinístico: 8 frames para 2 traços → 4 frames por traço."""
+    points = np.array(
+        [
+            [2, 4],
+            [8, 4],
+            [14, 4],
+            [20, 4],
+            [26, 4],  # traço 0: 5 pontos na horizontal
+            [2, 12],
+            [14, 12],
+            [26, 12],  # traço 1: 3 pontos
+            [4, 20],
+            [16, 20],
+            [28, 20],  # traço 2 (fase 1): 3 pontos
+        ],
+        np.int32,
+    )
+    bundle = {
+        "page_ink_full": np.zeros((30, 30), np.uint8),
+        "points": points,
+        "offsets": np.array([0, 5, 8, 11]),
+        "thickness": np.array([2, 2, 2]),
+        "stroke_phase": np.array([0, 0, 1]),
+        "erase_rect": np.array([0, 0, 12, 16], np.int32),
+    }
+    events = [
+        {"kind": "write", "start": 10, "end": 18},
+        {"kind": "erase", "start": 20, "end": 28, "rect": (0, 0, 12, 16)},
+        {"kind": "write", "start": 30, "end": 34},
+    ]
+    return bundle, events
+
+
+def test_stroke_reveals_por_traco():
+    from lab.eval_scenario import _stroke_reveals
+
+    bundle, events = _timeline_bundle()
+    reveals = _stroke_reveals(bundle, events)
+    # write 1: slots 0 e 1 → (10, 13) e (14, 17); write 2: (30, 33).
+    assert reveals[0] == (10, 13, 4.0)
+    assert reveals[1] == (14, 17, 4.0)
+    assert reveals[2] == (30, 33, 4.0)
+
+
+def test_revealed_page_mask_traco_parcial_e_borracha():
+    from lab.eval_scenario import _revealed_page_mask, _stroke_reveals
+
+    bundle, events = _timeline_bundle()
+    reveals = _stroke_reveals(bundle, events)
+    erase = events[1]
+    rect = (0, 0, 12, 16)
+
+    # Antes da escrita: folha vazia.
+    assert not _revealed_page_mask(bundle, reveals, 9, erase, rect).any()
+    # Meio do traço 0 (fração 2/4): prefixo até ~metade dos pontos
+    # (x≤14, o resto da polilinha ainda não existe).
+    partial = _revealed_page_mask(bundle, reveals, 11, erase, rect) > 0
+    assert partial[:, 2:13].any() and not partial[:, 17:].any()
+    # Traço 0 completo, traço 1 ainda não começou.
+    mask = _revealed_page_mask(bundle, reveals, 13, erase, rect) > 0
+    assert mask[4, 24:27].any() and not mask[12].any()
+    # Meio da borracha (t=5/8 → frente ~x=8): traço 1 visível à
+    # direita da frente, apagado à esquerda.
+    mask = _revealed_page_mask(bundle, reveals, 24, erase, rect) > 0
+    assert not mask[:16, :8].any() and mask[12, 14:27].any()
+    # Redesenho (fase 1) dentro do retângulo não é apagado.
+    mask = _revealed_page_mask(bundle, reveals, 33, erase, rect) > 0
+    assert mask[20, 4:10].any()
+    # Depois da borracha a faixa dos traços de fase 0 zera de vez.
+    assert not mask[:16, :12].any()
+
+
+def test_project_via_registrations_conteudo_por_frame_sem_fantasma():
+    """O caso do achado: âncora A numa passada de página em branco,
+    âncora B antes do traço tardio — a união não pode marcar o
+    traço na posição de A, onde nenhuma passada o depositou."""
+    from lab.eval_scenario import _project_via_registrations
+
+    mask = np.zeros((30, 30), np.uint8)
+    mask[5:15, 5:15] = 255
+    blank = np.zeros_like(mask)
+    anchor_a = np.float32([[0, 0], [40, 0], [40, 40], [0, 40]])
+    anchor_b = anchor_a + np.float32([8, 0])
+    early = {"anchor": anchor_a, "quad": anchor_a, "submitted": None, "frame": 2}
+    late = {"anchor": anchor_b, "quad": anchor_a, "submitted": None, "frame": 6}
+
+    def revealed(frame):
+        # A passada do frame 2 viu página em branco; a do 6, o traço.
+        return mask if frame >= 4 else blank
+
+    truth = (
+        _project_via_registrations(
+            mask,
+            [early, late],
+            9,
+            canvas_hw=(60, 80),
+            content_by_frame=revealed,
+        )
+        > 0
+    )
+    only_late = _project_via_registrations(mask, [late], 9, canvas_hw=(60, 80)) > 0
+    assert np.array_equal(truth, only_late)
+    # Sem conteúdo por frame a passada cega cria a cópia fantasma.
+    naive = _project_via_registrations(mask, [early, late], 9, canvas_hw=(60, 80)) > 0
+    assert naive.sum() > truth.sum()

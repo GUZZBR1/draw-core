@@ -37,6 +37,12 @@ from lab import gen_synthetic as gs  # noqa: E402
 from lab.eval_scenario import audit  # noqa: E402
 from lab.sim_source import SyntheticCapture, export_video  # noqa: E402
 
+# score_report chega no máximo a 3.5 (iou_loss + no_canvas + 1.5 de
+# componentes): um crash do pipeline é estritamente pior que qualquer
+# cenário que a bancada conseguiu medir — ranqueia primeiro no
+# elitismo e no keep.
+PIPELINE_CRASH_SCORE = 4.0
+
 TEXT_POOL = [
     "ab",
     "draw",
@@ -313,16 +319,42 @@ def run_trial(
     models: dict,
     keep_artifacts: bool,
 ) -> dict:
-    """Gera o vídeo do cenário, roda a bancada real e pontua."""
+    """Gera o vídeo do cenário, roda a bancada real e pontua.
+
+    Dois fracassos distintos: configuração inválida ou export quebrado
+    propagam como erro do cenário (score -1 no chamador — a tentativa
+    nem chegou ao pipeline); exceção DENTRO da auditoria é o pior
+    desfecho que um cenário válido pode produzir — a bancada real
+    caiu num vídeo legítimo — e volta como resultado com score máximo,
+    elegível a elite/mutação/keep e com o erro registrado.
+    """
     video = workdir / f"{tag}.mp4"
     started = time.monotonic()
     try:
         capture = SyntheticCapture(cfg["text"], seed=cfg["seed"], **cfg["params"])
         manifest = export_video(capture, video)
         masks_dir = workdir / f"{tag}_masks" if keep_artifacts else None
-        report = audit(
-            video, video.with_suffix(".gt.npz"), models=models, save_masks=masks_dir
-        )
+        try:
+            report = audit(
+                video, video.with_suffix(".gt.npz"), models=models, save_masks=masks_dir
+            )
+        except Exception as error:
+            # Crash do pipeline (worker de tinta, laço, modelo): cenário
+            # encontrou um defeito de verdade — score acima do máximo
+            # pontuável para rankear à frente de qualquer falha medida.
+            return {
+                "tag": tag,
+                "score": PIPELINE_CRASH_SCORE,
+                "components": {"pipeline_error": 1.0},
+                "verdict": {"status": f"pipeline_error: {error.__class__.__name__}"},
+                "pipeline_error": f"{error.__class__.__name__}: {error}",
+                "config": cfg,
+                "frames": manifest["frames"],
+                "elapsed_s": round(time.monotonic() - started, 2),
+                # Com keep_artifacts o MP4/GT gerados ficam: o vídeo
+                # que derruba o pipeline é a evidência do defeito.
+                "artifacts": str(video) if keep_artifacts else None,
+            }
         score, components = score_report(report)
         if keep_artifacts:
             _save_failure_frames(video, report, workdir / f"{tag}_frames")

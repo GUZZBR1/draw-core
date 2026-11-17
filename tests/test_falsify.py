@@ -59,9 +59,10 @@ def test_mutation_never_leaves_parameter_contract():
             capture.release()
 
 
-def test_run_trial_removes_artifacts_after_error(tmp_path, monkeypatch):
-    """Falha na auditoria não pode deixar MP4/GT/manifesto órfãos no
-    workdir — o cleanup roda no finally, não só no caminho feliz."""
+def test_run_trial_pipeline_crash_is_failing_outcome(tmp_path, monkeypatch):
+    """Crash dentro da auditoria é desfecho falho do pipeline, não
+    cenário inválido: score máximo (elegível a elite/mutação), erro
+    registrado — e sem keep o vídeo gerado continua sem dono."""
     import lab.falsify as fz
 
     def fake_export(capture, output):
@@ -78,11 +79,53 @@ def test_run_trial_removes_artifacts_after_error(tmp_path, monkeypatch):
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("auditoria falhou")),
     )
     cfg = {"text": "ab", "seed": 1, "params": {"fps": 8, "settle_seconds": 0.3}}
-    with pytest.raises(RuntimeError):
-        fz.run_trial(cfg, tmp_path, "bad", models={}, keep_artifacts=False)
+    result = fz.run_trial(cfg, tmp_path, "bad", models={}, keep_artifacts=False)
+    assert result["score"] == fz.PIPELINE_CRASH_SCORE
+    assert "RuntimeError" in result["pipeline_error"]
+    assert result["verdict"]["status"].startswith("pipeline_error")
     for suffix in (".mp4", ".gt.npz", ".json"):
         assert not (tmp_path / f"bad{suffix}").exists()
     assert not (tmp_path / "bad_ink_full.npy").exists()
+
+
+def test_run_trial_pipeline_crash_keeps_artifacts(tmp_path, monkeypatch):
+    """Com keep_artifacts o vídeo que derruba o pipeline fica
+    preservado — é a evidência do defeito, não lixo de retry."""
+    import lab.falsify as fz
+
+    def fake_export(capture, output):
+        output.write_bytes(b"x")
+        output.with_suffix(".gt.npz").write_bytes(b"x")
+        return {"frames": 1}
+
+    monkeypatch.setattr(fz, "export_video", fake_export)
+    monkeypatch.setattr(
+        fz,
+        "audit",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("auditoria falhou")),
+    )
+    cfg = {"text": "ab", "seed": 1, "params": {"fps": 8, "settle_seconds": 0.3}}
+    result = fz.run_trial(cfg, tmp_path, "bad", models={}, keep_artifacts=True)
+    assert result["score"] == fz.PIPELINE_CRASH_SCORE
+    assert result["artifacts"] == str(tmp_path / "bad.mp4")
+    assert (tmp_path / "bad.mp4").exists()
+
+
+def test_run_trial_config_failure_still_raises(tmp_path, monkeypatch):
+    """Falha de configuração/export — cenário que nem chegou ao
+    pipeline — continua propagando para o score -1 do chamador."""
+    import lab.falsify as fz
+
+    monkeypatch.setattr(
+        fz,
+        "SyntheticCapture",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            ValueError("parâmetro impossível")
+        ),
+    )
+    cfg = {"text": "ab", "seed": 1, "params": {"fps": 8}}
+    with pytest.raises(ValueError):
+        fz.run_trial(cfg, tmp_path, "bad", models={}, keep_artifacts=False)
 
 
 def test_score_report_weights_documented_failures():

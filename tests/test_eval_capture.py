@@ -217,6 +217,16 @@ def test_run_pipeline_dirige_pipeline_real(tmp_path, monkeypatch):
             2,
         )
         assert record["frame"] is None or 0 <= record["frame"] < result["frames"]
+    # História epochada: sem reset no caminho feliz ela coincide com
+    # a lista corrente e todo registro carrega a época do acumulador.
+    assert len(result["registration_history"]) == len(result["registrations"])
+    assert all(
+        current is past
+        for current, past in zip(
+            result["registrations"], result["registration_history"], strict=True
+        )
+    )
+    assert all(record["epoch"] >= 1 for record in result["registration_history"])
 
 
 def test_run_pipeline_rejeita_captura_fechada(tmp_path):

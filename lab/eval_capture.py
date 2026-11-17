@@ -241,6 +241,7 @@ def run_pipeline(
     frame_index = 0
     anchors = []
     registrations = []
+    registration_history = []
     submit_frames = []
     canvas_epoch = worker.canvas_epoch
     _submit = worker.submit
@@ -271,7 +272,10 @@ def run_pipeline(
             if worker.canvas_epoch != canvas_epoch:
                 # O acumulador foi zerado (timeout de identidade
                 # ou página nova): os registros anteriores
-                # projetavam tinta que não existe mais.
+                # projetavam tinta que não existe mais — saem de
+                # ``registrations``, mas ficam na history marcados
+                # pela época: checkpoints anteriores ao reset ainda
+                # precisam da geometria que produziu o canvas deles.
                 registrations.clear()
                 canvas_epoch = worker.canvas_epoch
             if pumped and worker.stats()["passes_total"] != passes_before:
@@ -289,22 +293,23 @@ def run_pipeline(
                     if anchor is not None:
                         anchor = np.asarray(anchor, np.float32)
                         anchors.append(anchor.copy())
-                        registrations.append(
-                            {
-                                "frame": (submit_frames[-1] if submit_frames else None),
-                                "anchor": anchor.copy(),
-                                "quad": (
-                                    None
-                                    if reg_corners is None
-                                    else np.asarray(reg_corners, np.float32).copy()
-                                ),
-                                "submitted": (
-                                    None
-                                    if sub_corners is None
-                                    else np.asarray(sub_corners, np.float32).copy()
-                                ),
-                            }
-                        )
+                        record = {
+                            "frame": (submit_frames[-1] if submit_frames else None),
+                            "epoch": worker.canvas_epoch,
+                            "anchor": anchor.copy(),
+                            "quad": (
+                                None
+                                if reg_corners is None
+                                else np.asarray(reg_corners, np.float32).copy()
+                            ),
+                            "submitted": (
+                                None
+                                if sub_corners is None
+                                else np.asarray(sub_corners, np.float32).copy()
+                            ),
+                        }
+                        registrations.append(record)
+                        registration_history.append(record)
             if worker.error is not None:
                 raise RuntimeError("worker de tinta falhou") from worker.error
             if outcome is not None:
@@ -328,6 +333,7 @@ def run_pipeline(
         "mask": mask,
         "anchors": anchors,
         "registrations": registrations,
+        "registration_history": registration_history,
         "corners": None if corners is None else np.asarray(corners).copy(),
         "frames": frame_index,
         "fps": fps,
@@ -698,9 +704,11 @@ def main(argv=None):
             corners = pipeline.pop("corners")
             anchors = pipeline.pop("anchors")
             registrations = pipeline.pop("registrations")
+            history = pipeline.pop("registration_history", [])
             pipeline["anchor_corners"] = None if corners is None else corners.tolist()
             pipeline["anchor_count"] = len(anchors)
             pipeline["registration_count"] = len(registrations)
+            pipeline["registration_history_count"] = len(history)
         else:
             prediction = load_canvas(args.canvas, args.canvas_kind)
         report = evaluate_canvas(
