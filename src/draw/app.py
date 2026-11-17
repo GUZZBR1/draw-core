@@ -9,9 +9,6 @@ Uso:
   python -m draw --hand-model modelo.task         # outro modelo de mao
   python -m draw --source 1                       # outra webcam local
   python -m draw --source http://192.168.0.10:8080/video   # camera via rede
-  python -m draw --source sessao.drawcap          # gravacao do ajudante
-  python -m draw --source tcp://192.168.0.10      # ajudante ao vivo
-      --helper-token-file token.txt               # token do ajudante
 
 Sem nenhuma flag, o caminho e o de producao: folha pelo detector
 neural (models/draw_seg_v3_dyn.onnx, com o classico de reserva) e
@@ -68,7 +65,6 @@ from .ink.worker import PageCleanWorker
 from .page_clean import PageCleanInk
 from .perception import NeuralSheetDetector
 from .pipeline import INK_WORKER_FAILED, Pipeline
-from .protocol import HelperCapture, ProtocolError, is_helper_source
 from .tracker import SheetDetectionWorker, _corners_json
 
 # Tempo que o aviso de fonte morta fica na janela antes da saida.
@@ -210,7 +206,7 @@ def _detect_sheet_combined(frame, neural_detector):
     return corners, verdict
 
 
-def run_check(source=0, helper_token_file=None):
+def run_check(source=0):
     """Validacao da camera, porta por porta. Retorna 0 ou 1.
 
     O `source` importa: o indice pedido e o testado, e uma URL e
@@ -229,10 +225,6 @@ def run_check(source=0, helper_token_file=None):
     all_ok = _check_models()
 
     if not isinstance(source, int):
-        if is_helper_source(source):
-            return (
-                0 if _check_helper_source(source, helper_token_file) and all_ok else 1
-            )
         return 0 if _check_remote_source(source) and all_ok else 1
 
     if not sys.platform.startswith("linux"):
@@ -335,33 +327,6 @@ def _check_camera_open(source, label):
         "segundos. A camera pode estar ocupada ou travada."
     )
     return False
-
-
-def _check_helper_source(source, token_file=None):
-    """Abre uma fonte do ajudante (.drawcap/tcp://) e confere um quadro."""
-    print(f"PASS: fonte do ajudante informada: {source}.")
-    try:
-        capture = HelperCapture(source, timeout=5.0, token_file=token_file)
-    except ProtocolError as error:
-        print(f"FAIL: {error}")
-        return 0
-    if not capture.isOpened():
-        print(
-            "FAIL: nao consegui abrir a fonte do ajudante. Confira se "
-            "o arquivo .drawcap existe ou se o ajudante esta escutando "
-            "na porta TCP."
-        )
-        return 0
-    ok, frame = capture.read()
-    capture.release()
-    if not ok or frame is None:
-        print("FAIL: a fonte abriu, mas nenhum quadro chegou em 5 segundos.")
-        return 0
-    print(
-        "PASS: quadro lido da fonte do ajudante. "
-        f"Formato (altura, largura, canais): {frame.shape}."
-    )
-    return 1
 
 
 def _check_remote_source(url):
@@ -558,7 +523,6 @@ def run(
     neural_model=None,
     hand_model=None,
     page_clean_model=None,
-    helper_token_file=None,
 ):
     _apply_opencv_thread_cap()
     _require_gui_backend()
@@ -648,9 +612,7 @@ def run(
         def detect_sheet(frame):
             return _detect_sheet_combined_traced(frame, neural_detector)
 
-        capture = open_capture(
-            parse_source(source), helper_token_file=helper_token_file
-        )
+        capture = open_capture(parse_source(source))
         frame_source = LatestFrameCapture(capture).start()
         detection_worker = None
         if not markers_mode:
@@ -1039,17 +1001,8 @@ def main():
     parser.add_argument(
         "--source",
         default="0",
-        help="indice da webcam local (0, 1...), URL do stream "
-        "(ex.: http://192.168.0.10:8080/video), gravacao .drawcap ou "
-        "stream tcp://host[:porta] do ajudante. Padrao: 0",
-    )
-    parser.add_argument(
-        "--helper-token-file",
-        default=None,
-        metavar="ARQUIVO",
-        help="arquivo com o token do ajudante Windows para "
-        "--source tcp:// (bridge/PROTOCOL.md). Sem ele, fontes "
-        "tcp:// sao recusadas no handshake",
+        help="indice da webcam local (0, 1...) ou URL do stream "
+        "(ex.: http://192.168.0.10:8080/video). Padrao: 0",
     )
     parser.add_argument(
         "--markers",
@@ -1116,7 +1069,7 @@ def main():
         parser.error(str(error))
     if args.check:
         parsed = parse_source(args.source)
-        sys.exit(run_check(parsed, helper_token_file=args.helper_token_file))
+        sys.exit(run_check(parsed if isinstance(parsed, int) else parsed))
     neural_model = args.neural
     page_clean_model = args.page_clean
     hand_model = args.hand_model
@@ -1140,7 +1093,6 @@ def main():
             neural_model=neural_model,
             hand_model=hand_model,
             page_clean_model=page_clean_model,
-            helper_token_file=args.helper_token_file,
         )
     except (RuntimeError, FileNotFoundError) as error:
         print(f"Erro: {error}")
