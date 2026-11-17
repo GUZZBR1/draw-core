@@ -23,6 +23,7 @@ from pathlib import Path
 import cv2
 
 from .contracts import FramePacket
+from .hvcam import HvcamCapture, is_hvcam_source
 from .protocol import HelperCapture, is_helper_source
 
 # Limite de falhas seguidas de leitura que declara a fonte morta.
@@ -460,6 +461,22 @@ def _local_open_hint(source):
 def open_capture(source, capture_factory=None, helper_token_file=None):
     global _LAST_OPEN_PROBE
     _LAST_OPEN_PROBE = None
+    if is_hvcam_source(source):
+        # Fonte hvcam (santleme/hvcam): webcam do lado Windows por
+        # vsock (hvcam://) ou TCP (hvcam+tcp://host). A conexao falha
+        # cedo quando o hvcam-host nao esta no ar.
+        capture = HvcamCapture(source)
+        if capture.isOpened():
+            return capture
+        detail = capture.open_error
+        capture.release()
+        if detail is not None:
+            raise RuntimeError(f"Nao consegui abrir a fonte hvcam: {detail}")
+        raise RuntimeError(
+            f"Nao consegui abrir a fonte hvcam: {source!r}. Confira se "
+            "o hvcam-host.exe esta rodando no Windows e, fora do WSL, "
+            "use --source hvcam+tcp://<host>:<porta>."
+        )
     if is_helper_source(source):
         # Fonte do ajudante Windows (bridge/PROTOCOL.md): arquivo
         # .drawcap gravado ou stream tcp:// ao vivo. AuthenticationError
