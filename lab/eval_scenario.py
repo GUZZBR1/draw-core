@@ -234,9 +234,12 @@ def _project_via_registrations(
     descrevem outra tinta — projetá-los no checkpoint antigo perde
     a história que o produziu (o snapshot guarda a época dele).
     ``content_by_frame`` devolve a tinta da folha revelada até o
-    frame da passada: cada registro projeta só o que ele pôde ver —
-    um traço que ainda não existia quando a passada votou não ganha
-    cópia fantasma na âncora dela. ``min_frame`` segue para as
+    frame da passada, INTERSECTADA com a máscara do checkpoint:
+    cada registro projeta só o que ele pôde ver e que ainda deveria
+    existir — um traço não revelado na passada não ganha cópia
+    fantasma na âncora dela, e um traço já apagado não continua na
+    verdade por ter sido depositado antes da borracha. ``min_frame``
+    segue para as
     máscaras espaciais (retângulo da borracha, área do redesenho).
     ``curved`` marca bundle de folha curvada: sem a pose verdadeira
     do frame o mapa plano página→grade mentiria pior que a projeção
@@ -287,11 +290,12 @@ def _project_via_registrations(
     for reg in seen.values():
         anchor, quad, sub = reg.get("anchor"), reg.get("quad"), reg.get("submitted")
         rframe = reg.get("frame")
-        # A passada só depositou o que a folha mostrava no frame
-        # dela — a máscara do checkpoint inteiro através do registro
-        # antigo cria verdade em posição que ele nunca viu.
+        # A passada só conta o que a folha mostrava no frame dela
+        # E que ainda deveria estar no checkpoint: revelado(r) ∩
+        # esperado(F). Sem a interseção a união conserva traço que a
+        # borracha já removeu — a remoção correta viraria falta.
         src = (
-            content_by_frame(rframe)
+            content_by_frame(rframe) & mask
             if (content_by_frame is not None and rframe is not None)
             else mask
         )
@@ -361,6 +365,29 @@ def _project_via_registrations(
     if len(projections) == 1:
         return projections[0]
     return np.maximum.reduce(projections)
+
+
+def _unobserved_truth(page_mask, registrations, frame, epoch, content_by_frame):
+    """Fatia da máscara esperada que nenhuma passada elegível viu.
+
+    ``content_by_frame`` limita cada registro ao revelado no frame
+    dele — traço revelado depois do último registro da época não
+    entra na união e, sozinho, deixaria a verdade vazia: canvas
+    vazio contra verdade vazia leria como captura perfeita para uma
+    escrita que o laço nunca observou. A fatia não observada ainda
+    é exigência — o chamador a projeta pela pose do checkpoint.
+    """
+    seen = np.zeros_like(page_mask)
+    for reg in registrations:
+        if not isinstance(reg, dict):
+            continue
+        rframe = reg.get("frame")
+        if rframe is not None and rframe > frame:
+            continue
+        if epoch is not None and reg.get("epoch") is not None and reg["epoch"] != epoch:
+            continue
+        seen |= page_mask if rframe is None else (content_by_frame(rframe) & page_mask)
+    return page_mask & ~seen
 
 
 def _pipeline_summary(pipeline):
@@ -602,9 +629,36 @@ def audit(video, gt_path, *, fps=None, models=None, save_masks=None, verify="man
                 epoch=snap_epoch,
                 content_by_frame=content_by_frame,
             )
-            if projected is not None:
-                return projected > 0
-            return _project(page_mask, corners, page_to_scene, canvas_hw, scene_map) > 0
+            if projected is None:
+                return (
+                    _project(page_mask, corners, page_to_scene, canvas_hw, scene_map)
+                    > 0
+                )
+            base = projected > 0
+            if content_by_frame is not None:
+                # A união por passada só cobre o que algum registro
+                # viu: tinta esperada revelada depois de todos eles
+                # ainda é exigência — projetada pela pose do
+                # checkpoint, senão a ausência dela lia como acerto.
+                unreached = _unobserved_truth(
+                    page_mask,
+                    registrations,
+                    frame,
+                    snap_epoch,
+                    content_by_frame,
+                )
+                if unreached.any():
+                    base |= (
+                        _project(
+                            unreached,
+                            corners,
+                            page_to_scene,
+                            canvas_hw,
+                            scene_map,
+                        )
+                        > 0
+                    )
+            return base
 
         # Cada passada projeta a tinta que a folha já mostrava no
         # frame dela — um traço não revelado não ganha cópia na

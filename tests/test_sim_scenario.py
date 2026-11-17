@@ -948,3 +948,65 @@ def test_project_via_registrations_conteudo_por_frame_sem_fantasma():
     # Sem conteúdo por frame a passada cega cria a cópia fantasma.
     naive = _project_via_registrations(mask, [early, late], 9, canvas_hw=(60, 80)) > 0
     assert naive.sum() > truth.sum()
+
+
+def test_project_via_registrations_apagado_sai_da_verdade():
+    """Conteúdo de passada ∩ esperado do checkpoint: a passada viu
+    dois traços, a borracha removeu um — só o sobrevivente pode
+    continuar projetando como verdade na grade."""
+    from lab.eval_scenario import _project_via_registrations
+
+    content = np.zeros((30, 30), np.uint8)
+    content[5:15, 5:15] = 255  # traço que a borracha vai remover
+    content[20:25, 20:25] = 255  # traço que sobrevive
+    expected = np.zeros_like(content)
+    expected[20:25, 20:25] = 255
+    anchor = np.float32([[0, 0], [40, 0], [40, 40], [0, 40]])
+    reg = {"anchor": anchor, "quad": anchor, "submitted": None, "frame": 6}
+    out = (
+        _project_via_registrations(
+            expected,
+            [reg],
+            9,
+            canvas_hw=(60, 80),
+            content_by_frame=lambda frame: content,
+        )
+        > 0
+    )
+    survivor = _project_via_registrations(expected, [reg], 9, canvas_hw=(60, 80)) > 0
+    assert np.array_equal(out, survivor)
+    # Sem a interseção o traço apagado também entraria na verdade.
+    naive = _project_via_registrations(content, [reg], 9, canvas_hw=(60, 80)) > 0
+    assert naive.sum() > out.sum()
+
+
+def test_unobserved_truth_marca_escrita_nunca_vista():
+    """Nenhum registro depois da revelação do traço: a fatia esperada
+    continua exigência (projetada pelo chamador pela pose do
+    checkpoint) — canvas vazio não pode ler como captura perfeita."""
+    from lab.eval_scenario import _unobserved_truth
+
+    expected = np.zeros((30, 30), np.uint8)
+    expected[5:15, 5:15] = 255
+    anchor = np.float32([[0, 0], [40, 0], [40, 40], [0, 40]])
+    early = {"anchor": anchor, "quad": anchor, "submitted": None, "frame": 2}
+    late = {"anchor": anchor, "quad": anchor, "submitted": None, "frame": 8}
+
+    def revealed(frame):
+        # A escrita só aparece a partir do frame 5.
+        return expected if frame >= 5 else np.zeros_like(expected)
+
+    # Só a passada cega (frame 2): a máscara inteira é não observada.
+    unreached = _unobserved_truth(expected, [early], 9, None, revealed)
+    assert np.array_equal(unreached, expected)
+    # Com a passada tardia vendo o traço, nada falta observar.
+    unreached = _unobserved_truth(expected, [early, late], 9, None, revealed)
+    assert not unreached.any()
+    # Época errada não conta como observação.
+    late_ep = dict(late, epoch=2)
+    unreached = _unobserved_truth(expected, [early, late_ep], 9, 1, revealed)
+    assert np.array_equal(unreached, expected)
+    # Registro sem frame assume visão plena (contrato antigo).
+    timeless = {"anchor": anchor, "quad": anchor, "submitted": None, "frame": None}
+    unreached = _unobserved_truth(expected, [timeless], 9, None, revealed)
+    assert not unreached.any()
