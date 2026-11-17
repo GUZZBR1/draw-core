@@ -130,7 +130,7 @@ a:focus-visible, button:focus-visible { outline: 2px solid #a7a071; outline-offs
   padding: 8px;
   background: #fffefa;
   box-shadow: 0 9px 28px rgba(34, 35, 31, .07), inset 0 1px rgba(255, 255, 255, .9);
-  transition: border-color 220ms ease, box-shadow 220ms ease;
+  transition: border-color 220ms ease, box-shadow 260ms ease, transform 260ms cubic-bezier(.2,.75,.25,1);
 }
 .archive-art-surface img {
   display: block;
@@ -159,8 +159,9 @@ a:focus-visible, button:focus-visible { outline: 2px solid #a7a071; outline-offs
 @keyframes archive-develop { from { opacity: 0; filter: blur(10px); } }
 .archive-card:hover .archive-art-surface,
 .archive-card:focus-visible .archive-art-surface {
+  transform: scale(1.045);
   border-color: color-mix(in srgb, var(--ink) 22%, transparent);
-  box-shadow: 0 12px 32px rgba(34, 35, 31, .12), inset 0 1px rgba(255, 255, 255, .95);
+  box-shadow: 0 14px 22px -10px rgba(34, 35, 31, .22), 0 12px 32px rgba(34, 35, 31, .1), inset 0 1px rgba(255, 255, 255, .95);
 }
 .archive-caption {
   display: flex;
@@ -595,6 +596,7 @@ body.dark .sketch-canvas { cursor: url("data:image/svg+xml,%3Csvg xmlns='http://
   .vision-title-line, .vision-copy p, .vision-signoff { width: auto; opacity: 1; }
   .vision-mist { filter: none; }
   .archive-art-surface, .archive-art-surface img, .archive-caption { animation: none; }
+  .archive-card:hover .archive-art-surface, .archive-card:focus-visible .archive-art-surface { transform: none; }
   .archive-trace { display: none; }
   .wordmark { animation: none; }
   .webcam-trigger:hover .webcam-rec, .webcam-trigger:focus-visible .webcam-rec { animation: none; opacity: 1; }
