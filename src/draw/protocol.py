@@ -192,6 +192,11 @@ def _iter_records(read, max_payload=MAX_PAYLOAD_LEN):
             )
         if version != VERSION:
             raise ProtocolError(f"versao {version} nao suportada (esperada {VERSION})")
+        if capture_ts_us < 0:
+            raise ProtocolError(
+                f"capture_ts_us negativo ({capture_ts_us}) no frame_id "
+                f"{frame_id}; fluxo corrompido"
+            )
         if payload_len == 0 or payload_len > max_payload:
             raise ProtocolError(
                 f"payload_len {payload_len} fora de 1..{max_payload} "
@@ -333,6 +338,12 @@ class HelperCapture:
         self._pace_clock_s = None
         self.last_frame_id = None
         self.last_capture_ts_ms = None
+        # Descarte na fonte: salto de frame_id sobre TODOS os registros
+        # recebidos (PROTOCOL.md: ids nunca repetem). Fica aqui e não
+        # no LatestFrameCapture porque um JPEG que o decode rejeita
+        # não é descarte do emissor.
+        self.source_dropped = 0
+        self._last_seen_id = None
         self._open(timeout, token, token_file)
 
     def _open(self, timeout, token, token_file):
@@ -371,6 +382,9 @@ class HelperCapture:
             frame_id, capture_ts_us, payload, _raw = next(self._iter)
         except (StopIteration, ProtocolError, OSError):
             return False, None
+        if self._last_seen_id is not None and frame_id > self._last_seen_id + 1:
+            self.source_dropped += frame_id - self._last_seen_id - 1
+        self._last_seen_id = frame_id
         if self._pace and self._pace_stream:
             if self._pace_origin_us is None:
                 self._pace_origin_us = capture_ts_us

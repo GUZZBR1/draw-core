@@ -330,3 +330,62 @@ def test_tools_record_rejeita_max_frames_antes_do_token(tmp_path, monkeypatch):
     monkeypatch.delenv(rx.TOKEN_ENV, raising=False)
     with pytest.raises(ValueError, match="max_frames"):
         rx.record("127.0.0.1", 1, tmp_path / "x.drawcap", max_frames=0)
+
+
+def test_source_dropped_conta_salto_sem_confundir_jpeg_ruim(tmp_path):
+    """JPEG que o decode rejeita chegou ao receptor: não é descarte
+    do emissor. Só o salto real de frame_id conta."""
+    bad = b"nao-e-jpeg"
+    frames = [
+        (0, 0, _jpeg()),
+        (1, 33_000, bad),
+        (2, 66_000, _jpeg()),
+        (5, 130_000, _jpeg()),
+    ]
+    capture = HelperCapture(str(_drawcap(tmp_path / "s.drawcap", frames)), pace=False)
+    ok, _frame = capture.read()
+    assert ok and capture.last_frame_id == 0
+    ok, frame = capture.read()
+    assert not ok and frame is None  # id 1: payload inválido, leitura falha
+    ok, _frame = capture.read()
+    assert ok and capture.last_frame_id == 2
+    ok, _frame = capture.read()
+    assert ok and capture.last_frame_id == 5
+    capture.release()
+    # ids 0,1,2,5 chegaram; o único descarte do emissor é 3 e 4.
+    assert capture.source_dropped == 2
+
+
+def test_source_dropped_conta_salto_no_socket():
+    results = []
+    payload = _jpeg()
+    records = [(0, 0, payload), (3, 33_000, payload)]
+    port, thread = _serve(TOKEN, records, results)
+    capture = HelperCapture(f"tcp://127.0.0.1:{port}", timeout=5, token=TOKEN)
+    thread.join(5)
+    capture.read()
+    capture.read()
+    capture.release()
+    assert capture.source_dropped == 2
+
+
+def test_iter_records_rejeita_ts_negativo():
+    from draw.protocol import HEADER, MAGIC, VERSION, ProtocolError, _iter_records
+
+    payload = _jpeg()
+    data = HEADER.pack(MAGIC, VERSION, 0, 0, -1000, len(payload)) + payload
+    with pytest.raises(ProtocolError, match="capture_ts_us"):
+        list(_iter_records(_reader_of(data)))
+
+
+def _reader_of(data):
+    view = memoryview(data)
+    pos = 0
+
+    def read(n):
+        nonlocal pos
+        chunk = bytes(view[pos : pos + n])
+        pos += len(chunk)
+        return chunk
+
+    return read

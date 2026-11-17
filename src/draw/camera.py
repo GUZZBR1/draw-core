@@ -85,11 +85,12 @@ class LatestFrameCapture:
         self._stopped = False
         self._error = None
         # Metadados do emissor (HelperCapture): o último id/ts publicado
-        # no pacote, o último id visto e o total descartado na fonte.
+        # no pacote e o contador de descarte na fonte, quando a fonte
+        # o expõe (saltos de frame_id contados no adaptador, sobre
+        # todos os registros — decode ruim não vira descarte falso).
         self._source_frame_id = None
         self._source_ts_ms = None
-        self._last_source_id = None
-        self._source_dropped = 0
+        self._has_source_dropped = hasattr(self._capture, "source_dropped")
 
     def start(self):
         self._thread.start()
@@ -133,19 +134,6 @@ class LatestFrameCapture:
                         return
                     if self._seq > self._taken_seq:
                         self._dropped += 1
-                    if source_frame_id is not None:
-                        # frame_id nunca repete e só cresce: um pulo
-                        # são quadros que o emissor descartou na fonte
-                        # (PROTOCOL.md) — outro contador que o
-                        # capture_dropped do consumidor.
-                        if (
-                            self._last_source_id is not None
-                            and source_frame_id > self._last_source_id + 1
-                        ):
-                            self._source_dropped += (
-                                source_frame_id - self._last_source_id - 1
-                            )
-                        self._last_source_id = source_frame_id
                     self._seq += 1
                     self._frame = frame
                     self._captured_at = captured_at
@@ -211,8 +199,8 @@ class LatestFrameCapture:
                 "capture_seq": self._seq,
                 "capture_dropped": self._dropped,
             }
-            if self._last_source_id is not None:
-                fields["capture_source_dropped"] = self._source_dropped
+            if self._has_source_dropped:
+                fields["capture_source_dropped"] = self._capture.source_dropped
             return fields
 
     @property

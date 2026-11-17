@@ -406,12 +406,20 @@ class _HelperLikeCapture:
         self._records = list(records)
         self.last_frame_id = None
         self.last_capture_ts_ms = None
+        self.source_dropped = 0
+        self._last_seen_id = None
 
     def read(self):
         if not self._records:
             time.sleep(0.05)
             return False, None
         self.last_frame_id, self.last_capture_ts_ms = self._records.pop(0)
+        if (
+            self._last_seen_id is not None
+            and self.last_frame_id > self._last_seen_id + 1
+        ):
+            self.source_dropped += self.last_frame_id - self._last_seen_id - 1
+        self._last_seen_id = self.last_frame_id
         frame = np.full((8, 8, 3), 7, dtype=np.uint8)
         return True, frame
 
@@ -444,7 +452,8 @@ def test_source_metadata_reaches_packet():
 
 
 @pytest.mark.slow
-def test_source_gaps_count_as_source_dropped():
+def test_source_dropped_counter_reaches_stats():
+    """stats() repassa o contador de descarte na fonte do adaptador."""
     capture = _HelperLikeCapture([(0, 0), (1, 33), (4, 100), (5, 133)])
     source = LatestFrameCapture(capture).start()
     time.sleep(0.2)
