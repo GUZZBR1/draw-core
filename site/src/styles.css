@@ -74,21 +74,29 @@ button { color: inherit; font: inherit; }
 .nav-link.is-active::after, .product-label.is-active .product-word::after { transform: scaleX(1); }
 .vision-link { padding: 0; border: 0; background: transparent; cursor: pointer; }
 .nav-right { flex: 0 0 auto; }
-.location { transition: opacity 180ms ease; white-space: nowrap; }
-.location { position: relative; cursor: pointer; }
-.location::after {
+.location { position: relative; display: inline-block; white-space: nowrap; cursor: default; }
+.location-main { display: block; transition: transform 240ms cubic-bezier(.2,.75,.25,1), color 200ms ease; }
+.location-more {
   position: absolute;
+  top: 100%;
   right: 0;
-  bottom: -4px;
   left: 0;
-  height: 1px;
-  transform: scaleX(0);
-  transform-origin: right;
-  background: var(--accent);
-  content: '';
-  transition: transform 240ms cubic-bezier(.2,.75,.25,1);
+  display: flex;
+  justify-content: center;
+  margin-top: -2px;
+  padding-top: 3px;
+  line-height: 1;
+  border-top: 1px solid color-mix(in srgb, var(--ink) 28%, transparent);
+  opacity: 0;
+  transform: translateY(-4px);
+  pointer-events: none;
+  transition: opacity 200ms ease, transform 240ms cubic-bezier(.2,.75,.25,1);
 }
-.location:hover::after { transform: scaleX(1); }
+.location:hover .location-main, .location:focus-visible .location-main { transform: translateY(-11px); color: var(--ink); }
+.location:hover .location-more, .location:focus-visible .location-more { opacity: 1; transform: translateY(-11px); }
+@media (prefers-reduced-motion: reduce) {
+  .location-main, .location-more { transition: none; }
+}
 .theme-toggle { background: color-mix(in srgb, var(--paper) 24%, transparent); }
 .theme-toggle:hover { border-color: color-mix(in srgb, var(--ink) 38%, transparent); }
 a:focus-visible, button:focus-visible { outline: 2px solid #a7a071; outline-offset: 4px; }
@@ -511,14 +519,14 @@ body.dark .sketch-canvas { cursor: url("data:image/svg+xml,%3Csvg xmlns='http://
 }
 .vision-portrait-canvas { display: block; width: min(100%, 440px); height: auto; }
 .vision-headline {
-  @apply mb-0 mt-6 font-mono text-[clamp(32px,7.6vw,86px)] font-normal leading-[1.12] tracking-[-.055em] text-ink;
+  @apply mb-0 mt-6 font-sans text-[clamp(36px,7.4vw,92px)] font-medium leading-[1.04] tracking-[-.045em] text-ink; word-spacing: .1em;
 }
 .vision-title-line {
   display: block;
-  min-height: 1.12em;
+  min-height: 1.04em;
   white-space: pre;
 }
-.vision-title-line:first-child { min-height: 1.12em; }
+.vision-title-line:first-child { min-height: 1.04em; }
 .vision-headline em, .product-headline em {
   @apply font-serif font-normal;
   letter-spacing: -.07em;

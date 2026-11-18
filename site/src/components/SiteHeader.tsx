@@ -330,17 +330,13 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
             vision
           </Link>
           <div className="nav-right flex items-center gap-3 sm:gap-5">
-            <motion.a
+            <span
               className="location font-mono text-[10px] tracking-[.025em] text-muted sm:text-[16px]"
-              whileHover={{ y: -1, color: 'var(--ink)' }}
-              transition={{ duration: 0.2, ease: 'easeOut' }}
-              href="https://www.google.com/maps/search/?api=1&query=S%C3%A3o%20Paulo%2C%20Brazil"
-              target="_blank"
-              rel="noopener noreferrer"
-              aria-label="São Paulo, Brazil no Google Maps"
+              tabIndex={0}
             >
-              São Paulo, Brazil
-            </motion.a>
+              <span className="location-main">São Paulo, Brazil</span>
+              <span className="location-more">São José dos Campos</span>
+            </span>
             <motion.button
               className="theme-toggle min-h-[34px] min-w-[56px] rounded-full border border-ink/15 bg-paper/20 px-3 font-mono text-[10px] text-ink transition duration-300 hover:-translate-y-px hover:border-ink/40 hover:bg-ink/5 active:translate-y-0 active:scale-[.97] sm:min-h-[42px] sm:min-w-[78px] sm:px-4 sm:text-[13px]"
               style={{ scaleY: themeButtonScale, transformOrigin: 'center' }}
