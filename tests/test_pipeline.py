@@ -69,7 +69,8 @@ class _SyncDetectionWorker:
 
 
 class _FakeInkWorker:
-    def __init__(self, display=None):
+    def __init__(self, display=None, display_generation=None):
+        self.display_generation = display_generation
         self.error = None
         self.generation = 0
         self.submitted = []  # (generation, corners, visible, coverage)
@@ -93,6 +94,11 @@ class _FakeInkWorker:
         )
 
     def poll_display(self, generation, version):
+        if (
+            self.display_generation is not None
+            and generation != self.display_generation
+        ):
+            return None
         return self._display
 
     def set_hand_presence(self, present, moved=False):
@@ -603,3 +609,37 @@ def test_reset_source_restarts_the_ink_as_a_new_page():
         loop.step(FramePacket(image=frame, sequence=i, captured_at=1000.0 + i * 0.1))
     assert len(ink.new_generation_calls) == opened + 1
     assert ink.new_generation_calls[-1] is False, "pagina nova, sem identidade"
+
+
+def test_reset_source_blocks_unread_snapshots_of_the_old_generation():
+    """Camera nova sem folha: a tinta da camera antiga nao volta nem salva."""
+    confirmed = np.zeros((100, 100), np.uint8)
+    confirmed[10:20, 10:20] = 255
+    snapshot = InkDisplaySnapshot(
+        version=7, confirmed=confirmed, provisional=np.zeros((100, 100), np.uint8)
+    )
+    ink = _FakeInkWorker()
+    scene = {"sheet": True}
+    loop, _det, _ink = _make_loop(
+        lambda _i: (
+            (QUAD.copy(), "paper", None) if scene["sheet"] else (None, "none", None)
+        ),
+        ink=ink,
+    )
+    loop._render_display = lambda _c, _p, out=None: np.full((100, 100, 3), 9, np.uint8)
+    _drive(loop, 20)
+    assert loop.ink_session_open is True
+    old_generation = ink.generation
+    ink._display = snapshot
+    ink.display_generation = old_generation  # snapshot ainda nao lido da camera antiga
+
+    scene["sheet"] = False  # a camera nova nao ve folha
+    loop.reset_source(since=1000.0)
+    frame = _frame()
+    for i in range(1, 8):
+        loop.step(FramePacket(image=frame, sequence=i, captured_at=1000.0 + i * 0.1))
+        loop.collect_ink()
+    assert loop.accumulated_canvas is None
+    assert loop.clean_mask is None and loop.clean_provisional_mask is None
+    assert loop.ink_session_open is False
+    assert loop.clean_generation != old_generation

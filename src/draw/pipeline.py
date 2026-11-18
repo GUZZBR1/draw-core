@@ -314,8 +314,9 @@ class Pipeline:
         quad e cinza de exibicao, mascaras e historico de cantos
         pertencem a camera anterior e sao descartados. A tinta nao e
         preservada: o canvas reinicia, como ao virar a folha, e a
-        primeira folha da camera nova abre uma geracao limpa.
-        Resultados de deteccao capturados antes de since (em voo na
+        primeira folha da camera nova abre uma geracao limpa (a geracao
+        antiga e invalidada: um snapshot dela ainda nao lido nao volta
+        para a tela nem para o Save). Resultados de deteccao capturados antes de since (em voo na
         camera antiga) tambem sao descartados.
         """
         self.ink_session_open = False
@@ -323,6 +324,11 @@ class Pipeline:
         self.clean_mask = None
         self.clean_provisional_mask = None
         self.accumulated_canvas = None
+        # Nenhuma geracao da trabalhadora e negativa: a colheita deixa de
+        # ver snapshots nao lidos da camera antiga ate a primeira folha
+        # nova abrir a sua geracao.
+        self.clean_generation = -1
+        self.clean_display_version = 0
         self.tracker.reset()
         self.corner_history.clear()
         self.display_corners = None
