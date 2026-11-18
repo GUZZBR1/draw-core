@@ -227,6 +227,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._identity_reference = None
         self._identity_reference_corners = None
         self._identity_recovery_requested = False
+        self._identity_source_changed = False
         self._identity_defer_count = 0
         self._identity_switch_votes = 0
         # Degrau entre quads consecutivos (a entrada de cadencia
@@ -291,14 +292,21 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._thread.start()
         return self
 
-    def new_generation(self, preserve_identity=False):
+    def new_generation(self, preserve_identity=False, source_changed=False):
         """Abre geracao; opcionalmente identifica a pagina anterior.
 
         preserve_identity guarda uma copia do canvas confirmado para
         que a primeira passada possa decidir, por conteudo registrado,
         se uma folha que voltou e a mesma pagina em outra pose.
+        source_changed marca que a folha voltou por OUTRA camera: os
+        cantos da ancora pertencem a outro espaco de camera, entao nao
+        entram no registro. O conteudo ja chega na grade da pagina
+        (cada warp retifica com os seus cantos), a decisao compara
+        tinta em coordenadas de pagina e, se for a mesma pagina, a
+        ancora passa para os cantos da camera nova.
         """
         with self._condition:
+            self._identity_source_changed = bool(preserve_identity and source_changed)
             self._identity_recovery_requested = bool(preserve_identity)
             self._identity_defer_count = 0
             self._identity_switch_votes = 0
@@ -793,6 +801,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     if first_pass
                     else self._anchor_corners
                 )
+                if recovering and self._identity_source_changed:
+                    anchor = None
                 registration_corners = corners
                 if not recovering and corners is not None:
                     anchor_rebased = False
@@ -1132,10 +1142,20 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                             if reg_anchor_median and corners is not None
                             else []
                         )
+                    elif self._identity_source_changed:
+                        # Mesma pagina vista por outra camera: o canvas fica
+                        # e a ancora passa para o espaco da camera nova.
+                        self._anchor_corners = corners
+                        self._anchor_samples = (
+                            [corners.copy()]
+                            if reg_anchor_median and corners is not None
+                            else []
+                        )
                     # Keep the old anchor when identity matched: all future
                     # observations remain registered into the same canvas.
                     self._identity_reference = None
                     self._identity_reference_corners = None
+                    self._identity_source_changed = False
                     self._identity_recovery_requested = False
                     self._identity_defer_count = 0
                     self._identity_switch_votes = 0

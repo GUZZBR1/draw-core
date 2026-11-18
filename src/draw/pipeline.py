@@ -194,6 +194,7 @@ class Pipeline:
         self.display_corners = None
         self.display_gray = None
         self._detections_since = 0.0
+        self._source_changed_pending = False
         # Observabilidade (sem efeito no laco): ultimo evento do
         # rastreador e contagem das aberturas de geracao por causa.
         self.last_tracker_event = None
@@ -338,6 +339,7 @@ class Pipeline:
         """
         if self.ink_session_open:
             self._close_ink_session()
+        self._source_changed_pending = self.clean_recovery_pending
         self.tracker.reset()
         self.corner_history.clear()
         self.display_corners = None
@@ -507,10 +509,12 @@ class Pipeline:
                 # tecla s salvava esse canvas errado.
                 self.accumulated_canvas = None
                 self.generation_events["reopen"] += 1
+                extra = {"source_changed": True} if self._source_changed_pending else {}
                 self.clean_generation = self.ink_worker.new_generation(
-                    preserve_identity=self.clean_recovery_pending
+                    preserve_identity=self.clean_recovery_pending, **extra
                 )
                 self.clean_recovery_pending = False
+                self._source_changed_pending = False
                 self.clean_display_version = 0
                 self.clean_provisional_mask = None
                 self.corner_history.clear()

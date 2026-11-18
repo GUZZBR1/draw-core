@@ -380,3 +380,31 @@ def test_new_generation_resets_quarantine_count(worker, preserve):
     assert worker._identity_defer_count == 0
     if preserve:
         assert last_event(worker)["decision"] == "same_page"
+
+
+def test_source_change_keeps_confirmed_ink_and_reanchors_to_the_new_camera(worker):
+    """Mesma pagina por outra camera: o canvas fica, a ancora vira a nova."""
+    canvas = settle(worker)
+    new_camera = QUAD * 2.0 + [320.0, 40.0]
+    generation = worker.new_generation(preserve_identity=True, source_changed=True)
+    drive(worker, generation, corners=new_camera)
+    drive(worker, generation, corners=new_camera)
+    assert last_event(worker)["decision"] == "same_page"
+    np.testing.assert_array_equal(worker._anchor_corners, new_camera)
+    np.testing.assert_array_equal(worker.poll(generation, 0).confirmed, canvas)
+    for _ in range(3):
+        drive(worker, generation, corners=new_camera)
+    np.testing.assert_array_equal(worker.poll(generation, 0).confirmed, canvas)
+    assert worker._identity_source_changed is False
+
+
+def test_same_camera_recovery_still_registers_against_the_old_anchor(worker):
+    """Sem source_changed o comportamento de queda do rastreador nao muda."""
+    settle(worker)
+    anchor = worker._anchor_corners.copy()
+    generation = worker.new_generation(preserve_identity=True)
+    assert worker._identity_source_changed is False
+    drive(worker, generation)
+    drive(worker, generation)
+    assert last_event(worker)["decision"] == "same_page"
+    np.testing.assert_array_equal(worker._anchor_corners, anchor)

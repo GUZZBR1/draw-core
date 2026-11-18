@@ -74,12 +74,14 @@ class _FakeInkWorker:
         self.generation = 0
         self.submitted = []  # (generation, corners, visible, coverage)
         self.new_generation_calls = []
+        self.source_changed_calls = []
         self.presence_calls = []
         self._display = display
 
-    def new_generation(self, preserve_identity=False):
+    def new_generation(self, preserve_identity=False, source_changed=False):
         self.generation += 1
         self.new_generation_calls.append(preserve_identity)
+        self.source_changed_calls.append(source_changed)
         return self.generation
 
     def submit(self, page):
@@ -602,3 +604,5 @@ def test_reset_source_closes_the_ink_session_and_keeps_identity_pending():
         loop.step(FramePacket(image=frame, sequence=i, captured_at=1000.0 + i * 0.1))
     assert len(ink.new_generation_calls) == opened + 1
     assert ink.new_generation_calls[-1] is True, "reabre preservando a identidade"
+    assert ink.source_changed_calls[-1] is True, "a folha veio de outra camera"
+    assert ink.source_changed_calls[:opened] == [False] * opened
