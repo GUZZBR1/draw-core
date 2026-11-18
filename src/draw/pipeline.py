@@ -193,6 +193,7 @@ class Pipeline:
         self.last_det_seq = 0
         self.display_corners = None
         self.display_gray = None
+        self._detections_since = 0.0
         # Observabilidade (sem efeito no laco): ultimo evento do
         # rastreador e contagem das aberturas de geracao por causa.
         self.last_tracker_event = None
@@ -306,6 +307,24 @@ class Pipeline:
                 )
             )
 
+    def reset_source(self, since):
+        """Fronteira de fonte: descarta o estado em coordenadas da camera.
+
+        A troca de camera muda resolucao e cena: cantos do rastreador,
+        quad e cinza de exibicao, mascaras e historico de cantos
+        pertencem a camera anterior. A tinta confirmada fica; sem
+        folha no rastreador, a identidade da pagina decide quando ela
+        voltar. Resultados de deteccao capturados antes de since (em
+        voo na camera antiga) sao descartados.
+        """
+        self.tracker.reset()
+        self.corner_history.clear()
+        self.display_corners = None
+        self.display_gray = None
+        self._coverage_mask = None
+        self._hand_mask_det = None
+        self._detections_since = since
+
     def step(self, packet):
         """Um quadro do laco sem marcadores.
 
@@ -319,6 +338,9 @@ class Pipeline:
         """
         frame = packet.image
         det_result = self.detection_worker.poll(self.last_det_seq)
+        if det_result is not None and det_result.captured_at < self._detections_since:
+            self.last_det_seq = det_result.sequence
+            det_result = None
         if det_result is not None:
             self.last_det_seq = det_result.sequence
             detected_corners = det_result.corners

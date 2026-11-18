@@ -452,12 +452,14 @@ def _draw_wordmark(studio, size, p, origin):
     studio[y0:y1, x0:x1] = (sub * (1.0 - alpha) + color * alpha).astype(np.uint8)
 
 
-def camera_menu_layout(size, cam_shape, canvas_shape, count):
+def camera_menu_layout(size, cam_shape, canvas_shape, count, first=0):
     """Geometria da bolinha de cameras e do menu que sobe dela.
 
     A bolinha fica no canto inferior direito da area escura da camera,
-    fora da imagem; o menu
-    abre acima dela, alinhado a direita. Devolve retangulos (x, y, w, h).
+    fora da imagem; o menu abre acima dela, alinhado a direita. O menu
+    mostra so as linhas que cabem acima da bolinha (visible); first e a
+    primeira linha visivel, para rolar a lista. Devolve retangulos
+    (x, y, w, h).
     """
     geo = _studio_template(cam_shape, canvas_shape, False, tuple(size))[1]
     sc = geo["scale"]
@@ -469,18 +471,26 @@ def camera_menu_layout(size, cam_shape, canvas_shape, count):
     cx = geo["cam_area_x"] + geo["cam_area_w"] - k(20)
     cy = geo["panel_y"] + geo["panel_h"] - k(20)
     width, row_h, pad = k(200), k(28), k(6)
-    height = max(1, count) * row_h + 2 * pad
+    bottom = cy - r - k(10)
+    fit = max(1, (bottom - (geo["panel_y"] + k(6)) - 2 * pad) // row_h)
+    count = max(1, count)
+    visible = min(count, fit)
+    first = max(0, min(first, count - visible))
+    height = visible * row_h + 2 * pad
     left = cx + r - width
-    top = cy - r - k(10) - height
+    top = bottom - height
     rows = [
         (left + pad, top + pad + i * row_h, width - 2 * pad, row_h)
-        for i in range(max(1, count))
+        for i in range(visible)
     ]
     return {
         "dot": (cx, cy, r),
         "card": (left, top, width, height),
         "rows": rows,
         "scale": sc,
+        "first": first,
+        "visible": visible,
+        "count": count,
     }
 
 
@@ -573,15 +583,17 @@ def _row_glow(studio, rect, hover, progress):
     rx, ry, rw, rh = rect
     if hover <= 0.01:
         return
-    sub = studio[ry : ry + rh, rx : rx + rw].astype(np.float32)
-    yy, xx = np.mgrid[0:rh, 0:rw].astype(np.float32)
-    d = np.hypot((xx - rw / 2) / (rw / 2), (yy - rh / 2) / (rh / 2))
+    x0, y0 = max(0, rx), max(0, ry)
+    x1, y1 = min(studio.shape[1], rx + rw), min(studio.shape[0], ry + rh)
+    if x1 <= x0 or y1 <= y0:
+        return
+    sub = studio[y0:y1, x0:x1].astype(np.float32)
+    yy, xx = np.mgrid[y0:y1, x0:x1].astype(np.float32)
+    d = np.hypot((xx - (rx + rw / 2)) / (rw / 2), (yy - (ry + rh / 2)) / (rh / 2))
     glow = np.clip(1.0 - d / (0.3 + 1.2 * hover), 0.0, 1.0) ** 1.5
     glow = (glow * 0.26 * min(1.0, hover * 2.0) * progress)[..., None]
     accent = np.array(COLOR_ACCENT_YELLOW, np.float32)
-    studio[ry : ry + rh, rx : rx + rw] = (sub * (1.0 - glow) + accent * glow).astype(
-        np.uint8
-    )
+    studio[y0:y1, x0:x1] = (sub * (1.0 - glow) + accent * glow).astype(np.uint8)
 
 
 def _draw_camera_menu(studio, layout, items, progress):
@@ -794,11 +806,43 @@ def _draw_settings_menu(studio, layout, items, progress):
         _draw_toggle(studio, (tx, ty, tw, tg), on_p, direction, progress, bg)
 
 
-def _draw_hud(studio, geo, sc, lines):
+def _draw_hud_footer(studio, geo, sc, lines, size):
+    """Painel numa linha so no rodape, quando nao ha margem ao lado da camera."""
+
+    def k(v):
+        return max(1, int(round(v * sc)))
+
+    font, th = cv2.FONT_HERSHEY_SIMPLEX, max(1, int(round(sc)))
+    left = button_rects(size)[-1]
+    left = left[0] + left[2] + k(24)
+    right = settings_menu_layout(size, 1)["gear"]
+    right = right[0] - right[2] - k(20)
+    segments = []
+    for line in lines:
+        segments.extend(line)
+        segments.append(("    ", COLOR_TEXT_MUTED))
+    base_fs = 0.38 * sc
+
+    def width(fs):
+        return sum(cv2.getTextSize(t, font, fs, th)[0][0] for t, _ in segments)
+
+    needed = width(base_fs)
+    factor = min(1.0, (right - left) / needed) if needed > 0 else 1.0
+    if factor < 0.6:
+        return
+    fs = base_fs * factor
+    tx, ty = left, size[1] - k(36) // 2 + k(4)
+    for text, color in segments:
+        cv2.putText(studio, text, (tx, ty), font, fs, color, th, cv2.LINE_AA)
+        tx += cv2.getTextSize(text, font, fs, th)[0][0]
+
+
+def _draw_hud(studio, geo, sc, lines, size):
     """Informacoes no canto superior esquerdo da area escura da camera.
 
     O painel nunca passa da margem escura a esquerda da imagem: se o texto
-    nao couber, a fonte diminui; se ainda assim nao couber, ele some.
+    nao couber, a fonte diminui; se a margem for pequena demais (camera
+    larga, tela cheia), o painel vai para o rodape numa linha so.
     """
     if not lines:
         return
@@ -822,6 +866,7 @@ def _draw_hud(studio, geo, sc, lines):
     needed = width(base_fs)
     factor = min(1.0, avail / needed) if needed > 0 else 1.0
     if factor < 0.6:
+        _draw_hud_footer(studio, geo, sc, lines, size)
         return
     fs = base_fs * factor
     line_h = max(1, int(round(18 * sc * factor)))
@@ -987,12 +1032,16 @@ def compose_view(
 
     menu = camera_menu or {}
     layout = camera_menu_layout(
-        size, camera_img.shape, canvas_img.shape, len(menu.get("items", ()))
+        size,
+        camera_img.shape,
+        canvas_img.shape,
+        menu.get("count", len(menu.get("items", ()))),
+        menu.get("first", 0),
     )
     _draw_camera_dot(studio, layout, menu.get("dot", 0.0), menu.get("opened", False))
     _draw_camera_menu(studio, layout, menu.get("items", ()), menu.get("progress", 0.0))
 
-    _draw_hud(studio, geo, sc, _hud_lines(studio, hud or {}))
+    _draw_hud(studio, geo, sc, _hud_lines(studio, hud or {}), size)
 
     settings = settings_menu or {}
     gear = settings_menu_layout(size, len(settings.get("items", ())))

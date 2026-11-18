@@ -564,3 +564,23 @@ def test_drop_without_persist_clears_canvas_and_provisional():
     assert loop.clean_mask is None
     assert loop.clean_provisional_mask is None
     assert loop.accumulated_canvas is None
+
+
+def test_reset_source_drops_camera_space_state_and_stale_detections():
+    """Troca de camera: estado da camera anterior nao vaza para a nova."""
+    loop, det, _ink = _make_loop(lambda _i: (QUAD.copy(), "paper", None))
+    _drive(loop, 40)
+    assert loop.tracker.corners is not None
+    assert loop.display_corners is not None and loop.display_gray is not None
+
+    det.submit(_frame(), 1.0)  # deteccao em voo na camera antiga
+    loop.reset_source(since=1000.0)
+    assert loop.tracker.corners is None
+    assert loop.display_corners is None and loop.display_gray is None
+    assert len(loop.corner_history) == 0
+
+    small = np.zeros((480, 640, 3), dtype=np.uint8)
+    loop.step(FramePacket(image=small, sequence=1, captured_at=1001.0))
+    assert loop.tracker.corners is None, "resultado velho nao pode reviver o quad"
+    loop.step(FramePacket(image=small, sequence=2, captured_at=1002.0))
+    assert loop.tracker.corners is not None, "deteccao da camera nova vale"

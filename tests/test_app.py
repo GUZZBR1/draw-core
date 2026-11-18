@@ -605,3 +605,78 @@ def test_apply_fullscreen_only_calls_cv2_when_the_option_changes(monkeypatch):
     app_module._apply_fullscreen()
     assert [c[2] for c in calls][-1] == app_module.cv2.WINDOW_NORMAL
     assert len(calls) == 2
+
+
+def test_mouse_events_are_mapped_back_to_layout_coordinates(monkeypatch):
+    monkeypatch.setitem(app_module._view_map, "scale", 0.5)
+    monkeypatch.setitem(app_module._view_map, "offset", (100, 40))
+    monkeypatch.setitem(app_module._mouse, "pos", None)
+    app_module._on_mouse(app_module.cv2.EVENT_MOUSEMOVE, 300, 200, 0, None)
+    assert app_module._mouse["pos"] == (400, 320)
+
+
+def test_window_size_uses_the_real_rect_down_to_a_small_floor(monkeypatch):
+    monkeypatch.setattr(app_module, "_window_sized", {True})
+    monkeypatch.setattr(app_module, "_window_rect", lambda: (400, 200))
+    assert app_module._window_size() == (400, 200)
+    monkeypatch.setattr(app_module, "_window_rect", lambda: (300, 100))
+    assert app_module._window_size() == (1600, 640)
+
+
+def test_camera_menu_with_many_cameras_scrolls_and_selects_absolute_rows(monkeypatch):
+    state = _reset_camera_menu(monkeypatch)
+    monkeypatch.setattr(app_module, "_window_size", lambda: (1600, 640))
+    monkeypatch.setattr(
+        app_module,
+        "_list_cameras",
+        lambda current: [(f"Camera {i}", i) for i in range(30)],
+    )
+    monkeypatch.setitem(state, "scroll", 0)
+    cx, cy, _ = app_module._camera_layout()["dot"]
+    assert app_module._camera_click(cx, cy) is True
+    fx = app_module._camera_fx()
+    layout = app_module._camera_layout()
+    assert len(fx["items"]) == layout["visible"] < 30
+    monkeypatch.setitem(state, "scroll", 3)
+    layout = app_module._camera_layout()
+    assert layout["first"] == 3
+    rx, ry, _, _ = layout["rows"][0]
+    assert app_module._camera_click(rx + 3, ry + 3) is True
+    assert state["request"] == 3
+
+
+def test_open_ready_source_requires_a_first_frame(monkeypatch):
+    class _Dead:
+        released = 0
+
+        def isOpened(self):
+            return True
+
+        def read(self):
+            return False, None
+
+        def release(self):
+            _Dead.released += 1
+
+    monkeypatch.setattr(app_module, "open_capture", lambda *a, **k: _Dead())
+    with pytest.raises(RuntimeError, match="nao entregou quadros"):
+        app_module._open_ready_source("x", ready_seconds=0.3)
+
+    class _Live(_Dead):
+        def read(self):
+            return True, np.zeros((8, 8, 3), np.uint8)
+
+    monkeypatch.setattr(app_module, "open_capture", lambda *a, **k: _Live())
+    source = app_module._open_ready_source("x", ready_seconds=2.0)
+    try:
+        assert source.wait_next(0, timeout=1.0) is not None
+    finally:
+        source.stop()
+
+
+def test_waiting_view_keeps_the_controls_available():
+    from draw import view as view_module
+
+    waiting = app_module._waiting_view()
+    view = view_module.compose_view(waiting, view_module.blank_sheet())
+    assert waiting.shape == (720, 1280, 3) and view.shape == (640, 1600, 3)

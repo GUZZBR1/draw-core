@@ -608,6 +608,7 @@ def _button_at(x, y):
 
 
 _CAMERA_MENU_SECONDS = 0.18
+_SWITCH_READY_SECONDS = 5.0
 _TOGGLE_SECONDS = 0.35
 _REACT_SECONDS = 0.9
 _camera_menu = {
@@ -622,6 +623,7 @@ _camera_menu = {
     "notice_until": 0.0,
     "request": None,
     "time": None,
+    "scroll": 0,
     "cam_shape": (512, 512, 3),
 }
 
@@ -653,6 +655,7 @@ def _camera_layout():
         _camera_menu["cam_shape"],
         view_module.blank_sheet().shape,
         count,
+        _camera_menu["scroll"],
     )
 
 
@@ -664,6 +667,7 @@ def _camera_click(x, y):
         row = view_module.row_at(layout, (x, y))
         on_dot = view_module.point_in_dot(layout, (x, y))
         state["open"] = False
+        row = None if row is None else layout["first"] + row
         if row is not None and row < len(state["items"]):
             source = state["items"][row][1]
             if source != state["current"] and state["busy"] is None:
@@ -672,6 +676,7 @@ def _camera_click(x, y):
         return on_dot
     if view_module.point_in_dot(layout, (x, y)):
         state["items"] = _list_cameras(state["current"])
+        state["scroll"] = 0
         state["open"] = True
         _settings["open"] = False
         return True
@@ -697,6 +702,8 @@ def _camera_fx():
     hovered = (
         view_module.row_at(layout, pos) if pos is not None and state["open"] else None
     )
+    if hovered is not None:
+        hovered += layout["first"]
     for i in range(count):
         goal = 1.0 if hovered == i else 0.0
         state["rows"][i] += max(-step, min(step, goal - state["rows"][i]))
@@ -709,11 +716,14 @@ def _camera_fx():
         items.append(
             {"label": label, "selected": source == state["current"], "hover": hover}
         )
+    first = layout["first"]
     return {
         "dot": state["dot"],
         "opened": state["open"],
         "progress": state["progress"],
-        "items": items,
+        "items": items[first : first + layout["visible"]],
+        "count": count,
+        "first": first,
     }
 
 
@@ -820,8 +830,17 @@ def _hud_values():
     }
 
 
+_view_map = {"scale": 1.0, "offset": (0, 0)}
+
+
 def _on_mouse(event, x, y, flags, param):
+    scale, (ox, oy) = _view_map["scale"], _view_map["offset"]
+    x, y = int((x - ox) / scale), int((y - oy) / scale)
     _mouse["pos"] = (x, y)
+    if event == cv2.EVENT_MOUSEWHEEL and _camera_menu["open"]:
+        step = -1 if cv2.getMouseWheelDelta(flags) > 0 else 1
+        _camera_menu["scroll"] = max(0, _camera_menu["scroll"] + step)
+        return
     if event == cv2.EVENT_LBUTTONUP and (_settings_click(x, y) or _camera_click(x, y)):
         _button_state["pressed"] = None
         return
@@ -936,7 +955,7 @@ def _window_size():
     """Tamanho atual da area de desenho da janela (padrao antes de abrir)."""
     default = (1600, 640)
     rect = _window_rect() if _window_sized else None
-    return rect if rect and rect[0] >= 640 and rect[1] >= 256 else default
+    return rect if rect and rect[0] >= 320 and rect[1] >= 160 else default
 
 
 def _open_window(fullscreen):
@@ -968,6 +987,40 @@ def _apply_fullscreen():
         )
 
 
+def _open_ready_source(target, helper_token_file=None, ready_seconds=None):
+    """Abre a fonte e so a devolve depois do primeiro quadro; senao levanta.
+
+    A fonte antiga so e trocada por uma que ja entregou quadro: uma
+    camera que abre mas nao le deixa a atual no ar.
+    """
+    capture = open_capture(target, helper_token_file=helper_token_file)
+    candidate = LatestFrameCapture(capture).start()
+    timeout = _SWITCH_READY_SECONDS if ready_seconds is None else ready_seconds
+    if candidate.wait_next(0, timeout=timeout) is None:
+        candidate.stop(force=False)
+        raise RuntimeError("a camera abriu mas nao entregou quadros")
+    return candidate
+
+
+def _waiting_view():
+    """Quadro de camera vazio com o aviso, para a interface seguir completa."""
+    image = np.zeros((720, 1280, 3), dtype=np.uint8)
+    for i, text in enumerate(
+        ("Aguardando quadros da fonte", "A leitura esta lenta ou parada.")
+    ):
+        cv2.putText(
+            image,
+            text,
+            (320, 330 + i * 48),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0 if i == 0 else 0.7,
+            (230, 235, 235) if i == 0 else (150, 156, 154),
+            2 if i == 0 else 1,
+            cv2.LINE_AA,
+        )
+    return image
+
+
 def _show(image):
     """Mostra o quadro na janela sem deixar o Qt reescalar a imagem.
 
@@ -982,12 +1035,14 @@ def _show(image):
         cv2.resizeWindow(_WINDOW, iw, ih)
         _window_sized.add(True)
     w, h = _window_rect() or (0, 0)
+    _view_map.update(scale=1.0, offset=(0, 0))
     if w > 0 and h > 0 and (w, h) != (iw, ih):
         scale = min(w / iw, h / ih)
         nw, nh = max(1, round(iw * scale)), max(1, round(ih * scale))
         interp = cv2.INTER_AREA if scale < 1 else cv2.INTER_LANCZOS4
         image = cv2.resize(image, (nw, nh), interpolation=interp)
         dx, dy = max(0, w - nw), max(0, h - nh)
+        _view_map.update(scale=nw / iw, offset=(dx // 2, dy // 2))
         image = cv2.copyMakeBorder(
             image,
             dy // 2,
@@ -1302,6 +1357,7 @@ def run(
 
         _camera_menu["current"] = parse_source(source)
         seq_offset = 0
+        reset_source = False
         switch = {"thread": None, "result": None}
 
         def start_switch(target):
@@ -1309,8 +1365,8 @@ def run(
 
             def work():
                 try:
-                    capture = open_capture(target, helper_token_file=helper_token_file)
-                    switch["result"] = (target, capture, None)
+                    candidate = _open_ready_source(target, helper_token_file)
+                    switch["result"] = (target, candidate, None)
                 except Exception as error:
                     switch["result"] = (target, None, error)
 
@@ -1318,7 +1374,7 @@ def run(
             switch["thread"].start()
 
         def service_camera_switch():
-            nonlocal frame_source, last_seq, seq_offset
+            nonlocal frame_source, last_seq, seq_offset, reset_source
             target = _camera_menu["request"]
             if target is not None and switch["thread"] is None:
                 _camera_menu["request"] = None
@@ -1327,17 +1383,18 @@ def run(
             if result is None:
                 return
             switch["result"], switch["thread"] = None, None
-            target, capture, error = result
+            target, candidate, error = result
             _camera_menu["busy"] = None
             if error is not None:
                 print(f"Nao consegui abrir {_camera_label(target)}: {error}")
                 _camera_menu["notice"] = target
                 _camera_menu["notice_until"] = time.monotonic() + 2.5
                 return
-            old, frame_source = frame_source, LatestFrameCapture(capture).start()
-            threading.Thread(target=old.stop, daemon=True).start()
+            old, frame_source = frame_source, candidate
+            old.stop(force=False)
             seq_offset += last_seq
             last_seq = 0
+            reset_source = True
             _camera_menu["current"] = target
             print(f"Camera trocada para {_camera_label(target)}.")
 
@@ -1371,16 +1428,8 @@ def run(
                 # segue viva com o ultimo quadro. As teclas sao
                 # atendidas sem realimentar o quadro velho no pipeline.
                 if ui_inputs is None:
-                    _show(
-                        view_module.message_view(
-                            last_view,
-                            "Aguardando quadros da fonte",
-                            [
-                                "A leitura esta lenta ou parada.",
-                                "q ou ESC sai; s salva o canvas retido.",
-                            ],
-                        )
-                    )
+                    ui_inputs = (_waiting_view(), view_module.blank_sheet())
+                    render_ui(*ui_inputs)
                 elif _ui_signature(_ui_state()) != ui_signature:
                     render_ui(*ui_inputs)
                 key = _next_key()
@@ -1412,6 +1461,10 @@ def run(
             _hud["captured_at"] = packet.captured_at
             if seq_offset:
                 packet = dataclasses.replace(packet, sequence=last_seq + seq_offset)
+            if reset_source:
+                reset_source = False
+                if pipeline is not None:
+                    pipeline.reset_source(packet.captured_at)
 
             loop_frames += 1
             tel_window_frames += 1

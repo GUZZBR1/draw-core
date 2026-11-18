@@ -84,6 +84,8 @@ class LatestFrameCapture:
         self._failures = 0
         self._dead = False
         self._stopped = False
+        self._released = False
+        self._release_lock = threading.Lock()
         self._error = None
         # Metadados do emissor (HelperCapture): o último id/ts publicado
         # no pacote e o contador de descarte na fonte, quando a fonte
@@ -113,6 +115,7 @@ class LatestFrameCapture:
                 if not self._stopped:
                     self._dead = True
                 self._condition.notify_all()
+            self._release_capture()
 
     def _pump_loop(self):
         while True:
@@ -209,17 +212,31 @@ class LatestFrameCapture:
         with self._condition:
             return self._failures
 
-    def stop(self):
+    def _release_capture(self):
+        """Libera a captura uma unica vez, de qualquer thread."""
+        with self._release_lock:
+            if self._released:
+                return
+            self._released = True
+        self._capture.release()
+
+    def stop(self, force=True):
         """Para a thread e libera a captura.
 
-        O release() tenta destravar um read() pendurado no driver.
-        Se mesmo assim a thread nao voltar, o join tem teto e a
-        thread e daemon: a saida do app nao depende dela.
+        Com force (padrao), o release() tenta destravar um read()
+        pendurado no driver. Se mesmo assim a thread nao voltar, o
+        join tem teto e a thread e daemon: a saida do app nao depende
+        dela. Com force=False (troca de fonte com o app rodando), o
+        release nunca corre durante um read(): a propria thread da
+        captura libera o driver quando o read() voltar, e quem chama
+        nao espera por ela.
         """
         with self._condition:
             self._stopped = True
             self._condition.notify_all()
-        self._capture.release()
+        if not force:
+            return
+        self._release_capture()
         self._thread.join(timeout=2.0)
 
 

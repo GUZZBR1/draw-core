@@ -144,3 +144,33 @@ def test_settings_menu_layout_and_hud_render():
         hud={"probe": (300, 300), "latency": 80.0, "fps": 14.0},
     )
     assert base.shape == with_ui.shape and (base != with_ui).any()
+
+
+def test_camera_menu_layout_limits_rows_to_the_panel_and_scrolls():
+    cam, canvas = _camera(), np.full((1200, 850, 3), 255, np.uint8)
+    layout = view_module.camera_menu_layout((1600, 640), cam.shape, canvas.shape, 30)
+    assert 1 <= layout["visible"] < 30 and len(layout["rows"]) == layout["visible"]
+    x, y, w, h = layout["card"]
+    assert y >= 0 and all(ry >= 0 for _, ry, _, _ in layout["rows"])
+    scrolled = view_module.camera_menu_layout(
+        (1600, 640), cam.shape, canvas.shape, 30, first=99
+    )
+    assert scrolled["first"] == 30 - scrolled["visible"]
+
+
+def test_row_glow_clips_rows_that_leave_the_image():
+    studio = np.zeros((100, 200, 3), np.uint8)
+    view_module._row_glow(studio, (10, -14, 100, 28), 1.0, 1.0)
+    assert studio.any()
+
+
+def test_hud_moves_to_the_footer_when_the_camera_leaves_no_side_margin():
+    canvas = np.full((1200, 850, 3), 255, np.uint8)
+    cam = np.full((1080, 1920, 3), 120, np.uint8)
+    size = (1920, 1080)
+    base = view_module.compose_view(cam, canvas, size=size)
+    shown = view_module.compose_view(
+        cam, canvas, size=size, hud={"fps": 14.0, "latency": 50.0}
+    )
+    ys, _xs = np.nonzero((base != shown).any(axis=2))
+    assert ys.size and ys.min() > 1080 - 62

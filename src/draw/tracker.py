@@ -182,6 +182,10 @@ class SheetTracker:
         self._recent = deque(maxlen=_SHEET_FILTER_WINDOW)
         self._absent_calls = 0
 
+    def reset(self):
+        """Volta ao estado inicial: sem folha, sem candidato, sem historico."""
+        self.__init__()
+
     @property
     def has_pending(self):
         """Ha candidato a salto/primeira folha esperando confirmacao."""
