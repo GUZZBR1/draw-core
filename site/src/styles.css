@@ -93,7 +93,8 @@ button { color: inherit; font: inherit; }
   transition: opacity 200ms ease, transform 240ms cubic-bezier(.2,.75,.25,1);
 }
 .location:hover .location-main, .location:focus-visible .location-main { transform: translateY(-11px); color: var(--ink); }
-.location:hover .location-more, .location:focus-visible .location-more { opacity: 1; transform: translateY(-11px); pointer-events: auto; color: color-mix(in srgb, var(--ink) 74%, var(--paper)); }
+.location:hover .location-more, .location:focus-visible .location-more { opacity: 1; transform: translateY(-11px); color: color-mix(in srgb, var(--ink) 74%, var(--paper)); }
+.location:hover::after { position: absolute; top: 100%; right: -3em; left: -3em; height: 1.6em; content: ''; }
 @media (prefers-reduced-motion: reduce) {
   .location-main, .location-more { transition: none; }
 }
