@@ -483,6 +483,12 @@ def camera_menu_layout(size, cam_shape, canvas_shape, count, first=0):
         (left + pad, top + pad + i * row_h, width - 2 * pad, row_h)
         for i in range(visible)
     ]
+    scroll_up = scroll_down = None
+    if count > visible:
+        arrow_w = k(22)
+        ax = left + width - pad - arrow_w
+        scroll_up = (ax, top + pad, arrow_w, row_h)
+        scroll_down = (ax, top + pad + (visible - 1) * row_h, arrow_w, row_h)
     return {
         "dot": (cx, cy, r),
         "card": (left, top, width, height),
@@ -491,6 +497,8 @@ def camera_menu_layout(size, cam_shape, canvas_shape, count, first=0):
         "first": first,
         "visible": visible,
         "count": count,
+        "scroll_up": scroll_up,
+        "scroll_down": scroll_down,
     }
 
 
@@ -511,7 +519,19 @@ def point_in_card(layout, pos):
     return x <= pos[0] < x + w and y <= pos[1] < y + h
 
 
+def scroll_hit(layout, pos):
+    """-1 na seta de cima, +1 na de baixo, None fora das setas."""
+    for key, step in (("scroll_up", -1), ("scroll_down", 1)):
+        rect = layout.get(key)
+        if rect and rect[0] <= pos[0] < rect[0] + rect[2]:
+            if rect[1] <= pos[1] < rect[1] + rect[3]:
+                return step
+    return None
+
+
 def row_at(layout, pos):
+    if scroll_hit(layout, pos) is not None:
+        return None
     for i, (x, y, w, h) in enumerate(layout["rows"]):
         if x <= pos[0] < x + w and y <= pos[1] < y + h:
             return i
@@ -632,6 +652,29 @@ def _draw_camera_menu(studio, layout, items, progress):
             th,
             cv2.LINE_AA,
         )
+    _draw_scroll_arrows(studio, layout, dy, progress)
+
+
+def _draw_scroll_arrows(studio, layout, dy, progress):
+    """Setas de rolagem da lista; apagadas quando nao ha mais para onde ir."""
+    bg = (26, 28, 27)
+    half = max(2, int(round(4 * layout["scale"])))
+    first, visible, count = layout["first"], layout["visible"], layout["count"]
+    for key, direction in (("scroll_up", -1), ("scroll_down", 1)):
+        rect = layout.get(key)
+        if not rect:
+            continue
+        x, y, w, h = rect
+        at_end = first == 0 if direction < 0 else first + visible >= count
+        color = _mix(bg, (70, 75, 73) if at_end else COLOR_ACCENT_YELLOW, progress)
+        cx, cy = x + w // 2, y + dy + h // 2
+        tip_y, base_y = (
+            (cy - half, cy + half) if direction < 0 else (cy + half, cy - half)
+        )
+        pts = np.array(
+            [(cx, tip_y), (cx - half, base_y), (cx + half, base_y)], np.int32
+        )
+        cv2.fillPoly(studio, [pts], color, cv2.LINE_AA)
 
 
 def settings_menu_layout(size, count):

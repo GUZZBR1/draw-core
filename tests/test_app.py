@@ -680,3 +680,35 @@ def test_waiting_view_keeps_the_controls_available():
     waiting = app_module._waiting_view()
     view = view_module.compose_view(waiting, view_module.blank_sheet())
     assert waiting.shape == (720, 1280, 3) and view.shape == (640, 1600, 3)
+
+
+def test_camera_menu_arrows_scroll_within_bounds_without_selecting(monkeypatch):
+    state = _reset_camera_menu(monkeypatch)
+    monkeypatch.setattr(app_module, "_window_size", lambda: (1600, 640))
+    monkeypatch.setattr(
+        app_module,
+        "_list_cameras",
+        lambda current: [(f"Camera {i}", i) for i in range(30)],
+    )
+    cx, cy, _ = app_module._camera_layout()["dot"]
+    app_module._camera_click(cx, cy)
+    layout = app_module._camera_layout()
+    ux, uy, _, _ = layout["scroll_up"]
+    dx, dy, _, _ = layout["scroll_down"]
+    assert app_module._camera_click(ux + 2, uy + 2) is True and state["scroll"] == 0
+    for _ in range(100):
+        assert app_module._camera_click(dx + 2, dy + 2) is True
+    layout = app_module._camera_layout()
+    assert state["scroll"] == 30 - layout["visible"] == layout["first"]
+    assert state["open"] and state["request"] is None
+    assert app_module._camera_click(ux + 2, uy + 2) is True
+    assert state["scroll"] == 30 - layout["visible"] - 1, "sobe 1 de imediato"
+
+
+def test_mouse_wheel_events_are_ignored_by_the_handler(monkeypatch):
+    monkeypatch.setitem(app_module._view_map, "scale", 1.0)
+    monkeypatch.setitem(app_module._view_map, "offset", (0, 0))
+    monkeypatch.setitem(app_module._mouse, "pos", None)
+    _reset_camera_menu(monkeypatch)
+    app_module._camera_menu["open"] = True
+    app_module._on_mouse(app_module.cv2.EVENT_MOUSEWHEEL, 5, 5, 7 << 16, None)

@@ -174,3 +174,34 @@ def test_hud_moves_to_the_footer_when_the_camera_leaves_no_side_margin():
     )
     ys, _xs = np.nonzero((base != shown).any(axis=2))
     assert ys.size and ys.min() > 1080 - 62
+
+
+def test_camera_menu_scroll_arrows_exist_only_when_the_list_overflows():
+    cam, canvas = _camera(), np.full((1200, 850, 3), 255, np.uint8)
+    short = view_module.camera_menu_layout((1600, 640), cam.shape, canvas.shape, 3)
+    assert short["scroll_up"] is None and short["scroll_down"] is None
+    layout = view_module.camera_menu_layout((1600, 640), cam.shape, canvas.shape, 30)
+    ux, uy, uw, uh = layout["scroll_up"]
+    dx, dy, dw, dh = layout["scroll_down"]
+    assert view_module.scroll_hit(layout, (ux + 2, uy + 2)) == -1
+    assert view_module.scroll_hit(layout, (dx + 2, dy + 2)) == 1
+    assert view_module.row_at(layout, (ux + 2, uy + 2)) is None
+    rx, ry, _, _ = layout["rows"][0]
+    assert view_module.scroll_hit(layout, (rx + 2, ry + 2)) is None
+    assert view_module.row_at(layout, (rx + 2, ry + 2)) == 0
+    items = [
+        {"label": f"Camera {i}", "selected": False, "hover": 0.0} for i in range(30)
+    ]
+    drawn = view_module.compose_view(
+        cam,
+        canvas,
+        camera_menu={
+            "dot": 0.0,
+            "opened": True,
+            "progress": 1.0,
+            "items": items[: layout["visible"]],
+            "count": 30,
+            "first": 0,
+        },
+    )
+    assert drawn.shape == (640, 1600, 3)

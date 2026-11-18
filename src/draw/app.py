@@ -608,7 +608,7 @@ def _button_at(x, y):
 
 
 _CAMERA_MENU_SECONDS = 0.18
-_SWITCH_READY_SECONDS = 5.0
+_SWITCH_READY_SECONDS = 10.0
 _TOGGLE_SECONDS = 0.35
 _REACT_SECONDS = 0.9
 _camera_menu = {
@@ -664,6 +664,11 @@ def _camera_click(x, y):
     state = _camera_menu
     layout = _camera_layout()
     if state["open"]:
+        step = view_module.scroll_hit(layout, (x, y))
+        if step is not None:
+            top = layout["count"] - layout["visible"]
+            state["scroll"] = max(0, min(top, layout["first"] + step))
+            return True
         row = view_module.row_at(layout, (x, y))
         on_dot = view_module.point_in_dot(layout, (x, y))
         state["open"] = False
@@ -837,10 +842,6 @@ def _on_mouse(event, x, y, flags, param):
     scale, (ox, oy) = _view_map["scale"], _view_map["offset"]
     x, y = int((x - ox) / scale), int((y - oy) / scale)
     _mouse["pos"] = (x, y)
-    if event == cv2.EVENT_MOUSEWHEEL and _camera_menu["open"]:
-        step = -1 if cv2.getMouseWheelDelta(flags) > 0 else 1
-        _camera_menu["scroll"] = max(0, _camera_menu["scroll"] + step)
-        return
     if event == cv2.EVENT_LBUTTONUP and (_settings_click(x, y) or _camera_click(x, y)):
         _button_state["pressed"] = None
         return
@@ -991,12 +992,18 @@ def _open_ready_source(target, helper_token_file=None, ready_seconds=None):
     """Abre a fonte e so a devolve depois do primeiro quadro; senao levanta.
 
     A fonte antiga so e trocada por uma que ja entregou quadro: uma
-    camera que abre mas nao le deixa a atual no ar.
+    camera que abre mas nao le deixa a atual no ar. O orcamento de
+    ready_seconds conta desde o inicio da abertura (a recuperacao de
+    exposicao do open_capture pode gastar varios segundos); a espera
+    pelo primeiro quadro usa o que sobrou, com piso de 1 s. A abertura
+    em si nao e cancelavel, mas roda numa thread e nao trava a janela.
     """
+    started = time.monotonic()
     capture = open_capture(target, helper_token_file=helper_token_file)
     candidate = LatestFrameCapture(capture).start()
-    timeout = _SWITCH_READY_SECONDS if ready_seconds is None else ready_seconds
-    if candidate.wait_next(0, timeout=timeout) is None:
+    budget = _SWITCH_READY_SECONDS if ready_seconds is None else ready_seconds
+    remaining = max(1.0, budget - (time.monotonic() - started))
+    if candidate.wait_next(0, timeout=remaining) is None:
         candidate.stop(force=False)
         raise RuntimeError("a camera abriu mas nao entregou quadros")
     return candidate

@@ -584,3 +584,21 @@ def test_reset_source_drops_camera_space_state_and_stale_detections():
     assert loop.tracker.corners is None, "resultado velho nao pode reviver o quad"
     loop.step(FramePacket(image=small, sequence=2, captured_at=1002.0))
     assert loop.tracker.corners is not None, "deteccao da camera nova vale"
+
+
+def test_reset_source_closes_the_ink_session_and_keeps_identity_pending():
+    """Troca de camera com tinta aberta: a folha nova passa pela identidade."""
+    loop, _det, ink = _make_loop(lambda _i: (QUAD.copy(), "paper", None))
+    _drive(loop, 40)
+    assert loop.ink_session_open is True
+    opened = len(ink.new_generation_calls)
+
+    loop.reset_source(since=1000.0)
+    assert loop.ink_session_open is False
+    assert loop.clean_recovery_pending is True
+
+    frame = _frame()
+    for i in range(1, 12):
+        loop.step(FramePacket(image=frame, sequence=i, captured_at=1000.0 + i * 0.1))
+    assert len(ink.new_generation_calls) == opened + 1
+    assert ink.new_generation_calls[-1] is True, "reabre preservando a identidade"

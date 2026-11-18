@@ -307,16 +307,37 @@ class Pipeline:
                 )
             )
 
+    def _close_ink_session(self):
+        """Fecha a sessao de tinta com a identidade da pagina pendente.
+
+        A queda do tracker nao prova que a pagina mudou: o canvas do
+        usuario fica congelado na tela ate a folha voltar (re-registro
+        via clean_recovery_pending) ou a sessao reabrir com pagina nova
+        (a reabertura limpa, como sempre). Com canvas_persist desligado:
+        comportamento historico, o canvas some da tela.
+        """
+        self.ink_session_open = False
+        if not self._config.canvas_persist:
+            self.clean_mask = None
+            self.clean_provisional_mask = None
+            self.accumulated_canvas = None
+        # Guarda a geracao ate a folha voltar; a primeira mascara
+        # decide pela tinta se e re-registro ou pagina nova.
+        self.clean_recovery_pending = True
+
     def reset_source(self, since):
         """Fronteira de fonte: descarta o estado em coordenadas da camera.
 
         A troca de camera muda resolucao e cena: cantos do rastreador,
         quad e cinza de exibicao, mascaras e historico de cantos
-        pertencem a camera anterior. A tinta confirmada fica; sem
-        folha no rastreador, a identidade da pagina decide quando ela
-        voltar. Resultados de deteccao capturados antes de since (em
+        pertencem a camera anterior. A tinta confirmada fica, e uma
+        sessao de tinta aberta fecha como na queda da folha: a
+        identidade da pagina decide quando uma folha voltar na camera
+        nova (re-registro ou pagina nova). Resultados de deteccao capturados antes de since (em
         voo na camera antiga) sao descartados.
         """
+        if self.ink_session_open:
+            self._close_ink_session()
         self.tracker.reset()
         self.corner_history.clear()
         self.display_corners = None
@@ -392,22 +413,7 @@ class Pipeline:
         self.last_tracker_event = tracker_event
         if tracker_event == "drop":
             self.generation_events["drop"] += 1
-            self.ink_session_open = False
-            # canvas_persist: a queda do tracker nao prova que a
-            # pagina mudou — o canvas do usuario fica congelado na
-            # tela ate a folha voltar (re-registro via
-            # clean_recovery_pending) ou a sessao reabrir com pagina
-            # nova (a reabertura limpa, como sempre). Com a opcao
-            # desligada: comportamento historico, o canvas some da
-            # tela.
-            if not self._config.canvas_persist:
-                self.clean_mask = None
-                self.clean_provisional_mask = None
-                self.accumulated_canvas = None
-            # Guarda a geracao ate a folha voltar;
-            # a primeira mascara decide pela tinta se e
-            # re-registro ou pagina nova.
-            self.clean_recovery_pending = True
+            self._close_ink_session()
 
         self.frame_number += 1
         # Presenca e o estado do rastreador: warp_sheet com
