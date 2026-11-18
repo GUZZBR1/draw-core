@@ -1373,6 +1373,15 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 self._quiet_passes = 0
             else:
                 self._quiet_passes += 1
+            if source_hold:
+                # Passada segurada pela troca de camera nao conta para o
+                # descanso: a janela de voto so enche com passadas
+                # elegiveis, senao a trabalhadora dorme antes do terceiro
+                # voto de uma tinta fraca.
+                self._generation_passes = 0
+                self._quiet_passes = 0
+                self._still_passes = 0
+                self._activity_quiet_passes = 0
             self._passes_total += 1
             self._last_pass_ms = (self._clock() - pass_started) * 1000.0
             self._provisional_px = result["provisional_px"]

@@ -437,3 +437,21 @@ def test_source_change_identity_trace_is_not_marked_as_geometrically_registered(
     generation = worker.new_generation(preserve_identity=True)
     drive(worker, generation)
     assert last_event(worker)["geometry_registered"] is True
+
+
+def test_source_hold_passes_do_not_count_toward_rest(worker):
+    """A janela de voto so enche com passadas elegiveis depois da troca."""
+    settle(worker)
+    new_camera = QUAD * 2.0 + [320.0, 40.0]
+    generation = worker.new_generation(preserve_identity=True, source_changed=True)
+    covered = np.ones(SHAPE, bool)
+    covered[10:65, 10:60] = False
+    for _ in range(3):
+        drive(worker, generation, corners=new_camera, visible=covered)
+        assert last_event(worker)["decision"] == "deferred_occlusion"
+        assert worker._generation_passes == 0
+        assert worker._quiet_passes == 0
+    drive(worker, generation, corners=new_camera)
+    assert last_event(worker)["decision"] == "same_page"
+    assert worker._generation_passes == 1
+    assert worker._generation_passes < worker_mod._REST_MIN_GENERATION_PASSES
