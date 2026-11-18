@@ -455,3 +455,42 @@ def test_source_hold_passes_do_not_count_toward_rest(worker):
     assert last_event(worker)["decision"] == "same_page"
     assert worker._generation_passes == 1
     assert worker._generation_passes < worker_mod._REST_MIN_GENERATION_PASSES
+
+
+def test_source_hold_keeps_the_slow_probe_schedule_without_hand_presence(
+    worker, monkeypatch
+):
+    """Sem sinal de mao, as passadas seguradas ainda levam a sonda lenta."""
+    settle(worker)
+    new_camera = QUAD + [1.0, 1.0]  # enquadramento parecido: sem "folha movida"
+    generation = worker.new_generation(preserve_identity=True, source_changed=True)
+    covered = np.ones(SHAPE, bool)
+    covered[10:65, 10:60] = False
+    for _ in range(worker_mod._NO_HAND_REST_AFTER_STILL_PASSES):
+        drive(worker, generation, corners=new_camera, visible=covered)
+    monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 7.0)
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.25)
+    assert worker._hand_state is None
+    assert worker._pass_interval() == 7.0
+
+
+def test_weak_ink_recovery_does_not_rest_before_eligible_passes(worker):
+    """Com sinal de mao ausente, o descanso so vem depois de passadas elegiveis."""
+    settle(worker)
+    worker.set_hand_presence(False)
+    with worker._condition:
+        worker._confirm_once = False  # a passada de confirmacao da mao ja foi gasta
+    new_camera = QUAD * 2.0 + [320.0, 40.0]
+    generation = worker.new_generation(preserve_identity=True, source_changed=True)
+    covered = np.ones(SHAPE, bool)
+    covered[10:65, 10:60] = False
+    for _ in range(identity_mod._PAGE_IDENTITY_MAX_DEFERRALS - 1):
+        drive(worker, generation, corners=new_camera, visible=covered)
+        assert worker._at_rest() is False
+    drive(worker, generation, corners=new_camera)
+    assert last_event(worker)["decision"] == "same_page"
+    assert worker._at_rest() is False, "uma passada elegivel nao basta para dormir"
+    while worker._generation_passes < worker_mod._REST_MIN_GENERATION_PASSES:
+        assert worker._at_rest() is False
+        drive(worker, generation, corners=new_camera)
+    assert worker._at_rest() is True
