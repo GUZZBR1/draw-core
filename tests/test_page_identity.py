@@ -494,3 +494,16 @@ def test_weak_ink_recovery_does_not_rest_before_eligible_passes(worker):
         assert worker._at_rest() is False
         drive(worker, generation, corners=new_camera)
     assert worker._at_rest() is True
+
+
+def test_source_change_does_not_compare_the_new_camera_with_the_old_anchor(worker):
+    """Quad de outra camera nao conta como "folha movida" enquanto pendente."""
+    settle(worker)
+    far_camera = QUAD * 2.0 + [320.0, 40.0]
+    generation = worker.new_generation(preserve_identity=True, source_changed=True)
+    drive(worker, generation, corners=far_camera)
+    assert worker._geo_away is False
+    settle(worker)
+    generation = worker.new_generation(preserve_identity=True)
+    drive(worker, generation, corners=far_camera)
+    assert worker._geo_away is True

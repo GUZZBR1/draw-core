@@ -408,7 +408,12 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         with self._condition:
             if self._stopped or generation != self._generation:
                 return
-            if (
+            if self._identity_source_changed:
+                # Troca de camera pendente: a ancora e de outro espaco de
+                # camera, entao comparar posicao com ela nao diz nada
+                # (e acordaria a sonda rapida a toa).
+                self._geo_away = False
+            elif (
                 self._config.follow_move
                 and corners is not None
                 and self._anchor_corners is not None
