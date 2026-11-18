@@ -408,3 +408,32 @@ def test_same_camera_recovery_still_registers_against_the_old_anchor(worker):
     drive(worker, generation)
     assert last_event(worker)["decision"] == "same_page"
     np.testing.assert_array_equal(worker._anchor_corners, anchor)
+
+
+def test_source_change_deferred_by_occlusion_does_not_vote_new_strokes(worker):
+    """Mao cobrindo a tinta antiga: a folha nova nao entra no canvas confirmado."""
+    canvas = settle(worker)
+    new_camera = QUAD * 2.0 + [320.0, 40.0]
+    generation = worker.new_generation(preserve_identity=True, source_changed=True)
+    covered = np.ones(SHAPE, bool)
+    covered[10:65, 10:60] = False
+    other = page(other=True)
+    for _ in range(identity_mod._PAGE_IDENTITY_MAX_DEFERRALS - 1):
+        drive(worker, generation, other, corners=new_camera, visible=covered)
+        assert last_event(worker)["decision"] == "deferred_occlusion"
+        np.testing.assert_array_equal(worker.poll(generation, 0).confirmed, canvas)
+        np.testing.assert_array_equal(worker._accumulator._confirmed, canvas)
+
+
+def test_source_change_identity_trace_is_not_marked_as_geometrically_registered(
+    worker,
+):
+    settle(worker)
+    new_camera = QUAD * 2.0 + [320.0, 40.0]
+    generation = worker.new_generation(preserve_identity=True, source_changed=True)
+    drive(worker, generation, corners=new_camera)
+    assert last_event(worker)["geometry_registered"] is False
+    settle(worker)
+    generation = worker.new_generation(preserve_identity=True)
+    drive(worker, generation)
+    assert last_event(worker)["geometry_registered"] is True

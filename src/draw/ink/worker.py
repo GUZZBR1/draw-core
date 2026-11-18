@@ -989,7 +989,11 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 if identity_reference is not None:
                     candidate = registered_prob
                     identity_visible = registered_visible
-                    if identity_corners is not None and corners is not None:
+                    if (
+                        identity_corners is not None
+                        and corners is not None
+                        and not self._identity_source_changed
+                    ):
                         identity_geometry_registered = True
                     prior = identity_reference > 0
                     prior_px = int(np.count_nonzero(prior))
@@ -1304,13 +1308,22 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             else:
                 prob = registered_prob
                 visible = registered_visible
+            # Troca de camera com a decisao adiada (oclusao): a evidencia da
+            # camera nova nao vota no canvas antigo ate a identidade sair,
+            # senao tinta de outra folha entra no que o Save exporta.
+            source_hold = identity_deferred and self._identity_source_changed
             pass_voted = not (
                 identity_switch_pending
                 or (identity_deferred and identity_timed_out)
+                or source_hold
                 or arbitration_abstain
                 or follow_abstain
             )
-            if identity_switch_pending or (identity_deferred and identity_timed_out):
+            if (
+                identity_switch_pending
+                or (identity_deferred and identity_timed_out)
+                or source_hold
+            ):
                 visible = np.zeros(prob.shape, dtype=bool)
             if arbitration_abstain:
                 # Evento de arbitragem aberto: a passada e
