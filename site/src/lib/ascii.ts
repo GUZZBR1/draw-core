@@ -38,7 +38,7 @@ export function rankGlyphs(font: string, cellW: number, cellH: number): RankedGl
   const cached = rankCache.get(key);
   if (cached) return cached;
   const ranked = rankGlyphsUncached(font, cellW, cellH);
-  rankCache.set(key, ranked);
+  if (document.fonts.check(font)) rankCache.set(key, ranked);
   return ranked;
 }
 

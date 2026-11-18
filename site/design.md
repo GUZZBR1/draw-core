@@ -33,7 +33,7 @@ Draw is a bridge from a person’s paper sketch to digital tools that can interp
 - The definition opens from the Draw wordmark only. It stays open while the pointer moves from the wordmark onto the card and closes when moving to Product or another control.
 - The custom page scrubber is a visible, compact glass capsule with a readable track and thumb. Keep pointer dragging and keyboard navigation; do not reduce it to a tiny line.
 - Respect reduced-motion preferences.
-- The Product construction illustration is rendered as colored ASCII symbols on a canvas, using the same glyph-ranking approach as the Vision portrait. On entry its symbols appear from the top down, scattered, over about 2.8 s, then the artwork stays still. Do not animate or parallax it afterward. Reduced-motion users see it at once.
+- The Product construction illustration is rendered as colored ASCII symbols on a canvas, using the same glyph-ranking approach as the Vision portrait. On entry its symbols appear from the top down, scattered, slowly over about 4.6 s, then the artwork stays still. Do not animate or parallax it afterward. Reduced-motion users see it at once.
 
 ## Definition card
 
