@@ -194,7 +194,6 @@ class Pipeline:
         self.display_corners = None
         self.display_gray = None
         self._detections_since = 0.0
-        self._source_changed_pending = False
         # Observabilidade (sem efeito no laco): ultimo evento do
         # rastreador e contagem das aberturas de geracao por causa.
         self.last_tracker_event = None
@@ -308,38 +307,22 @@ class Pipeline:
                 )
             )
 
-    def _close_ink_session(self):
-        """Fecha a sessao de tinta com a identidade da pagina pendente.
-
-        A queda do tracker nao prova que a pagina mudou: o canvas do
-        usuario fica congelado na tela ate a folha voltar (re-registro
-        via clean_recovery_pending) ou a sessao reabrir com pagina nova
-        (a reabertura limpa, como sempre). Com canvas_persist desligado:
-        comportamento historico, o canvas some da tela.
-        """
-        self.ink_session_open = False
-        if not self._config.canvas_persist:
-            self.clean_mask = None
-            self.clean_provisional_mask = None
-            self.accumulated_canvas = None
-        # Guarda a geracao ate a folha voltar; a primeira mascara
-        # decide pela tinta se e re-registro ou pagina nova.
-        self.clean_recovery_pending = True
-
     def reset_source(self, since):
-        """Fronteira de fonte: descarta o estado em coordenadas da camera.
+        """Fronteira de fonte: a camera nova comeca uma pagina nova.
 
         A troca de camera muda resolucao e cena: cantos do rastreador,
         quad e cinza de exibicao, mascaras e historico de cantos
-        pertencem a camera anterior. A tinta confirmada fica, e uma
-        sessao de tinta aberta fecha como na queda da folha: a
-        identidade da pagina decide quando uma folha voltar na camera
-        nova (re-registro ou pagina nova). Resultados de deteccao capturados antes de since (em
-        voo na camera antiga) sao descartados.
+        pertencem a camera anterior e sao descartados. A tinta nao e
+        preservada: o canvas reinicia, como ao virar a folha, e a
+        primeira folha da camera nova abre uma geracao limpa.
+        Resultados de deteccao capturados antes de since (em voo na
+        camera antiga) tambem sao descartados.
         """
-        if self.ink_session_open:
-            self._close_ink_session()
-        self._source_changed_pending = self.clean_recovery_pending
+        self.ink_session_open = False
+        self.clean_recovery_pending = False
+        self.clean_mask = None
+        self.clean_provisional_mask = None
+        self.accumulated_canvas = None
         self.tracker.reset()
         self.corner_history.clear()
         self.display_corners = None
@@ -415,7 +398,22 @@ class Pipeline:
         self.last_tracker_event = tracker_event
         if tracker_event == "drop":
             self.generation_events["drop"] += 1
-            self._close_ink_session()
+            self.ink_session_open = False
+            # canvas_persist: a queda do tracker nao prova que a
+            # pagina mudou — o canvas do usuario fica congelado na
+            # tela ate a folha voltar (re-registro via
+            # clean_recovery_pending) ou a sessao reabrir com pagina
+            # nova (a reabertura limpa, como sempre). Com a opcao
+            # desligada: comportamento historico, o canvas some da
+            # tela.
+            if not self._config.canvas_persist:
+                self.clean_mask = None
+                self.clean_provisional_mask = None
+                self.accumulated_canvas = None
+            # Guarda a geracao ate a folha voltar;
+            # a primeira mascara decide pela tinta se e
+            # re-registro ou pagina nova.
+            self.clean_recovery_pending = True
 
         self.frame_number += 1
         # Presenca e o estado do rastreador: warp_sheet com
@@ -509,12 +507,10 @@ class Pipeline:
                 # tecla s salvava esse canvas errado.
                 self.accumulated_canvas = None
                 self.generation_events["reopen"] += 1
-                extra = {"source_changed": True} if self._source_changed_pending else {}
                 self.clean_generation = self.ink_worker.new_generation(
-                    preserve_identity=self.clean_recovery_pending, **extra
+                    preserve_identity=self.clean_recovery_pending
                 )
                 self.clean_recovery_pending = False
-                self._source_changed_pending = False
                 self.clean_display_version = 0
                 self.clean_provisional_mask = None
                 self.corner_history.clear()

@@ -227,7 +227,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._identity_reference = None
         self._identity_reference_corners = None
         self._identity_recovery_requested = False
-        self._identity_source_changed = False
         self._identity_defer_count = 0
         self._identity_switch_votes = 0
         # Degrau entre quads consecutivos (a entrada de cadencia
@@ -292,21 +291,14 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._thread.start()
         return self
 
-    def new_generation(self, preserve_identity=False, source_changed=False):
+    def new_generation(self, preserve_identity=False):
         """Abre geracao; opcionalmente identifica a pagina anterior.
 
         preserve_identity guarda uma copia do canvas confirmado para
         que a primeira passada possa decidir, por conteudo registrado,
         se uma folha que voltou e a mesma pagina em outra pose.
-        source_changed marca que a folha voltou por OUTRA camera: os
-        cantos da ancora pertencem a outro espaco de camera, entao nao
-        entram no registro. O conteudo ja chega na grade da pagina
-        (cada warp retifica com os seus cantos), a decisao compara
-        tinta em coordenadas de pagina e, se for a mesma pagina, a
-        ancora passa para os cantos da camera nova.
         """
         with self._condition:
-            self._identity_source_changed = bool(preserve_identity and source_changed)
             self._identity_recovery_requested = bool(preserve_identity)
             self._identity_defer_count = 0
             self._identity_switch_votes = 0
@@ -408,12 +400,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         with self._condition:
             if self._stopped or generation != self._generation:
                 return
-            if self._identity_source_changed:
-                # Troca de camera pendente: a ancora e de outro espaco de
-                # camera, entao comparar posicao com ela nao diz nada
-                # (e acordaria a sonda rapida a toa).
-                self._geo_away = False
-            elif (
+            if (
                 self._config.follow_move
                 and corners is not None
                 and self._anchor_corners is not None
@@ -806,8 +793,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     if first_pass
                     else self._anchor_corners
                 )
-                if recovering and self._identity_source_changed:
-                    anchor = None
                 registration_corners = corners
                 if not recovering and corners is not None:
                     anchor_rebased = False
@@ -994,11 +979,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 if identity_reference is not None:
                     candidate = registered_prob
                     identity_visible = registered_visible
-                    if (
-                        identity_corners is not None
-                        and corners is not None
-                        and not self._identity_source_changed
-                    ):
+                    if identity_corners is not None and corners is not None:
                         identity_geometry_registered = True
                     prior = identity_reference > 0
                     prior_px = int(np.count_nonzero(prior))
@@ -1151,20 +1132,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                             if reg_anchor_median and corners is not None
                             else []
                         )
-                    elif self._identity_source_changed:
-                        # Mesma pagina vista por outra camera: o canvas fica
-                        # e a ancora passa para o espaco da camera nova.
-                        self._anchor_corners = corners
-                        self._anchor_samples = (
-                            [corners.copy()]
-                            if reg_anchor_median and corners is not None
-                            else []
-                        )
                     # Keep the old anchor when identity matched: all future
                     # observations remain registered into the same canvas.
                     self._identity_reference = None
                     self._identity_reference_corners = None
-                    self._identity_source_changed = False
                     self._identity_recovery_requested = False
                     self._identity_defer_count = 0
                     self._identity_switch_votes = 0
@@ -1313,22 +1284,13 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             else:
                 prob = registered_prob
                 visible = registered_visible
-            # Troca de camera com a decisao adiada (oclusao): a evidencia da
-            # camera nova nao vota no canvas antigo ate a identidade sair,
-            # senao tinta de outra folha entra no que o Save exporta.
-            source_hold = identity_deferred and self._identity_source_changed
             pass_voted = not (
                 identity_switch_pending
                 or (identity_deferred and identity_timed_out)
-                or source_hold
                 or arbitration_abstain
                 or follow_abstain
             )
-            if (
-                identity_switch_pending
-                or (identity_deferred and identity_timed_out)
-                or source_hold
-            ):
+            if identity_switch_pending or (identity_deferred and identity_timed_out):
                 visible = np.zeros(prob.shape, dtype=bool)
             if arbitration_abstain:
                 # Evento de arbitragem aberto: a passada e
@@ -1378,16 +1340,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 self._quiet_passes = 0
             else:
                 self._quiet_passes += 1
-            if source_hold:
-                # Passada segurada pela troca de camera nao conta para o
-                # descanso total: a janela de voto so enche com passadas
-                # elegiveis, senao a trabalhadora dorme antes do terceiro
-                # voto de uma tinta fraca. _still_passes segue andando: ele
-                # so agenda a sonda lenta, e zera-lo manteria a cadencia
-                # rapida e esgotaria o orcamento de adiamentos cedo.
-                self._generation_passes = 0
-                self._quiet_passes = 0
-                self._activity_quiet_passes = 0
             self._passes_total += 1
             self._last_pass_ms = (self._clock() - pass_started) * 1000.0
             self._provisional_px = result["provisional_px"]
