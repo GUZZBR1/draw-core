@@ -94,7 +94,7 @@ button { color: inherit; font: inherit; }
 }
 .location:hover .location-main, .location:focus-visible .location-main { transform: translateY(-11px); color: var(--ink); }
 .location:hover .location-more, .location:focus-visible .location-more { opacity: 1; transform: translateY(-11px); color: color-mix(in srgb, var(--ink) 74%, var(--paper)); }
-.location:hover::after { position: absolute; top: 100%; right: -3em; left: -3em; height: 1.6em; content: ''; }
+.location:hover::after { position: absolute; top: 100%; right: -.7em; left: -.7em; height: 1.6em; content: ''; }
 @media (prefers-reduced-motion: reduce) {
   .location-main, .location-more { transition: none; }
 }
