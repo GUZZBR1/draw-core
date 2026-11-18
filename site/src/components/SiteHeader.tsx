@@ -125,7 +125,9 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
   const inverseBrandScale = useTransform(() => 1 / brandScale.get());
   const glassAmount = useTransform(progress, [0, 0.22], [0, 44]);
   const borderAmount = useTransform(progress, [0, 0.18], [0, 11]);
-  const blurAmount = useTransform(progress, [0, 0.2], [0, 28]);
+  const blurAmount = useTransform(() =>
+    isHome ? 28 * Math.min(1, progress.get() / 0.2) : 28 * Math.min(1, Math.max(0, scrollY.get() / 24)),
+  );
   const headerGutter = useTransform(progress, (amount) =>
     (window.matchMedia('(max-width: 640px)').matches ? 16 : 64) * amount,
   );
@@ -151,7 +153,7 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
   const navRadius = useTransform(progress, [0, 0.2], [0, 18]);
   const navBackground = useMotionTemplate`color-mix(in srgb, var(--paper) ${glassAmount}%, transparent)`;
   const navBorder = useMotionTemplate`color-mix(in srgb, var(--ink) ${borderAmount}%, transparent)`;
-  const navBlur = useMotionTemplate`blur(${blurAmount}px) saturate(138%)`;
+  const navBlur = useTransform(blurAmount, (amount) => (amount < 0.5 ? 'none' : `blur(${amount}px) saturate(138%)`));
   const navShadowAlpha = useTransform(progress, [0, 0.25], [0, 0.045]);
   const navShadow = useMotionTemplate`0 7px 25px rgba(34, 35, 31, ${navShadowAlpha}), inset 0 1px rgba(255, 255, 255, ${navShadowAlpha})`;
 
@@ -310,7 +312,7 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
         style={{ width: headerWidth, maxWidth: headerMaxWidth, x: '-50%', y: headerY, opacity: headerOpacity, pointerEvents: headerPointer }}
       >
         <motion.nav
-          className="nav-shell flex w-full items-center justify-between gap-4 border text-ink shadow-[0_7px_25px_rgba(34,35,31,0.04)] backdrop-blur-2xl"
+          className="nav-shell flex w-full items-center justify-between gap-4 border text-ink shadow-[0_7px_25px_rgba(34,35,31,0.04)]"
           style={{
             height: navHeight,
             paddingInline: navPadding,
@@ -526,8 +528,8 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
             }}
             onHoverEnd={scheduleHoverClose}
             variants={{
-              hidden: { opacity: 0, y: 9, pointerEvents: 'none' },
-              visible: { opacity: 1, y: 0, pointerEvents: 'auto' },
+              hidden: { opacity: 0, y: 9, pointerEvents: 'none', transitionEnd: { visibility: 'hidden' } },
+              visible: { opacity: 1, y: 0, pointerEvents: 'auto', visibility: 'visible' },
             }}
             transition={{ type: 'spring', stiffness: 320, damping: 28 }}
           >
