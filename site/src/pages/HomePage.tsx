@@ -8,6 +8,9 @@ const HIGHLIGHT_MS = 7000;
 export default function HomePage() {
   const [active, setActive] = useState(0);
   useEffect(() => {
+    // Com "reduzir movimento" nao ha destaque automatico: so o hover reage.
+    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)');
+    if (reduce.matches) return;
     const timer = window.setInterval(
       () => setActive((current) => (current + 1) % historicDrawings.length),
       HIGHLIGHT_MS,
