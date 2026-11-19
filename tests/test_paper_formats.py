@@ -56,6 +56,145 @@ def test_apply_format_a4_eh_incumbente():
     )
 
 
+def test_warp_sheet_uvmap_identity_map_reproduz_frame():
+    frame = np.arange(60 * 80 * 3, dtype=np.uint8).reshape(60, 80, 3)
+    yy, xx = np.mgrid[0:60, 0:80]
+    uv = np.stack([xx / 79.0, yy / 59.0]).astype(np.float32)
+    out = paper.warp_sheet_uvmap(
+        frame, uv, destination=[(0, 0), (80, 0), (80, 60), (0, 60)]
+    )
+    # Mesmo contrato do warp_sheet: grade do papel, mapa no destino.
+    assert out.shape == (config.PAPER_H, config.PAPER_W, 3)
+    np.testing.assert_allclose(
+        out[2:58, 2:78].astype(np.int32), frame[2:58, 2:78].astype(np.int32), atol=1
+    )
+    assert not out[60:, :].any() and not out[:, 80:].any()
+
+
+def test_warp_sheet_uvmap_sem_mapa_cai_na_homografia():
+    frame = np.arange(200 * 300 * 3, dtype=np.uint8).reshape(200, 300, 3)
+    quad = np.float32([[10, 10], [290, 10], [290, 190], [10, 190]])
+    np.testing.assert_array_equal(
+        paper.warp_sheet_uvmap(frame, None, corners=quad),
+        paper.warp_sheet(frame, quad),
+    )
+
+
+def test_warp_sheet_uvmap_mapa_quase_vazio_faz_fallback():
+    frame = np.zeros((60, 80, 3), np.uint8)
+    uv = np.full((2, 60, 80), np.nan, np.float32)
+    uv[:, :10, :10] = 0.5  # 1,4% válido: abaixo do piso de 20%
+    quad = np.float32([[0, 0], [79, 0], [79, 59], [0, 59]])
+    np.testing.assert_array_equal(
+        paper.warp_sheet_uvmap(
+            frame,
+            uv,
+            corners=quad,
+            destination=[(0, 0), (80, 0), (80, 60), (0, 60)],
+        ),
+        paper.warp_sheet(frame, quad, destination=[(0, 0), (80, 0), (80, 60), (0, 60)]),
+    )
+
+
+_QUAD = np.float32([[10, 10], [290, 10], [290, 190], [10, 190]])
+
+
+def _frame_claro():
+    return np.full((200, 300, 3), 255, np.uint8)
+
+
+def _uv_identidade(h, w):
+    yy, xx = np.mgrid[0:h, 0:w]
+    return np.stack([xx / (w - 1.0), yy / (h - 1.0)]).astype(np.float32)
+
+
+def test_warp_sheet_uvmap_mapa_fora_de_0_1_cai_na_homografia():
+    """Coordenada finita fora de [0,1] não é ponto válido (review #46)."""
+    frame = _frame_claro()
+    uv = np.full((2, 60, 80), 1.7, np.float32)
+    np.testing.assert_array_equal(
+        paper.warp_sheet_uvmap(frame, uv, corners=_QUAD),
+        paper.warp_sheet(frame, _QUAD),
+    )
+
+
+def test_warp_sheet_uvmap_mapa_de_area_zero_cai_na_homografia():
+    frame = _frame_claro()
+    for uv in (np.zeros((2, 0, 0), np.float32), np.zeros((2, 0, 5), np.float32)):
+        np.testing.assert_array_equal(
+            paper.warp_sheet_uvmap(frame, uv, corners=_QUAD),
+            paper.warp_sheet(frame, _QUAD),
+        )
+
+
+def test_warp_sheet_uvmap_resize_nao_espalha_buraco():
+    """Um NaN no mapa de meia resolução vira buraco local, não uma
+    mancha: as amostras válidas vizinhas continuam válidas."""
+    frame = _frame_claro()
+    uv = _uv_identidade(30, 40)
+    uv[:, 15, 20] = np.nan
+    dest = [(0, 0), (80, 0), (80, 60), (0, 60)]
+    out = paper.warp_sheet_uvmap(frame, uv, destination=dest)
+    region = out[:60, :80].min(axis=2)
+    black = int(np.count_nonzero(region == 0))
+    assert black <= 4, black  # interpolar NaN direto apagava ~16 px
+    assert region[30, 30] == 255 and region[28, 44] == 255
+
+
+def test_warp_sheet_uvmap_cobertura_medida_na_grade_de_saida():
+    """Mapa que só parece cheio na resolução de origem: medido depois do
+    resize, cai abaixo do piso e vai para a homografia."""
+    frame = _frame_claro()
+    uv = _uv_identidade(4, 4)
+    uv[:, ::2, :] = np.nan  # linhas alternadas: suporte < 50% quase todo
+    uv[:, :, ::2] = np.nan
+    dest = [(0, 0), (300, 0), (300, 200), (0, 200)]
+    np.testing.assert_array_equal(
+        paper.warp_sheet_uvmap(frame, uv, corners=_QUAD, destination=dest),
+        paper.warp_sheet(frame, _QUAD, destination=dest),
+    )
+
+
+def test_warp_sheet_uvmap_cobertura_conta_so_o_que_cai_na_grade():
+    """Review #46: destino que passa da grade — as amostras válidas
+    descartadas pelo recorte não podem segurar o caminho denso (a
+    saída sairia toda preta)."""
+    frame = _frame_claro()
+    w, h = config.PAPER_W, config.PAPER_H
+    # Destino com o dobro da largura: a metade direita cai fora da grade.
+    dest = [(0, 0), (2 * w, 0), (2 * w, h), (0, h)]
+    uv = _uv_identidade(h, 2 * w)
+    uv[:, :, :w] = np.nan  # válido só na metade que o recorte descarta
+    np.testing.assert_array_equal(
+        paper.warp_sheet_uvmap(frame, uv, corners=_QUAD, destination=dest),
+        paper.warp_sheet(frame, _QUAD, destination=dest),
+    )
+
+
+def test_warp_sheet_uvmap_destino_todo_fora_da_grade_cai_na_homografia():
+    frame = _frame_claro()
+    w, h = config.PAPER_W, config.PAPER_H
+    dest = [(w + 10, 0), (2 * w, 0), (2 * w, h), (w + 10, h)]
+    uv = _uv_identidade(h, w - 10)
+    np.testing.assert_array_equal(
+        paper.warp_sheet_uvmap(frame, uv, corners=_QUAD, destination=dest),
+        paper.warp_sheet(frame, _QUAD, destination=dest),
+    )
+
+
+def test_warp_sheet_uvmap_tamanho_igual_nos_dois_caminhos():
+    """80x60 de destino: denso e fallback devolvem a mesma grade."""
+    frame = _frame_claro()
+    dest = [(0, 0), (80, 0), (80, 60), (0, 60)]
+    dense = paper.warp_sheet_uvmap(frame, _uv_identidade(60, 80), destination=dest)
+    fallback = paper.warp_sheet_uvmap(frame, None, corners=_QUAD, destination=dest)
+    assert dense.shape == fallback.shape == paper.warp_sheet(frame, _QUAD).shape
+
+
+def test_warp_sheet_uvmap_sem_mapa_nem_cantos_devolve_none():
+    assert paper.warp_sheet_uvmap(np.zeros((4, 4, 3), np.uint8), None) is None
+
+
 def test_apply_format_recomputa_marcadores():
     config.apply_format("carta")
     assert config.MARKER_CENTERS[1] == (929 - 90, 90)
@@ -142,3 +281,47 @@ def test_sugestao_se_abstem_para_centros_de_marcadores():
         result = suggester.observe(projected_quad(), (720, 1280), sheet_boundary=False)
     assert result["suggestion"] is None
     assert result["reason"] == "marker_centers_not_sheet_boundary"
+
+
+def test_paisagem_troca_a_grade_e_mantem_mm_por_px():
+    """Caderno aberto/folha deitada: a grade deita, o lado longo segue
+    1200 px e a escala em mm não muda."""
+    assert config.paper_grid("a4", "paisagem") == (1200, 850)
+    assert (
+        config.paper_grid("caderno", "paisagem") == config.paper_grid("caderno")[::-1]
+    )
+    unit = config.mm_per_px("a4")
+    assert config.apply_format("a4", "paisagem") == (1200, 850)
+    assert (config.PAPER_W, config.PAPER_H) == (1200, 850)
+    assert config.PAPER_ORIENTATION == "paisagem"
+    assert config.mm_per_px() == unit
+    assert config.paper_mm() == (297.0, 210.0)
+    assert config.MARKER_CENTERS[2] == (1200 - 90, 850 - 90)
+    config.apply_format("a4")
+    assert config.PAPER_ORIENTATION == "retrato"
+    assert config.paper_mm() == (210.0, 297.0)
+
+
+def test_orientacao_desconhecida_e_recusada():
+    with pytest.raises(ValueError, match="orientacao"):
+        config.paper_grid("a4", "diagonal")
+
+
+def test_warp_sheet_em_paisagem_sai_deitado():
+    config.apply_format("a4", "paisagem")
+    try:
+        frame = np.zeros((600, 900, 3), np.uint8)
+        quad = np.float32([[50, 100], [850, 100], [850, 500], [50, 500]])
+        assert paper.warp_sheet(frame, quad).shape == (850, 1200, 3)
+    finally:
+        config.apply_format("a4")
+
+
+def test_paper_mm_valida_como_paper_grid():
+    """Mesma validação nas duas funções (review #50): orientação ou
+    formato desconhecido é ValueError, não dimensões inventadas."""
+    with pytest.raises(ValueError, match="orientacao"):
+        config.paper_mm("a4", "diagonal")
+    with pytest.raises(ValueError, match="formato"):
+        config.paper_mm("a9")
+    assert config.paper_mm("carta", "paisagem") == (279.0, 216.0)

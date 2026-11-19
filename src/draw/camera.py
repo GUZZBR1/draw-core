@@ -23,7 +23,12 @@ from pathlib import Path
 import cv2
 
 from .contracts import FramePacket
+from .hvcam import HvcamCapture, is_hvcam_source
 from .protocol import HelperCapture, is_helper_source
+
+# Rotacoes de entrada suportadas (graus): 180 cobre a webcam invertida
+# sobre a mesa; 90/270 mudariam a proporcao do quadro e nao tem uso.
+INPUT_ROTATIONS = (0, 180)
 
 # Limite de falhas seguidas de leitura que declara a fonte morta.
 # Era a contagem do laco principal (15 read() falhos seguidos e o app
@@ -69,8 +74,17 @@ class LatestFrameCapture:
     mesma contagem, com o mesmo limite e o mesmo desfecho.
     """
 
-    def __init__(self, capture):
+    def __init__(self, capture, rotation=0):
+        if rotation not in INPUT_ROTATIONS:
+            raise ValueError(
+                f"rotacao de entrada {rotation!r} invalida; aceitas: {INPUT_ROTATIONS}"
+            )
         self._capture = capture
+        # Webcam montada de cabeca para baixo na mesa: o quadro gira
+        # aqui, na origem, antes de qualquer consumidor — preview,
+        # deteccao, quad, warp, tinta e o 's' de salvar enxergam o
+        # mesmo espaco ja orientado (nada de coordenada desalinhada).
+        self._rotation = rotation
         self._condition = threading.Condition()
         self._thread = threading.Thread(
             target=self._pump, name="draw-capture", daemon=True
@@ -83,6 +97,8 @@ class LatestFrameCapture:
         self._failures = 0
         self._dead = False
         self._stopped = False
+        self._released = False
+        self._release_lock = threading.Lock()
         self._error = None
         # Metadados do emissor (HelperCapture): o último id/ts publicado
         # no pacote e o contador de descarte na fonte, quando a fonte
@@ -112,6 +128,7 @@ class LatestFrameCapture:
                 if not self._stopped:
                     self._dead = True
                 self._condition.notify_all()
+            self._release_capture()
 
     def _pump_loop(self):
         while True:
@@ -122,8 +139,12 @@ class LatestFrameCapture:
             if ok and frame is not None:
                 # Carimbo da thread de captura, tirado assim que o
                 # read() retorna — o consumidor ve o instante de
-                # publicacao, nao o do proprio relogio.
+                # publicacao, nao o do proprio relogio. Antes da
+                # rotacao: o HUD de latencia mede da leitura em
+                # diante, e o tempo de girar o quadro e latencia.
                 captured_at = time.monotonic()
+                if self._rotation == 180:
+                    frame = cv2.rotate(frame, cv2.ROTATE_180)
                 # Identidade do emissor quando a fonte a expõe
                 # (HelperCapture): entra no pacote e alimenta a
                 # contagem de descarte na origem.
@@ -208,17 +229,31 @@ class LatestFrameCapture:
         with self._condition:
             return self._failures
 
-    def stop(self):
+    def _release_capture(self):
+        """Libera a captura uma unica vez, de qualquer thread."""
+        with self._release_lock:
+            if self._released:
+                return
+            self._released = True
+        self._capture.release()
+
+    def stop(self, force=True):
         """Para a thread e libera a captura.
 
-        O release() tenta destravar um read() pendurado no driver.
-        Se mesmo assim a thread nao voltar, o join tem teto e a
-        thread e daemon: a saida do app nao depende dela.
+        Com force (padrao), o release() tenta destravar um read()
+        pendurado no driver. Se mesmo assim a thread nao voltar, o
+        join tem teto e a thread e daemon: a saida do app nao depende
+        dela. Com force=False (troca de fonte com o app rodando), o
+        release nunca corre durante um read(): a propria thread da
+        captura libera o driver quando o read() voltar, e quem chama
+        nao espera por ela.
         """
         with self._condition:
             self._stopped = True
             self._condition.notify_all()
-        self._capture.release()
+        if not force:
+            return
+        self._release_capture()
         self._thread.join(timeout=2.0)
 
 
@@ -460,6 +495,22 @@ def _local_open_hint(source):
 def open_capture(source, capture_factory=None, helper_token_file=None):
     global _LAST_OPEN_PROBE
     _LAST_OPEN_PROBE = None
+    if is_hvcam_source(source):
+        # Fonte hvcam (santleme/hvcam): webcam do lado Windows por
+        # vsock (hvcam://) ou TCP (hvcam+tcp://host). A conexao falha
+        # cedo quando o hvcam-host nao esta no ar.
+        capture = HvcamCapture(source)
+        if capture.isOpened():
+            return capture
+        detail = capture.open_error
+        capture.release()
+        if detail is not None:
+            raise RuntimeError(f"Nao consegui abrir a fonte hvcam: {detail}")
+        raise RuntimeError(
+            f"Nao consegui abrir a fonte hvcam: {source!r}. Confira se "
+            "o hvcam-host.exe esta rodando no Windows e, fora do WSL, "
+            "use --source hvcam+tcp://<host>:<porta>."
+        )
     if is_helper_source(source):
         # Fonte do ajudante Windows (bridge/PROTOCOL.md): arquivo
         # .drawcap gravado ou stream tcp:// ao vivo. AuthenticationError

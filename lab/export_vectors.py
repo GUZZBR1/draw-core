@@ -4,13 +4,15 @@ Driver de linha de comando sobre draw.exporters.export_vectors (os
 primitivos: Otsu, microfragmentos, Zhang-Suen, traçado, Douglas-Peucker,
 escritores SVG/DXF e a prova de ida e volta). Entrada: PNG na grade da
 página (warp ou canvas de tinta acumulado). A máscara vem do modelo de
-produção (draw.page_clean.PageCleanInk, mosaico 256, limiar 0,7 — o
-mesmo caminho de inferência do app) ou de Otsu invertido.
+produção (draw.page_clean.PageCleanInk, mosaico 256, limiar de máscara
+do manifesto — a inferência do app num quadro só; o canvas ao vivo vota
+entre passadas com InkConfig.seen_threshold) ou de Otsu invertido.
 
 Exemplo:
   python lab/export_vectors.py pagina.png --out-dir saida/
       [--mask model|otsu] [--onnx models/page_clean_unet.onnx]
       [--epsilon 1.5] [--format a4|a5|a3|carta|caderno]
+      [--orientation auto|retrato|paisagem]
 """
 
 import argparse
@@ -46,17 +48,50 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ONNX = _REPO_ROOT / "models" / "page_clean_unet.onnx"
 
 
-def ink_mask_model(bgr, onnx_path, verify):
-    """Máscara de tinta do app: PageCleanInk (mosaico 256, limiar 0,7).
+def ink_mask_model(bgr, onnx_path, verify, threshold=None):
+    """Máscara de tinta do app: PageCleanInk (mosaico 256). -> (máscara, limiar)
 
     Usa draw.page_clean, o mesmo caminho de inferência do Draw —
-    inclusive a ordem de canais e o limiar de produção (0,7).
+    inclusive a ordem de canais e o limiar de produção, que vem do
+    runtime_threshold do manifesto (ou DEFAULT_THRESHOLD). O limiar
+    efetivo volta junto para a prova registrar o que foi usado.
+    threshold explícito vence o manifesto e o default — é a saída
+    para um modelo fora do manifesto (--allow-unverified), que de
+    outro modo herdaria o DEFAULT_THRESHOLD do modelo vigente.
     """
     from draw.page_clean import PageCleanInk
 
-    cleaner = PageCleanInk(str(onnx_path), verify=verify)
+    cleaner = PageCleanInk(str(onnx_path), threshold=threshold, verify=verify)
     cleaner.load()
-    return cleaner.ink_mask(bgr) > 0
+    return cleaner.ink_mask(bgr) > 0, cleaner.threshold
+
+
+def resolve_orientation(orientation, img_w, img_h):
+    """ "auto" deduz da imagem: mais larga que alta = paisagem.
+
+    MUDANÇA DE COMPORTAMENTO: PNG mais largo que alto agora exporta em
+    paisagem por padrão (antes era escalado como retrato, o bug do review
+    do PR #50); --orientation retrato restaura o comportamento antigo.
+
+    O canvas que o app salva (tecla s) tem a grade da sessão — em
+    paisagem, 1200x850 — e o formato A4 é registrado em retrato: sem
+    isto, a imagem deitada era escalada como retrato (largura
+    encolhida e altura esticada, review do PR #50).
+    """
+    if orientation == "auto":
+        return "paisagem" if img_w > img_h else "retrato"
+    if orientation not in config.ORIENTATIONS:
+        raise ValueError(f"orientacao desconhecida: {orientation}")
+    return orientation
+
+
+def _format_table():
+    """Grades canônicas (nome, mm, grade, mm/px) nas duas orientações."""
+    return [
+        (n, config.paper_mm(n, o), config.paper_grid(n, o), config.mm_per_px(n))
+        for n in config.FORMATS
+        for o in config.ORIENTATIONS
+    ]
 
 
 def export_vectors(
@@ -68,20 +103,25 @@ def export_vectors(
     min_area=4,
     paper_format="a4",
     verify="manifest",
+    threshold=None,
+    orientation="auto",
 ):
     """Imagem na grade da página -> dict com polilinhas e estatísticas.
 
     verify é o callable de integridade do modelo: o padrão "manifest"
     injeta draw.infra.manifest.verify_model; None desliga (bancadas e
     testes com modelos fora do manifesto). Só se aplica a --mask model.
+    orientation: "auto" (padrão, deduzida da imagem), "retrato" ou
+    "paisagem"; só vale sem paper_mm.
     """
     if verify == "manifest":
         from draw.infra.manifest import verify_model
 
         verify = verify_model
     img_h, img_w = bgr.shape[:2]
+    orientation = resolve_orientation(orientation, img_w, img_h)
     if paper_mm is None:
-        paper_w_mm, paper_h_mm = config.FORMATS[paper_format]
+        paper_w_mm, paper_h_mm = config.paper_mm(paper_format, orientation)
         # A escala uniforme do formato só vale na grade canônica dele;
         # fora dela, por eixo a partir das dimensões (adendo da
         # auditoria #47 — ver _export_scale nos primitivos).
@@ -90,10 +130,7 @@ def export_vectors(
             img_h,
             paper_w_mm,
             paper_h_mm,
-            formats=[
-                (n, dims, config.paper_grid(n), config.mm_per_px(n))
-                for n, dims in config.FORMATS.items()
-            ],
+            formats=_format_table(),
         )
     else:
         paper_w_mm, paper_h_mm = paper_mm
@@ -101,9 +138,9 @@ def export_vectors(
     if mask_source == "model":
         if onnx_path is None or not Path(onnx_path).exists():
             raise FileNotFoundError(f"modelo page-clean não encontrado: {onnx_path}")
-        ink = ink_mask_model(bgr, onnx_path, verify)
+        ink, mask_threshold = ink_mask_model(bgr, onnx_path, verify, threshold)
     else:
-        ink = ink_mask_otsu(bgr)
+        ink, mask_threshold = ink_mask_otsu(bgr), None
     ink = filter_microfragments(ink, min_area=min_area)
 
     skel = make_8_minimal(zhang_suen_thin(ink))
@@ -119,8 +156,11 @@ def export_vectors(
         "stroke_width_px": width_px,
         "stroke_width_mm": width_px * 0.5 * (sx + sy),
         "scale_mm_per_px": (sx, sy),
+        "paper_mm": (paper_w_mm, paper_h_mm),
+        "orientation": orientation,
         "points_raw": int(sum(len(poly["points"]) for poly in raw)),
         "points_simplified": int(sum(len(poly["points"]) for poly in simplified)),
+        "mask_threshold": mask_threshold,
     }
 
 
@@ -152,6 +192,26 @@ def main(argv=None):
         action="store_true",
         help="desliga a verificação do manifesto sobre o .onnx",
     )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help=(
+            "limiar da máscara para --mask model; vence o runtime_threshold "
+            "do manifesto. Use com um .onnx antigo sob --allow-unverified "
+            "(ex.: 0.85 para o round-v1), que senão herda o DEFAULT_THRESHOLD"
+        ),
+    )
+    parser.add_argument(
+        "--orientation",
+        choices=("auto", *config.ORIENTATIONS),
+        default="auto",
+        help=(
+            "orientação da folha para a escala em mm (padrão auto: imagem mais "
+            "larga que alta = paisagem, como o canvas salvo por --orientation "
+            "paisagem do app); só vale com --format"
+        ),
+    )
     size = parser.add_mutually_exclusive_group()
     size.add_argument(
         "--format",
@@ -168,15 +228,14 @@ def main(argv=None):
         help="dimensões livres, API legada (sem --format)",
     )
     args = parser.parse_args(argv)
+    if args.threshold is not None and not 0 < args.threshold < 1:
+        parser.error("--threshold precisa estar em (0, 1)")
 
     bgr = cv2.imread(str(args.input), cv2.IMREAD_COLOR)
     if bgr is None:
         print(f"erro: não foi possível ler {args.input}", file=sys.stderr)
         return 1
     img_h, img_w = bgr.shape[:2]
-    paper_w_mm, paper_h_mm = (
-        config.FORMATS[args.format] if args.paper_mm is None else args.paper_mm
-    )
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = Path(args.input).stem
@@ -191,7 +250,10 @@ def main(argv=None):
         paper_mm=args.paper_mm,
         paper_format=args.format,
         verify=verify,
+        threshold=args.threshold,
+        orientation=args.orientation,
     )
+    paper_w_mm, paper_h_mm = result["paper_mm"]
     svg_path = out_dir / f"{stem}.svg"
     dxf_path = out_dir / f"{stem}.dxf"
     write_svg(
@@ -241,12 +303,15 @@ def main(argv=None):
         "input": str(args.input),
         "mask_source": (
             f"draw.page_clean.PageCleanInk sobre {args.onnx} "
-            "(mosaico 256x256, limiar 0.7 — protocolo do app)"
+            f"(mosaico 256x256, limiar da mascara de quadro unico "
+            f"{result['mask_threshold']}; o canvas ao vivo vota com "
+            "InkConfig.seen_threshold, nao com este limiar)"
             if args.mask == "model"
             else "otsu invertido (declarado)"
         ),
         "page_px": [img_w, img_h],
         "paper_mm": [paper_w_mm, paper_h_mm],
+        "orientation": result["orientation"] if args.paper_mm is None else None,
         "paper_format": args.format if args.paper_mm is None else None,
         "scale_mm_per_px": result["scale_mm_per_px"],
         "epsilon_px": args.epsilon,

@@ -69,12 +69,14 @@ class _SyncDetectionWorker:
 
 
 class _FakeInkWorker:
-    def __init__(self, display=None):
+    def __init__(self, display=None, display_generation=None):
+        self.display_generation = display_generation
         self.error = None
         self.generation = 0
         self.submitted = []  # (generation, corners, visible, coverage)
         self.new_generation_calls = []
         self.presence_calls = []
+        self.pages = []
         self._display = display
 
     def new_generation(self, preserve_identity=False):
@@ -83,6 +85,7 @@ class _FakeInkWorker:
         return self.generation
 
     def submit(self, page):
+        self.pages.append(page)
         self.submitted.append(
             (
                 page.generation,
@@ -93,6 +96,11 @@ class _FakeInkWorker:
         )
 
     def poll_display(self, generation, version):
+        if (
+            self.display_generation is not None
+            and generation != self.display_generation
+        ):
+            return None
         return self._display
 
     def set_hand_presence(self, present, moved=False):
@@ -118,7 +126,14 @@ class _FakeHandPresenceWorker:
 
 
 def _make_loop(
-    script, *, config=None, traces=None, ink=None, hand_presence=None, clock=None
+    script,
+    *,
+    config=None,
+    traces=None,
+    ink=None,
+    hand_presence=None,
+    hand_masker=None,
+    clock=None,
 ):
     det = _SyncDetectionWorker(script, traces=traces)
     ink = _FakeInkWorker() if ink is None else ink
@@ -126,6 +141,7 @@ def _make_loop(
         detection_worker=det,
         ink_worker=ink,
         hand_presence_worker=hand_presence,
+        hand_masker=hand_masker,
         config=config,
         clock=clock or (lambda: 0.0),
         log=lambda *_a: None,
@@ -225,6 +241,309 @@ def test_result_without_mask_clears_coverage():
     # Depois da limpeza, o submit volta a ir sem cobertura.
     last = ink.submitted[-1]
     assert last[3] is None
+
+
+def _mask_block(y0, y1, x0, x1, shape=(720, 1280)):
+    mask = np.zeros(shape, dtype=np.uint8)
+    mask[y0:y1, x0:x1] = 255
+    return mask
+
+
+def test_coverage_iou_floor_vetoes_phantom_quad():
+    """Quad inflado sobre blob espúrio não sobe para a tinta.
+
+    Mesa vazia real: a seg marca um blob longe do quad que o fit
+    inflou (IoU quad×máscara ~0). Medido nas capturas s1–s4:
+    fantasmas 0,044–0,108, folha real a partir de 0,298.
+    """
+    mask = _mask_block(50, 400, 900, 1100)  # blob à direita, quad em x<500
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", {"coverage_mask": mask})
+    )
+    _drive(loop, 40)
+    assert loop.tracker.corners is not None
+    assert ink.submitted == []
+
+
+def test_coverage_iou_floor_vetoes_phantom_through_app_detector():
+    """Caminho real do app (review #45): a mascara do fantasma passa pelo
+    filtro de 5% do detector combinado, e publicada e o piso veta.
+
+    Medido nas capturas s1 (mesa vazia) com o draw_seg de producao:
+    as 52 mascaras fantasmas ocupam 17%-28% do frame (todas >5%) e
+    o IoU quad x mascara fica em 0,044-0,108. O fantasma do teste
+    reproduz o pior caso medido (IoU ~0,10, sobrepondo o quad): um
+    piso frouxo (0,05) deixa passar, o 0,2 veta.
+    """
+    from draw import app as app_module
+
+    phantom = _mask_block(100, 400, 400, 1100)  # cobre 1/4 do QUAD + mesa
+    assert 0.17 < np.count_nonzero(phantom) / phantom.size < 0.28
+
+    class _Neural:
+        last_presence_logit = 3.0
+        last_coverage_mask = phantom
+        last_hand_mask = None
+
+        def __call__(self, frame, *, return_mask=True):
+            return QUAD.copy(), "paper", phantom
+
+    corners, verdict, _trace, extras = app_module._detect_sheet_combined_traced(
+        _frame(), _Neural()
+    )
+    assert "coverage_mask" in extras  # sobreviveu ao filtro de 5%
+    quad = np.zeros(phantom.shape, bool)
+    quad[100:400, 100:500] = True  # QUAD é retângulo alinhado
+    mask = phantom > 0
+    iou = (quad & mask).sum() / (quad | mask).sum()
+    assert 0.09 < iou < 0.11  # pior fantasma medido: 0,108
+
+    loop, _det, ink = _make_loop(lambda _i: (corners, verdict, extras))
+    _drive(loop, 40)
+    assert loop.tracker.corners is not None
+    assert ink.submitted == []
+
+    loose, _det, ink_loose = _make_loop(
+        lambda _i: (corners, verdict, extras),
+        config=PipelineConfig(coverage_iou_floor=0.05),
+    )
+    _drive(loose, 40)
+    assert ink_loose.submitted, "o teste precisa discriminar o piso"
+
+
+def test_coverage_iou_floor_passes_aligned_sheet():
+    """Máscara alinhada ao quad (folha real) segue submetendo."""
+    mask = _mask_block(100, 400, 100, 500)  # coincide com o QUAD
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", {"coverage_mask": mask})
+    )
+    _drive(loop, 40)
+    assert ink.submitted, "a folha real não pode ser vetada"
+
+
+def test_coverage_iou_floor_zero_disables():
+    """coverage_iou_floor=0 desliga o piso (comportamento antigo)."""
+    mask = _mask_block(50, 400, 900, 1100)
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", {"coverage_mask": mask}),
+        config=PipelineConfig(coverage_iou_floor=0.0),
+    )
+    _drive(loop, 40)
+    assert ink.submitted, "piso zerado mantém a passada de antes"
+
+
+def test_coverage_iou_floor_inert_without_mask():
+    """Resultado sem máscara: piso inerte, submit segue normal."""
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None),
+        config=PipelineConfig(coverage_iou_floor=0.9),
+    )
+    _drive(loop, 40)
+    assert ink.submitted
+
+
+def test_paisagem_submete_pagina_deitada_a_tinta():
+    """--orientation paisagem: o quad largo chega à tinta numa grade
+    deitada (1200x850), sem espremer o conteúdo na grade em pé."""
+    from draw import config as config_module
+
+    config_module.apply_format("a4", "paisagem")
+    try:
+        loop, _det, ink = _make_loop(lambda _i: (QUAD.copy(), "paper", None))
+        _drive(loop, 40)
+        page = ink.pages[-1].image
+        assert page.shape[:2] == (850, 1200)
+    finally:
+        config_module.apply_format("a4")
+
+
+def test_ink_auto_gain_brightens_dark_page_before_ink():
+    """ink_auto_gain: página escura (teto de exposição a 30 fps) chega
+    clara à tinta; sem o campo, o warp cru segue intacto."""
+    frame = np.full((720, 1280, 3), 80, np.uint8)  # papel subexposto
+    frame[200:300, 200:400] = 25  # traço
+
+    loop, _det, ink_raw = _make_loop(lambda _i: (QUAD.copy(), "paper", None))
+    _drive(loop, 40, frame=frame)
+    raw = ink_raw.pages[-1].image
+    assert loop.last_ink_gain == 1.0
+    assert abs(float(np.percentile(raw, 90)) - 80) < 2
+
+    loop, _det, ink_gain = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None),
+        config=PipelineConfig(ink_auto_gain=True),
+    )
+    _drive(loop, 40, frame=frame)
+    lit = ink_gain.pages[-1].image
+    assert loop.last_ink_gain == pytest.approx(2.5)
+    assert abs(float(np.percentile(lit, 90)) - 200) < 3
+    # Linear: o traço segue mais escuro que o papel.
+    assert float(lit.min()) < 0.5 * float(np.percentile(lit, 90))
+
+
+def test_ink_auto_gain_ignores_bright_desk_inside_the_quad():
+    """Review #52: o quad abrange papel escuro (86%) e mesa clara (14%);
+    o ganho é estimado só sobre a folha (cobertura), então o papel é
+    clareado em vez de o p90 da mesa cancelar o ganho."""
+    frame = np.full((720, 1280, 3), 225, np.uint8)  # mesa clara
+    frame[100:400, 100:442] = 80  # papel: 342 de 400 colunas do QUAD
+    coverage = _mask_block(100, 400, 100, 442)
+    script = lambda _i: (QUAD.copy(), "paper", {"coverage_mask": coverage})  # noqa: E731
+
+    loop, _det, _ink = _make_loop(script, config=PipelineConfig(ink_auto_gain=False))
+    _drive(loop, 40, frame=frame)
+    assert loop.last_ink_gain == 1.0
+
+    loop, _det, ink = _make_loop(script, config=PipelineConfig(ink_auto_gain=True))
+    _drive(loop, 40, frame=frame)
+    assert loop.last_ink_gain == pytest.approx(2.5, rel=0.1)
+    page = ink.pages[-1].image
+    assert float(np.percentile(page[page.mean(axis=2) < 255], 50)) > 150
+
+
+def test_ink_auto_gain_ignores_a_bright_hand_over_the_sheet():
+    """Review #52: a cobertura do seg inclui a mão; uma mão clara sobre
+    metade do quad cancelaria o ganho do papel escuro. O ganho usa só a
+    folha visível (cobertura & sem mão)."""
+    frame = np.full((720, 1280, 3), 80, np.uint8)  # papel escuro
+    frame[100:400, 100:300] = 235  # mão clara sobre metade do quad
+    coverage = _mask_block(100, 400, 100, 500)  # inclui a mão
+    hand = _mask_block(100, 400, 100, 300)
+    script = lambda _i: (  # noqa: E731
+        QUAD.copy(),
+        "paper",
+        {"coverage_mask": coverage, "hand_mask": hand},
+    )
+
+    loop, _det, _ink = _make_loop(script, config=PipelineConfig(ink_auto_gain=True))
+    _drive(loop, 40, frame=frame)
+    assert loop._hand_mask_det is not None
+    assert loop.last_ink_gain == pytest.approx(2.5, rel=0.1)  # papel, não a mão
+
+
+def test_ink_auto_gain_excludes_the_hand_without_sheet_coverage():
+    """Review #52: na detecção clássica não há máscara de cobertura; a mão
+    (landmarker/seg) ainda precisa sair da estimativa do ganho."""
+    frame = np.full((720, 1280, 3), 80, np.uint8)
+    frame[100:400, 100:300] = 235  # mão clara sobre metade do quad
+    hand = _mask_block(100, 400, 100, 300)
+    loop, _det, _ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", {"hand_mask": hand}),
+        config=PipelineConfig(ink_auto_gain=True),
+    )
+    _drive(loop, 40, frame=frame)
+    assert loop._hand_mask_det is not None
+    assert loop.last_ink_gain == pytest.approx(2.5, rel=0.1)
+
+
+def test_ink_auto_gain_excludes_the_hand_from_the_classic_hand_masker():
+    """Review #52: sem modelo neural, a detecção clássica só tem o
+    HandMasker (landmarker) para saber onde está a mão. Sem cobertura e
+    sem máscara semântica, a mão clara ainda sai da estimativa do ganho."""
+    frame = np.full((720, 1280, 3), 80, np.uint8)
+    frame[100:400, 100:300] = 235  # mão clara sobre metade do quad
+
+    class _Masker:
+        def mask(self, image):
+            camera = np.zeros(image.shape[:2], np.uint8)
+            camera[100:400, 100:300] = 255
+            return camera
+
+    loop, _det, _ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None),  # clássica: sem extras
+        config=PipelineConfig(ink_auto_gain=True),
+        hand_masker=_Masker(),
+    )
+    _drive(loop, 40, frame=frame)
+    assert loop._hand_mask_det is None  # nenhuma máscara semântica
+    assert loop.last_ink_gain == pytest.approx(2.5, rel=0.1)
+
+    loop, _det, _ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None),
+        config=PipelineConfig(ink_auto_gain=True),
+    )  # sem o masker, a mão clara cancela o ganho: o teste discrimina
+    _drive(loop, 40, frame=frame)
+    assert loop.last_ink_gain == 1.0
+
+
+def test_ink_divnorm_toggle_normalizes_submitted_page():
+    """ink_divnorm=True: o retificado chega já normalizado à tinta.
+
+    Frame com gradiente suave de iluminação: sem o toggle o warp
+    preserva o gradiente; com ele a imagem submetida sai achatada
+    (~branco de referência, std baixo) — o domínio do modelo v4.
+    """
+    grad = np.linspace(80, 220, 1280, dtype=np.float32)
+    frame = np.repeat(grad[None, :], 720, axis=0)[..., None]
+    frame = np.repeat(frame, 3, axis=2).astype(np.uint8)
+
+    loop, _det, ink_raw = _make_loop(lambda _i: (QUAD.copy(), "paper", None))
+    _drive(loop, 40, frame=frame)
+    raw_img = ink_raw.pages[-1].image
+    assert float(raw_img.std()) > 10.0  # gradiente cru preservado
+
+    loop, _det, ink_dn = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None),
+        config=PipelineConfig(ink_divnorm=True),
+    )
+    _drive(loop, 40, frame=frame)
+    dn_img = ink_dn.pages[-1].image
+    assert float(dn_img.std()) < float(raw_img.std()) * 0.6
+    assert float(dn_img.mean()) > 200.0  # papel achatado ~branco
+
+
+def test_ink_divnorm_bright_desk_does_not_darken_paper_edge():
+    """Review #48: mesa clara dentro do quad não pode escurecer a faixa
+    de papel encostada nela. O fora-da-folha é preenchido antes da
+    normalização (paridade com o treino: mask_sheet -> divnorm)."""
+    frame = np.full((720, 1280, 3), 220, np.uint8)  # mesa clara
+    frame[100:400, 100:350] = 100  # papel (mais escuro que a mesa)
+    coverage = np.zeros((720, 1280), np.uint8)
+    coverage[100:400, 100:350] = 255
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", {"coverage_mask": coverage}),
+        config=PipelineConfig(ink_divnorm=True),
+    )
+    _drive(loop, 40, frame=frame)
+    page = ink.pages[-1]
+    img = page.image.mean(axis=2)
+    paper = page.coverage
+    assert paper is not None and paper.any()
+    vals = img[paper]
+    # Sem o preenchimento prévio o papel perto da mesa caía para ~155
+    # contra ~235 no interior; aqui a página sai uniforme.
+    assert float(vals.max() - vals.min()) < 12.0
+    assert float(vals.min()) > 220.0
+
+
+def test_ink_divnorm_skips_the_gain_so_bright_paper_is_not_clipped():
+    """Review #48: com os dois ligados, o ganho clipava em 255 o papel
+    claro de uma folha com luz desigual, e o traço fraco sobre ele sumia
+    antes da normalização. Como a divisão por I/blur(I) já anula a
+    escala, o divnorm dispensa o ganho: o traço sobrevive."""
+    frame = np.full((720, 1280, 3), 70, np.uint8)  # papel escuro (maioria)
+    frame[100:400, 440:464] = 200  # faixa bem iluminada (6%: fora do p90)
+    frame[200:300, 450:454] = 175  # traço fraco sobre a parte clara
+
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None),
+        config=PipelineConfig(ink_divnorm=True, ink_auto_gain=True),
+    )
+    _drive(loop, 40, frame=frame)
+    assert loop.last_ink_gain == 1.0  # o divnorm dispensa o ganho
+    page = ink.pages[-1].image.mean(axis=2)
+    # Na grade da página (850 de largura para 400 px de quad) a faixa
+    # clara cai em x ~ 723-773 e o traço em x ~ 744-752, y ~ 400-800.
+    stroke = page[450:750, 745:751].mean()
+    paper = page[450:750, 758:770].mean()
+    assert paper - stroke > 15  # o traço continua visível ao modelo
+
+    alone, _det, ink_alone = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None),
+        config=PipelineConfig(ink_divnorm=True),
+    )
+    _drive(alone, 40, frame=frame)
+    np.testing.assert_array_equal(ink.pages[-1].image, ink_alone.pages[-1].image)
 
 
 def _seen_then_lost():
@@ -564,3 +883,76 @@ def test_drop_without_persist_clears_canvas_and_provisional():
     assert loop.clean_mask is None
     assert loop.clean_provisional_mask is None
     assert loop.accumulated_canvas is None
+
+
+def test_reset_source_drops_camera_space_state_and_stale_detections():
+    """Troca de camera: estado da camera anterior nao vaza para a nova."""
+    loop, det, _ink = _make_loop(lambda _i: (QUAD.copy(), "paper", None))
+    _drive(loop, 40)
+    assert loop.tracker.corners is not None
+    assert loop.display_corners is not None and loop.display_gray is not None
+
+    det.submit(_frame(), 1.0)  # deteccao em voo na camera antiga
+    loop.reset_source(since=1000.0)
+    assert loop.tracker.corners is None
+    assert loop.display_corners is None and loop.display_gray is None
+    assert len(loop.corner_history) == 0
+
+    small = np.zeros((480, 640, 3), dtype=np.uint8)
+    loop.step(FramePacket(image=small, sequence=1, captured_at=1001.0))
+    assert loop.tracker.corners is None, "resultado velho nao pode reviver o quad"
+    loop.step(FramePacket(image=small, sequence=2, captured_at=1002.0))
+    assert loop.tracker.corners is not None, "deteccao da camera nova vale"
+
+
+def test_reset_source_restarts_the_ink_as_a_new_page():
+    """Troca de camera: a tinta nao e preservada, como ao virar a folha."""
+    loop, _det, ink = _make_loop(lambda _i: (QUAD.copy(), "paper", None))
+    _drive(loop, 40)
+    assert loop.ink_session_open is True
+    opened = len(ink.new_generation_calls)
+
+    loop.reset_source(since=1000.0)
+    assert loop.ink_session_open is False
+    assert loop.clean_recovery_pending is False
+    assert loop.clean_mask is None and loop.accumulated_canvas is None
+
+    frame = _frame()
+    for i in range(1, 12):
+        loop.step(FramePacket(image=frame, sequence=i, captured_at=1000.0 + i * 0.1))
+    assert len(ink.new_generation_calls) == opened + 1
+    assert ink.new_generation_calls[-1] is False, "pagina nova, sem identidade"
+
+
+def test_reset_source_blocks_unread_snapshots_of_the_old_generation():
+    """Camera nova sem folha: a tinta da camera antiga nao volta nem salva."""
+    confirmed = np.zeros((100, 100), np.uint8)
+    confirmed[10:20, 10:20] = 255
+    snapshot = InkDisplaySnapshot(
+        version=7, confirmed=confirmed, provisional=np.zeros((100, 100), np.uint8)
+    )
+    ink = _FakeInkWorker()
+    scene = {"sheet": True}
+    loop, _det, _ink = _make_loop(
+        lambda _i: (
+            (QUAD.copy(), "paper", None) if scene["sheet"] else (None, "none", None)
+        ),
+        ink=ink,
+    )
+    loop._render_display = lambda _c, _p, out=None: np.full((100, 100, 3), 9, np.uint8)
+    _drive(loop, 20)
+    assert loop.ink_session_open is True
+    old_generation = ink.generation
+    ink._display = snapshot
+    ink.display_generation = old_generation  # snapshot ainda nao lido da camera antiga
+
+    scene["sheet"] = False  # a camera nova nao ve folha
+    loop.reset_source(since=1000.0)
+    frame = _frame()
+    for i in range(1, 8):
+        loop.step(FramePacket(image=frame, sequence=i, captured_at=1000.0 + i * 0.1))
+        loop.collect_ink()
+    assert loop.accumulated_canvas is None
+    assert loop.clean_mask is None and loop.clean_provisional_mask is None
+    assert loop.ink_session_open is False
+    assert loop.clean_generation != old_generation

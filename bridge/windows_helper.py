@@ -1,19 +1,20 @@
 # ============================================================
-#  NAO TESTADO. NAO EXECUTADO. ESBOCO.
+#  CAPTURA IMPLEMENTADA (cv2/DirectShow); INJECAO AINDA ESBOCO.
 #
-#  Este arquivo nunca rodou numa webcam Windows real: foi
-#  escrito no WSL, sem maquina Windows disponivel. Ele existe
-#  para fixar a forma do ajudante (injecao de cursor e laco de
-#  captura) antes da primeira sessao real no Windows, onde cada
-#  funcao precisa ser conferida uma a uma. Nao trate nenhuma
-#  parte como verificada — excecao: a logica de rede (handshake,
-#  laco de accept, bind e timestamp) e coberta por
-#  tests/test_bridge.py com sockets reais de loopback.
+#  Estado de cada metade, conferido na primeira sessao real:
+#  - Rede (handshake, accept, bind, timestamp): coberta por
+#    tests/test_bridge.py com sockets reais de loopback.
+#  - Captura (capture_frames): implementada via cv2.VideoCapture
+#    DirectShow + imencode, exercida em webcam real no Windows.
+#  - Injecao de cursor (SendInput/ctypes): NUNCA dirigiu uma
+#    sessao real. So a forma esta testada — conferir cada funcao
+#    antes de confiar nas coordenadas.
 #
 #  Regras do projeto que este arquivo respeita por desenho:
 #  - NENHUM ML no Windows. Este ajudante captura e injeta;
 #    todo o processamento e todo o ML ficam no WSL.
-#  - Somente biblioteca padrao (ctypes). Nada para instalar.
+#  - Injecao: somente biblioteca padrao (ctypes). Captura: cv2
+#    (importado tarde — sem cv2, o modulo importa e injeta normal).
 # ============================================================
 """Esboço do ajudante Draw no Windows (ver bridge/PROTOCOL.md).
 
@@ -25,13 +26,13 @@ Duas metades:
    de estruturas Win32 documentadas.
 
 2. Laço captura -> JPEG -> socket conforme o PROTOCOL.md. A
-   captura DirectShow/MSMF e a codificação JPEG são STUBS
-   comentados: exigem uma sessão real no Windows para escolher e
-   conferir a API (MSMF via ctypes é verbosa; uma rota interim é
-   reusar um ffmpeg no Windows como fonte de frames e
-   carimbar na entrega, o que mede a latência da entrega, não a
-   da exposição; a diferença precisa ser declarada quando o passo
-   0 rodar).
+   captura usa cv2.VideoCapture (DirectShow) no modo nativo da
+   camera — negociar FOURCC/resolucao em tempo de execucao trava
+   drivers UVC reais, entao --width/--height sao opt-in e FOURCC
+   nao se expoe — e cv2.imencode faz o JPEG do frame. O carimbo
+   sai na entrega do frame ao socket (mede a entrega, não a
+   exposição do sensor; a diferença entra no relatorio quando o
+   passo de latencia rodar).
 
 Uso pretendido (no Windows, quando testado):
   set DRAW_HELPER_TOKEN=<token compartilhado com o WSL>
@@ -48,9 +49,11 @@ import argparse
 import hmac
 import ipaddress
 import os
+import queue
 import secrets
 import struct
 import sys
+import threading
 import time
 
 # --- Constantes do protocolo (espelham bridge/PROTOCOL.md) ---
@@ -241,27 +244,145 @@ def click(down=True):
     _send_mouse(MOUSEEVENTF_LEFTDOWN if down else MOUSEEVENTF_LEFTUP)
 
 
-# --- Captura: STUBS (exigem sessao real no Windows) ---
+# --- Captura: cv2/DirectShow ---
 
 
-def capture_frames():
-    """Produz (jpeg_bytes) por frame capturado. STUB, nao implementado.
+class CaptureError(RuntimeError):
+    """Falha da camera/pipeline de captura.
 
-    Na versao real, a captura e DirectShow/MSMF: enumerar o
-    dispositivo de video, abrir em MJPG 1280x720 (o formato que o
-    app ja pede na rota usbipd), e ler os samples na cadencia da
-    camera. O carimbo de captura sai na entrega do sample, sobre
-    (time.perf_counter_ns() - start_ns) // 1000 (monotonico, epoca =
-    inicio do processo), como manda o PROTOCOL.md.
-
-    Rota interim possivel: ler o MJPEG de um ffmpeg no
-    Windows e carimbar na leitura. Mais simples, mas o
-    carimbo mede a entrega do ffmpeg, nao a exposicao; se o passo 0
-    usar essa rota, a ressalva entra no relatorio da medida.
+    Derruba so o atendimento daquele cliente — o ajudante residente
+    volta ao accept e tenta de novo na proxima conexao. Subclasse de
+    RuntimeError para quem so quer o tipo generico.
     """
-    raise NotImplementedError(
-        "captura DirectShow/MSMF: implementar e testar numa sessao real no Windows"
+
+
+STALL_TIMEOUT_S = 5.0
+
+
+def _enqueue_put(out, item, stop):
+    """Enfileira respeitando backpressure; sai cedo se o consumidor morreu.
+
+    O protocolo e push — cada frame produzido precisa chegar ao fio
+    (frame pulado = furo na gravacao .drawcap), entao nada se
+    descarta: fila cheia segura o produtor, que retoma quando o
+    consumidor drena. O recheco do stop impede um consumidor morto
+    de prender a thread.
+    """
+    while not stop.is_set():
+        try:
+            out.put(item, timeout=0.2)
+            return
+        except queue.Full:
+            continue
+
+
+def _camera_jpeg_producer(index, width, height, quality, out, stop):
+    """Corpo da thread produtora: dona do VideoCapture, enfileira JPEGs.
+
+    A captura roda fora da thread consumidora de proposito: um
+    cap.read() do DirectShow que nunca retorna so encalha ESTE
+    daemon — nunca o laco de accept do ajudante residente.
+    """
+    cap = None
+    try:
+        import cv2  # tardio: opcional; so a captura precisa dele
+
+        cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+        if not cap.isOpened():
+            _enqueue_put(
+                out, CaptureError(f"camera {index} indisponivel ou em uso"), stop
+            )
+            return
+        if width:
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        if height:
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        while not stop.is_set():
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                _enqueue_put(
+                    out, CaptureError(f"leitura da camera {index} falhou"), stop
+                )
+                return
+            ok, jpeg = cv2.imencode(".jpg", frame, (cv2.IMWRITE_JPEG_QUALITY, quality))
+            if ok:
+                _enqueue_put(out, jpeg.tobytes(), stop)
+    except Exception as exc:  # noqa: BLE001 - o consumidor precisa do erro real
+        # Sem isso, uma excecao do produtor (ex.: imencode) morria com
+        # a thread e o consumidor reportava stall — o erro real so
+        # existia no traceback da thread.
+        _enqueue_put(
+            out, CaptureError(f"captura na camera {index} falhou: {exc}"), stop
+        )
+    finally:
+        if cap is not None:
+            cap.release()
+
+
+def capture_frames(
+    index=0,
+    width=None,
+    height=None,
+    quality=85,
+    stall_timeout=STALL_TIMEOUT_S,
+    _producer=_camera_jpeg_producer,
+):
+    """Produz (jpeg_bytes) por frame capturado via cv2/DirectShow.
+
+    O VideoCapture vive numa thread produtora daemon alimentando uma
+    fila pequena com backpressure (fila cheia segura o produtor —
+    ver _enqueue_put).
+    O gerador consome com prazo: `stall_timeout` segundos sem frame
+    nenhum = camera travada numa chamada que nunca retorna, e isso
+    vira CaptureError como qualquer outra falha — so o cliente cai,
+    o ajudante volta ao accept. Foi o modo de falha visto em
+    hardware: read() do DirectShow pode bloquear para sempre, e sem
+    watchdog o helper inteiro congelava (cliente seguinte nem
+    completava o handshake).
+
+    O carimbo sai na entrega (quem envia, em `_handle_client`), nao
+    na exposicao do sensor — ressalva declarada do cabecalho. `cv2`
+    e dependencia so desta metade: importa-se tarde para a injecao
+    de cursor (stdlib pura) continuar utilizavel sem ele.
+
+    width/height sao None por padrao e NAO se negocia FOURCC:
+    numa webcam real (DirectShow, 2026) cap.set(FOURCC=MJPG,
+    1280x720) travou dentro da chamada de driver — processo
+    impossivel de matar e dispositivo refem ate reboot. Pedir
+    formato ao driver so e seguro quando o operador confirmou
+    suporte naquele hardware; por isso --width/--height sao opt-in
+    no CLI e o FOURCC nao se expoe de jeito nenhum.
+
+    `_producer`/`stall_timeout` existem para os testes injetarem um
+    produtor falso e um prazo curto, sem cv2 nem camera.
+    """
+    pending = queue.Queue(maxsize=2)
+    stop = threading.Event()
+    thread = threading.Thread(
+        target=_producer,
+        args=(index, width, height, quality, pending, stop),
+        daemon=True,
     )
+    thread.start()
+    try:
+        while True:
+            try:
+                item = pending.get(timeout=stall_timeout)
+            except queue.Empty as empty:
+                raise CaptureError(
+                    f"camera {index} parou de entregar frames "
+                    f"(>{stall_timeout:g}s sem leitura)"
+                ) from empty
+            if isinstance(item, Exception):
+                raise item
+            yield item
+    finally:
+        stop.set()
+        # Em produtor saudavel o join e imediato; num read()
+        # encalhado o daemon vaza em vez de segurar o encerramento —
+        # a camera pode ficar refem ate o processo inteiro sair
+        # (limite do cv2: nao ha como abortar um read() bloqueado).
+        thread.join(timeout=1.0)
 
 
 def resolve_bind_host(host=DEFAULT_HOST, allow_all_interfaces=False):
@@ -431,12 +552,27 @@ def _accept_loop(
             log(f"Conexao de {addr[0]} recusada: handshake/token invalido.")
             conn.close()
             continue
+        frames = None
         try:
-            sent = _handle_client(conn, make_frames(), start_ns, clock)
+            # Dentro do try de proposito: uma factory eagerciada que
+            # levanta CaptureError/OSError ao abrir a camera precisa
+            # cair na mesma recuperacao das falhas de iteracao —
+            # so a sessao morre, o helper volta ao accept.
+            frames = make_frames()
+            sent = _handle_client(conn, frames, start_ns, clock)
             log(f"Cliente {addr[0]} desconectou apos {sent} frames.")
+        except CaptureError as exc:
+            log(f"Captura falhou para {addr[0]} ({exc}); voltando a escutar.")
         except (OSError, ConnectionError):
             log(f"Conexao com {addr[0]} caiu; voltando a escutar.")
         finally:
+            # Sem isso, um OSError no sendall abandonava o gerador de
+            # captura — o finally dele (stop da thread produtora +
+            # release do VideoCapture) so rodava no GC, e a camera
+            # podia ficar refem ate la.
+            close = getattr(frames, "close", None)
+            if close is not None:
+                close()
             conn.close()
 
 
@@ -446,18 +582,20 @@ def serve(
     token=None,
     allow_all_interfaces=False,
     frames=None,
+    make_frames=None,
     clock=time.perf_counter_ns,
     stop=None,
 ):
-    """Laco principal: escuta, autentica o WSL, envia frames. ESBOCO.
+    """Laco principal: escuta, autentica o WSL, envia frames.
 
     O ajudante escuta e o WSL conecta (PROTOCOL.md, "Transporte").
     Conexoes sem o token sao fechadas antes de qualquer frame.
     frame_id comeca em 0 a cada sessao; a epoca do timestamp e o
     inicio do processo (start_ns abaixo). O laco e residente: cada
     cliente caido/recusado volta ao accept; so um sinal encerra.
-    frames/clock/stop existem para os testes injetarem fonte,
-    relogio e uma saida cooperativa.
+    frames/make_frames/clock/stop existem para os testes (e a linha
+    de comando) injetarem fonte, fabrica de captura, relogio e uma
+    saida cooperativa.
     """
     import socket
 
@@ -470,15 +608,16 @@ def serve(
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((bind_host, port))
     server.listen(1)
-    print(f"Ajudante Draw (ESBOCO) escutando em {bind_host}:{port}.")
-    make_frames = (lambda: frames) if frames is not None else capture_frames
+    print(f"Ajudante Draw escutando em {bind_host}:{port}.")
+    if make_frames is None:
+        make_frames = (lambda: frames) if frames is not None else capture_frames
     _accept_loop(server, token, make_frames, start_ns, clock, stop=stop)
 
 
 def main():
     _require_windows()
     parser = argparse.ArgumentParser(
-        description="Ajudante Draw no Windows (ESBOCO NAO TESTADO)"
+        description="Ajudante Draw no Windows (captura cv2; injecao esboco)"
     )
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument(
@@ -497,12 +636,31 @@ def main():
         default=None,
         help=f"arquivo com o token compartilhado (padrao: ${TOKEN_ENV})",
     )
+    parser.add_argument(
+        "--camera", type=int, default=0, help="indice do dispositivo de captura"
+    )
+    parser.add_argument(
+        "--width",
+        type=int,
+        default=None,
+        help="largura pedida ao driver (opt-in; ver capture_frames)",
+    )
+    parser.add_argument(
+        "--height",
+        type=int,
+        default=None,
+        help="altura pedida ao driver (opt-in; ver capture_frames)",
+    )
+    parser.add_argument("--jpeg-quality", type=int, default=85, metavar="0-100")
     args = parser.parse_args()
     serve(
         args.port,
         host=args.host,
         token=resolve_token(token_file=args.token_file),
         allow_all_interfaces=args.allow_all_interfaces,
+        make_frames=lambda: capture_frames(
+            args.camera, args.width, args.height, args.jpeg_quality
+        ),
     )
 
 

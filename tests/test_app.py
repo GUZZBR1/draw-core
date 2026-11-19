@@ -6,8 +6,10 @@ de modelos do --check e a validacao de argumentos do main().
 """
 
 import sys
+import time
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 
@@ -146,6 +148,23 @@ def test_check_models_avisa_modelo_ausente(monkeypatch, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "modelo_ausente_xyz.onnx" in out
     assert "Release" in out
+
+
+def test_check_models_falha_em_limiar_invalido(monkeypatch, tmp_path, capsys):
+    """Binário confere mas runtime_threshold quebrado: FAIL, não PASS."""
+    model = tmp_path / "page_clean_unet.onnx"
+    model.write_bytes(b"binario")
+    entry = {"sha256": "f" * 64, "bytes": 7, "runtime_threshold": 1.5}
+    fake = {"page_clean_unet.onnx": entry}
+    monkeypatch.setattr(
+        manifest_module, "load_manifest", lambda path=None: (Path("m.json"), fake)
+    )
+    monkeypatch.setattr(manifest_module, "DEFAULT_MODELS_DIR", tmp_path)
+    monkeypatch.setattr(manifest_module, "verify_model", lambda path, **kw: entry)
+    assert app_module._check_models() is False
+    out = capsys.readouterr().out
+    assert "FAIL" in out and "runtime_threshold" in out
+    assert "PASS" not in out
 
 
 def test_check_models_falha_em_divergencia(monkeypatch, tmp_path, capsys):
@@ -379,3 +398,377 @@ def test_gui_backend_compiled_secao_irma_nao_conta(monkeypatch):
     )
     monkeypatch.setattr(app_module.cv2, "getBuildInformation", lambda: info)
     assert app_module._gui_backend_compiled() is False
+
+
+class _PacedStallFeed:
+    """Fonte ritmada: so entrega o quadro k+1 depois do k consumido.
+
+    LatestFrameCapture guarda so o pacote mais novo: sem ritmo a bomba
+    publica tudo antes do laco acordar e quadros do meio nunca sao
+    processados — o teste de limpeza passaria sem nunca ter cacheado
+    uma folha. O consumo e medido pelas chamadas de waitKey: cada
+    iteracao do laco chama waitKey uma vez. Esgotados os quadros, o
+    read() trava como um stall TCP; release() destrava para o join da
+    bomba nao pagar o teto de 2 s.
+    """
+
+    def __init__(self, frames):
+        self._frames = list(frames)
+        self._served = 0
+        self.consumed = 0
+        self.stalled = False
+        self._released = False
+
+    def read(self):
+        while self._served and self.consumed < self._served:
+            if self._released:
+                return False, None
+            time.sleep(0.002)
+        if self._served < len(self._frames):
+            frame = self._frames[self._served]
+            self._served += 1
+            return True, frame
+        # O while de ritmo garante: aqui todos os quadros ja foram
+        # servidos E consumidos — todo waitKey dali em diante e do
+        # ramo de stall.
+        self.stalled = True
+        while not self._released:
+            time.sleep(0.01)
+        return False, None
+
+    def release(self):
+        self._released = True
+
+
+def _patch_marker_run(monkeypatch, feed, keys):
+    """Sobe run() headless em --markers: janela e teclas por script.
+
+    A ordem das chamadas de waitKey e deterministica: a bomba so publica
+    o quadro seguinte depois do anterior consumido (um waitKey por
+    quadro) e, com a fonte travada, o laco cai no ramo de stall a cada
+    _FRAME_WAIT_SECONDS consumindo uma tecla por iteracao.
+    """
+
+    def fake_warp(frame):
+        # Quadro com o primeiro pixel preto = folha; qualquer outro
+        # = ausencia (warp falha, como numa mesa sem marcadores).
+        if frame[0, 0, 0] == 0:
+            warped = np.full((60, 40, 3), 200, np.uint8)
+            return warped, {i: (5, 5) for i in config.MARKER_IDS}
+        return None, {}
+
+    def wait_key(_ms):
+        feed.consumed += 1
+        if not feed.stalled:
+            # Quadro ainda por servir/consumir: nunca gasta tecla do
+            # script — 's' e 'q' so caem no ramo de stall, senao um
+            # timeout esporio antes do ultimo quadro deslocava o 's'
+            # para o save normal e o teste passava sem cobrir o stall.
+            return -1
+        return next(key_iter, ord("q"))
+
+    monkeypatch.setattr(app_module, "_require_gui_backend", lambda: None)
+    monkeypatch.setattr(app_module, "_open_window", lambda fullscreen: None)
+    monkeypatch.setattr(app_module.cv2, "resizeWindow", lambda *a, **k: None)
+    monkeypatch.setattr(app_module, "open_capture", lambda *a, **k: feed)
+    monkeypatch.setattr(paper_module, "warp_paper", fake_warp)
+    monkeypatch.setattr(app_module.cv2, "imshow", lambda *a, **k: None)
+    monkeypatch.setattr(app_module.cv2, "destroyAllWindows", lambda: None)
+    key_iter = iter(keys)
+    monkeypatch.setattr(app_module.cv2, "waitKey", wait_key)
+
+
+def test_markers_salva_folha_exibida_durante_stall(monkeypatch, tmp_path):
+    """'s' no stall com folha em cena salva a ultima folha retificada.
+
+    Sem o cache, o ramo de espera reportava "nada a salvar" enquanto
+    a folha seguia visivel na janela.
+    """
+    feed = _PacedStallFeed([_frame(), _frame()])
+    _patch_marker_run(monkeypatch, feed, [ord("s"), ord("q")])
+
+    app_module.run(source=0, save_dir=str(tmp_path), markers_mode=True)
+
+    saved = list(tmp_path.glob("canvas_*.png"))
+    assert len(saved) == 1
+    out = cv2.imread(str(saved[0]))
+    assert out is not None and out.shape == (60, 40, 3)
+    assert int(out[0, 0, 0]) == 200
+
+
+def test_markers_stall_apos_quadro_sem_folha_nao_salva(monkeypatch, tmp_path, capsys):
+    """Quadro processado sem folha limpa o cache: 's' no stall nao salva.
+
+    O cache nao pode devolver uma folha que saiu de cena — senao o 's'
+    gravaria uma imagem que a janela ja nao mostra.
+    """
+    no_sheet = np.full((120, 160, 3), 255, np.uint8)
+    feed = _PacedStallFeed([_frame(), _frame(), no_sheet])
+    _patch_marker_run(monkeypatch, feed, [ord("s"), ord("q")])
+
+    app_module.run(source=0, save_dir=str(tmp_path), markers_mode=True)
+
+    assert list(tmp_path.glob("canvas_*.png")) == []
+    assert "Nada a salvar" in capsys.readouterr().out
+
+
+def _reset_camera_menu(monkeypatch, current=0):
+    state = app_module._camera_menu
+    monkeypatch.setitem(state, "open", False)
+    monkeypatch.setitem(state, "items", [])
+    monkeypatch.setitem(state, "current", current)
+    monkeypatch.setitem(state, "busy", None)
+    monkeypatch.setitem(state, "request", None)
+    return state
+
+
+def test_camera_label_formats_each_kind_of_source():
+    assert app_module._camera_label(2) == "Camera 2"
+    assert app_module._camera_label("http://192.168.0.10:8080/video") == (
+        "Rede: 192.168.0.10:8080"
+    )
+    assert app_module._camera_label("captures/sessao.drawcap") == "sessao.drawcap"
+
+
+def test_list_cameras_adds_the_current_source_when_it_is_not_a_device(monkeypatch):
+    monkeypatch.setattr(
+        app_module, "_video_nodes", lambda: ["/dev/video0", "/dev/video2"]
+    )
+    assert app_module._list_cameras(0) == [("Camera 0", 0), ("Camera 2", 2)]
+    url = "http://host/video"
+    assert app_module._list_cameras(url)[0] == ("Rede: host", url)
+
+
+def test_camera_click_opens_the_menu_and_selects_another_camera(monkeypatch):
+    state = _reset_camera_menu(monkeypatch)
+    monkeypatch.setattr(
+        app_module, "_video_nodes", lambda: ["/dev/video0", "/dev/video2"]
+    )
+    monkeypatch.setattr(app_module, "_window_size", lambda: (1600, 640))
+    layout = app_module._camera_layout()
+    cx, cy, _ = layout["dot"]
+    assert app_module._camera_click(cx, cy) is True
+    assert state["open"] and len(state["items"]) == 2
+    layout = app_module._camera_layout()
+    rx, ry, _, _ = layout["rows"][1]
+    assert app_module._camera_click(rx + 3, ry + 3) is True
+    assert not state["open"] and state["request"] == 2
+
+
+def test_camera_click_on_the_current_camera_or_outside_requests_nothing(monkeypatch):
+    state = _reset_camera_menu(monkeypatch)
+    monkeypatch.setattr(
+        app_module, "_video_nodes", lambda: ["/dev/video0", "/dev/video2"]
+    )
+    monkeypatch.setattr(app_module, "_window_size", lambda: (1600, 640))
+    cx, cy, _ = app_module._camera_layout()["dot"]
+    app_module._camera_click(cx, cy)
+    rx, ry, _, _ = app_module._camera_layout()["rows"][0]
+    assert app_module._camera_click(rx + 3, ry + 3) is True
+    assert state["request"] is None and not state["open"]
+    app_module._camera_click(cx, cy)
+    assert app_module._camera_click(5, 5) is False
+    assert not state["open"] and state["request"] is None
+
+
+def _reset_settings(monkeypatch):
+    state = app_module._settings
+    monkeypatch.setitem(state, "open", False)
+    monkeypatch.setitem(
+        state, "on", {key: False for key, _ in app_module._SETTINGS_ITEMS}
+    )
+    monkeypatch.setitem(app_module._camera_menu, "open", False)
+    monkeypatch.setattr(app_module, "_window_size", lambda: (1600, 640))
+    return state
+
+
+def test_settings_click_opens_and_toggles_options_without_closing(monkeypatch):
+    state = _reset_settings(monkeypatch)
+    cx, cy, _ = app_module._settings_layout()["gear"]
+    assert app_module._settings_click(cx, cy) is True and state["open"]
+    rx, ry, _, _ = app_module._settings_layout()["rows"][1]
+    assert app_module._settings_click(rx + 3, ry + 3) is True
+    assert state["open"] and state["on"]["latency"] is True
+    assert app_module._settings_click(rx + 3, ry + 3) is True
+    assert state["on"]["latency"] is False
+    assert app_module._settings_click(5, 5) is False and not state["open"]
+
+
+def test_hud_values_only_show_what_is_enabled(monkeypatch):
+    state = _reset_settings(monkeypatch)
+    monkeypatch.setitem(app_module._hud, "captured_at", None)
+    monkeypatch.setitem(app_module._hud, "fps", 14.5)
+    monkeypatch.setitem(app_module._mouse, "pos", (10, 20))
+    assert app_module._hud_values() == {"probe": None, "latency": None, "fps": None}
+    state["on"].update(probe=True, fps=True)
+    values = app_module._hud_values()
+    assert values["probe"] == (10, 20) and values["fps"] == 14.5
+
+
+def test_apply_fullscreen_only_calls_cv2_when_the_option_changes(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        app_module.cv2, "setWindowProperty", lambda *args: calls.append(args)
+    )
+    monkeypatch.setattr(app_module, "_fullscreen_applied", [False])
+    monkeypatch.setitem(app_module._settings["on"], "fullscreen", False)
+    app_module._apply_fullscreen()
+    assert calls == []
+    app_module._settings["on"]["fullscreen"] = True
+    app_module._apply_fullscreen()
+    app_module._apply_fullscreen()
+    assert [c[2] for c in calls] == [app_module.cv2.WINDOW_FULLSCREEN]
+    app_module._settings["on"]["fullscreen"] = False
+    app_module._apply_fullscreen()
+    assert [c[2] for c in calls][-1] == app_module.cv2.WINDOW_NORMAL
+    assert len(calls) == 2
+
+
+def test_mouse_events_are_mapped_back_to_layout_coordinates(monkeypatch):
+    monkeypatch.setitem(app_module._view_map, "scale", 0.5)
+    monkeypatch.setitem(app_module._view_map, "offset", (100, 40))
+    monkeypatch.setitem(app_module._mouse, "pos", None)
+    app_module._on_mouse(app_module.cv2.EVENT_MOUSEMOVE, 300, 200, 0, None)
+    assert app_module._mouse["pos"] == (400, 320)
+
+
+def test_window_size_uses_the_real_rect_down_to_a_small_floor(monkeypatch):
+    monkeypatch.setattr(app_module, "_window_sized", {True})
+    monkeypatch.setattr(app_module, "_window_rect", lambda: (400, 200))
+    assert app_module._window_size() == (400, 200)
+    monkeypatch.setattr(app_module, "_window_rect", lambda: (300, 100))
+    assert app_module._window_size() == (1600, 640)
+
+
+def test_camera_menu_with_many_cameras_scrolls_and_selects_absolute_rows(monkeypatch):
+    state = _reset_camera_menu(monkeypatch)
+    monkeypatch.setattr(app_module, "_window_size", lambda: (1600, 640))
+    monkeypatch.setattr(
+        app_module,
+        "_list_cameras",
+        lambda current: [(f"Camera {i}", i) for i in range(30)],
+    )
+    monkeypatch.setitem(state, "scroll", 0)
+    cx, cy, _ = app_module._camera_layout()["dot"]
+    assert app_module._camera_click(cx, cy) is True
+    fx = app_module._camera_fx()
+    layout = app_module._camera_layout()
+    assert len(fx["items"]) == layout["visible"] < 30
+    monkeypatch.setitem(state, "scroll", 3)
+    layout = app_module._camera_layout()
+    assert layout["first"] == 3
+    rx, ry, _, _ = layout["rows"][0]
+    assert app_module._camera_click(rx + 3, ry + 3) is True
+    assert state["request"] == 3
+
+
+def test_open_ready_source_requires_a_first_frame(monkeypatch):
+    class _Dead:
+        released = 0
+
+        def isOpened(self):
+            return True
+
+        def read(self):
+            return False, None
+
+        def release(self):
+            _Dead.released += 1
+
+    monkeypatch.setattr(app_module, "open_capture", lambda *a, **k: _Dead())
+    with pytest.raises(RuntimeError, match="nao entregou quadros"):
+        app_module._open_ready_source("x", ready_seconds=0.3)
+
+    class _Live(_Dead):
+        def read(self):
+            return True, np.zeros((8, 8, 3), np.uint8)
+
+    monkeypatch.setattr(app_module, "open_capture", lambda *a, **k: _Live())
+    source = app_module._open_ready_source("x", ready_seconds=2.0)
+    try:
+        assert source.wait_next(0, timeout=1.0) is not None
+    finally:
+        source.stop()
+
+
+def test_waiting_view_keeps_the_controls_available():
+    from draw import view as view_module
+
+    waiting = app_module._waiting_view()
+    view = view_module.compose_view(waiting, view_module.blank_sheet())
+    assert waiting.shape == (720, 1280, 3) and view.shape == (640, 1600, 3)
+
+
+def test_camera_menu_arrows_scroll_within_bounds_without_selecting(monkeypatch):
+    state = _reset_camera_menu(monkeypatch)
+    monkeypatch.setattr(app_module, "_window_size", lambda: (1600, 640))
+    monkeypatch.setattr(
+        app_module,
+        "_list_cameras",
+        lambda current: [(f"Camera {i}", i) for i in range(30)],
+    )
+    cx, cy, _ = app_module._camera_layout()["dot"]
+    app_module._camera_click(cx, cy)
+    layout = app_module._camera_layout()
+    ux, uy, _, _ = layout["scroll_up"]
+    dx, dy, _, _ = layout["scroll_down"]
+    assert app_module._camera_click(ux + 2, uy + 2) is True and state["scroll"] == 0
+    for _ in range(100):
+        assert app_module._camera_click(dx + 2, dy + 2) is True
+    layout = app_module._camera_layout()
+    assert state["scroll"] == 30 - layout["visible"] == layout["first"]
+    assert state["open"] and state["request"] is None
+    assert app_module._camera_click(ux + 2, uy + 2) is True
+    assert state["scroll"] == 30 - layout["visible"] - 1, "sobe 1 de imediato"
+
+
+def test_mouse_wheel_events_are_ignored_by_the_handler(monkeypatch):
+    monkeypatch.setitem(app_module._view_map, "scale", 1.0)
+    monkeypatch.setitem(app_module._view_map, "offset", (0, 0))
+    monkeypatch.setitem(app_module._mouse, "pos", None)
+    _reset_camera_menu(monkeypatch)
+    app_module._camera_menu["open"] = True
+    app_module._on_mouse(app_module.cv2.EVENT_MOUSEWHEEL, 5, 5, 7 << 16, None)
+
+
+def test_main_orientation_paisagem_deita_a_grade(monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        app_module,
+        "run",
+        lambda **kw: seen.append(
+            (config.PAPER_ORIENTATION, config.PAPER_W, config.PAPER_H)
+        ),
+    )
+    monkeypatch.setattr(sys, "argv", ["draw", "--orientation", "paisagem"])
+    app_module.main()
+    assert seen[-1] == ("paisagem", 1200, 850)
+    config.apply_format("a4")
+
+
+def test_main_orientation_paisagem_recusa_markers(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["draw", "--markers", "--orientation", "paisagem"])
+    with pytest.raises(SystemExit) as error:
+        app_module.main()
+    assert error.value.code == 2
+
+
+def test_main_ink_gain_liga_o_ganho_no_pipeline(monkeypatch):
+    """--ink-gain chega ao Pipeline como PipelineConfig(ink_auto_gain=True);
+    sem a flag, o preset de producao (desligado)."""
+    seen = []
+    monkeypatch.setattr(app_module, "run", lambda **kw: seen.append(kw))
+    for argv, expected in ((["draw"], False), (["draw", "--ink-gain"], True)):
+        monkeypatch.setattr(sys, "argv", argv)
+        app_module.main()
+        assert seen[-1]["pipeline_config"].ink_auto_gain is expected
+
+
+def test_markers_mode_rejects_ink_gain(monkeypatch):
+    """Modo marcadores não roda o pipeline de tinta: o ganho seria
+    ignorado em silêncio (review #52)."""
+    monkeypatch.setattr(app_module, "run", lambda **kw: None)
+    monkeypatch.setattr(sys, "argv", ["draw", "--markers", "--ink-gain"])
+    with pytest.raises(SystemExit) as error:
+        app_module.main()
+    assert error.value.code == 2

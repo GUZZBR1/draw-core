@@ -34,7 +34,7 @@ import cv2
 import numpy as np
 
 from . import config as config_module
-from . import contracts, paper, tracker
+from . import contracts, exposure, paper, photometry, tracker
 from .ink import render as ink_render
 from .settings import PipelineConfig
 from .tracker import _SHEET_LOST_MIN_FRAMES
@@ -193,10 +193,32 @@ class Pipeline:
         self.last_det_seq = 0
         self.display_corners = None
         self.display_gray = None
+        self._detections_since = 0.0
         # Observabilidade (sem efeito no laco): ultimo evento do
         # rastreador e contagem das aberturas de geracao por causa.
         self.last_tracker_event = None
+        # Ganho digital do ultimo warp de tinta (ink_auto_gain); 1.0 sem ganho.
+        self.last_ink_gain = 1.0
         self.generation_events = {"drop": 0, "reopen": 0}
+
+    @staticmethod
+    def _divnorm_page(ink_warped, coverage):
+        """ink_divnorm: domínio de entrada do modelo de tinta v4.
+
+        Paridade com o treino (draw-training pack_round4: mask_sheet
+        -> division_normalize): o fora-da-folha é preenchido ANTES da
+        normalização. Sem isso a mesa clara entra no blur de
+        iluminação e escurece a faixa de papel encostada nela — uma
+        borda falsa dentro da cobertura, que o preenchimento final
+        não alcança. O preenchimento usa a média da própria página
+        (o mesmo do caminho sem divnorm), não um branco fixo: papel
+        sob sombra ao lado de um branco fixo repetiria a borda.
+        """
+        if coverage is not None and coverage.any():
+            filled = ink_warped.copy()
+            filled[~coverage] = ink_warped[coverage].mean(axis=0).astype(np.uint8)
+            return photometry.division_normalize(filled)
+        return photometry.division_normalize(ink_warped)
 
     def _sheet_coverage_page(self, warp_corners):
         """Cobertura da folha na grade da página, ou None sem evidência.
@@ -222,6 +244,26 @@ class Pipeline:
         )
         return coverage
 
+    def _quad_coverage_iou(self, warp_corners):
+        """IoU do quad com a mascara de cobertura no espaco da camera.
+
+        None sem mascara publicada (coverage desligado ou resultado
+        sem extras) — o piso fica inerte e o comportamento segue o
+        de antes. Com mascara, mede o quanto o quad que retifica o
+        warp confere com a folha segmentada: o quad fantasma sobre
+        mesa vazia cobre quase tudo de fora da mascara; a folha
+        real, mesmo com o quad estourado, domina a intersecao.
+        """
+        if self._coverage_mask is None:
+            return None
+        quad = np.zeros(self._coverage_mask.shape, np.uint8)
+        cv2.fillConvexPoly(quad, np.round(warp_corners).astype(np.int32), 1)
+        mask = self._coverage_mask > 0
+        union = (quad.astype(bool) | mask).sum()
+        if not union:
+            return 0.0
+        return float((quad.astype(bool) & mask).sum() / union)
+
     def _warp_and_submit_ink(self, frame, warp_corners):
         """Warp + visibilidade + submissao a trabalhadora de tinta.
 
@@ -241,6 +283,14 @@ class Pipeline:
             # zera) — a passada e trabalho morto por construcao.
             # Passada fresca nao e afetada: _frames_since_seen = 0
             # nela.
+            return
+        iou = self._quad_coverage_iou(warp_corners)
+        if iou is not None and iou < self._config.coverage_iou_floor:
+            # Coverage floor: o quad retifica uma regiao que a
+            # segmentacao nao reconhece como folha — o fit inflou
+            # cantos sobre um blob espurio da mesa vazia. Submeter
+            # o retificado de mesa e trabalho morto e cada pixel
+            # e mesa na trabalhadora de tinta.
             return
         ink_warped = self._warp_sheet(frame, warp_corners)
         # Visibilidade na grade da pagina: onde a mao esta, a
@@ -275,6 +325,30 @@ class Pipeline:
                 seg_clear = ~seg_hand_dil
                 visible = seg_clear if visible is None else (visible & seg_clear)
         coverage = self._sheet_coverage_page(warp_corners)
+        if self._config.ink_auto_gain and not self._config.ink_divnorm:
+            # Com ink_divnorm o ganho NÃO roda: a divisão por I/blur(I) já
+            # anula a escala, e o ganho só podia piorar — clipava em 255 o
+            # papel claro de uma folha com luz desigual e apagava o traço
+            # fraco sobre ele antes da normalização (review do PR #48).
+            # Página escura (exposição no teto de 30 fps): o ganho que o
+            # sensor não dá entra aqui, antes do page_clean. Estimado só
+            # sobre a folha (coverage): a mesa clara do quad não cancela
+            # o ganho do papel, e o preenchimento abaixo já trabalha no
+            # domínio clareado.
+            # A mão visível fica fora da conta: a cobertura a inclui (o seg
+            # a conta como folha), mas uma mão clara não é papel e
+            # cancelaria o ganho do papel escuro ao redor (review do PR
+            # #52). `visible` já une os dois sinais de oclusão.
+            # Sem cobertura (detecção clássica não a fornece) a mão ainda
+            # sai da conta: `visible` sozinha serve de máscara.
+            gain_mask = coverage
+            if visible is not None:
+                gain_mask = visible if coverage is None else coverage & visible
+            ink_warped, self.last_ink_gain = exposure.apply_paper_gain(
+                ink_warped, gain_mask
+            )
+        if self._config.ink_divnorm:
+            ink_warped = self._divnorm_page(ink_warped, coverage)
         if coverage is not None:
             # Fora da folha o warp é preto: a transição
             # folha->preto é uma aresta artificial que o page_clean
@@ -306,6 +380,36 @@ class Pipeline:
                 )
             )
 
+    def reset_source(self, since):
+        """Fronteira de fonte: a camera nova comeca uma pagina nova.
+
+        A troca de camera muda resolucao e cena: cantos do rastreador,
+        quad e cinza de exibicao, mascaras e historico de cantos
+        pertencem a camera anterior e sao descartados. A tinta nao e
+        preservada: o canvas reinicia, como ao virar a folha, e a
+        primeira folha da camera nova abre uma geracao limpa (a geracao
+        antiga e invalidada: um snapshot dela ainda nao lido nao volta
+        para a tela nem para o Save). Resultados de deteccao capturados antes de since (em voo na
+        camera antiga) tambem sao descartados.
+        """
+        self.ink_session_open = False
+        self.clean_recovery_pending = False
+        self.clean_mask = None
+        self.clean_provisional_mask = None
+        self.accumulated_canvas = None
+        # Nenhuma geracao da trabalhadora e negativa: a colheita deixa de
+        # ver snapshots nao lidos da camera antiga ate a primeira folha
+        # nova abrir a sua geracao.
+        self.clean_generation = -1
+        self.clean_display_version = 0
+        self.tracker.reset()
+        self.corner_history.clear()
+        self.display_corners = None
+        self.display_gray = None
+        self._coverage_mask = None
+        self._hand_mask_det = None
+        self._detections_since = since
+
     def step(self, packet):
         """Um quadro do laco sem marcadores.
 
@@ -319,6 +423,9 @@ class Pipeline:
         """
         frame = packet.image
         det_result = self.detection_worker.poll(self.last_det_seq)
+        if det_result is not None and det_result.captured_at < self._detections_since:
+            self.last_det_seq = det_result.sequence
+            det_result = None
         if det_result is not None:
             self.last_det_seq = det_result.sequence
             detected_corners = det_result.corners
