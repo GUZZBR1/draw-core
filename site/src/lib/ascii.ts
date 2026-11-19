@@ -95,3 +95,43 @@ export function interpolateInto(output: number[], pixels: Uint8ClampedArray, wid
   }
   return output;
 }
+
+/**
+ * Cor de tinta para fundo claro: mantem o matiz da imagem, aprofunda o tom ate
+ * ter contraste de leitura e realca a saturacao, para o papel nao "lavar" as
+ * cores como acontece com o simples escurecimento proporcional.
+ */
+export function inkOnLight(red: number, green: number, blue: number, maxLuminance = 0.2, saturation = 1.3) {
+  const lum = luminance([red, green, blue]);
+  const scale = lum > maxLuminance ? (maxLuminance / lum) ** (1 / 2.2) : 1;
+  const darkened = [red, green, blue].map((value) => value * scale);
+  const gray = darkened[0] * 0.2126 + darkened[1] * 0.7152 + darkened[2] * 0.0722;
+  const [r, g, b] = darkened.map((value) => Math.round(Math.max(0, Math.min(255, gray + (value - gray) * saturation))));
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
+/** Paleta do retrato (ouro, pele, azul, branco, tinta) compartilhada pelas artes ASCII. */
+export function portraitColor(red: number, green: number, blue: number, ink: string, muted: string, paper: number[], eyeDetail: boolean) {
+  const pixel = [red, green, blue];
+  const lightBackground = luminance(paper) > 0.5;
+  const sourceLightness = luminance(pixel);
+  const goldHair = red > green * 1.08 && green > blue * 1.25;
+  const blueEye = blue > red * 1.1 && blue > green * 1.08;
+  const warmSkin = red > green * 1.06 && green > blue * 1.04 && !goldHair;
+
+  if (blueEye && eyeDetail) return lightBackground ? 'rgb(42, 83, 142)' : 'rgb(136, 181, 241)';
+  if (blueEye) return lightBackground ? inkOnLight(red, green, blue, 0.3, 1.6) : `rgb(${Math.round(red)}, ${Math.round(green)}, ${Math.round(blue)})`;
+  if (sourceLightness < 0.16) return ink;
+  // Tons azulados fora do detalhe do olho tambem mantem o azul.
+  const bluish = blue > red * 1.02 && blue > green;
+  if (lightBackground && bluish) return inkOnLight(red, green, blue, 0.3, 1.6);
+  if (lightBackground) {
+    if (sourceLightness > 0.88) return muted;
+    // Ouro e pele ganham tons profundos e saturados (ocre, terracota)
+    // em vez de cinza lavado; o resto so e aprofundado.
+    if (goldHair) return inkOnLight(red, green, blue, 0.22, 1.45);
+    if (warmSkin) return inkOnLight(red, green, blue, 0.34, 1.35);
+    return inkOnLight(red, green, blue, 0.24, 1.25);
+  }
+  return `rgb(${Math.round(red)}, ${Math.round(green)}, ${Math.round(blue)})`;
+}

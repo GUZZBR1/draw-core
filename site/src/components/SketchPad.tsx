@@ -174,6 +174,27 @@ export default function SketchPad() {
     };
   }, [resizeCanvas]);
 
+  // Com o primeiro risco o header sobe e libera a folha; volta quando o
+  // ponteiro encosta no topo da janela ou a pagina rola.
+  useEffect(() => {
+    const body = document.body;
+    const reveal = () => body.classList.remove('is-sketching');
+    const onMove = (event: PointerEvent) => {
+      if (event.clientY <= 48 && activePointerRef.current === null) reveal();
+    };
+    let lastY = window.scrollY;
+    const onScroll = () => {
+      if (Math.abs(window.scrollY - lastY) > 24) reveal();
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('scroll', onScroll);
+      reveal();
+    };
+  }, []);
+
   function makePoint(clientX: number, clientY: number, pressure: number, bounds: DOMRect): Point {
     return {
       x: Math.max(0, Math.min(1, (clientX - bounds.left) / bounds.width)),
@@ -190,6 +211,7 @@ export default function SketchPad() {
     activeBoundsRef.current = bounds;
     const point = makePoint(event.clientX, event.clientY, event.pressure, bounds);
     activePointerRef.current = event.pointerId;
+    document.body.classList.add('is-sketching');
     activeStrokeRef.current = { color, width: brushSize, tool, points: [point] };
     paintStroke(event.currentTarget.getContext('2d')!, activeStrokeRef.current, event.currentTarget.clientWidth, event.currentTarget.clientHeight);
   }

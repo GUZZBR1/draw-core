@@ -53,7 +53,17 @@ body.dark {
 button { color: inherit; font: inherit; }
 ::selection { color: #22231f; background: var(--accent); }
 
-.site-header { transform: translateX(-50%); }
+.site-header { transform: translateX(-50%); transition: translate .4s cubic-bezier(.22, .61, .36, 1), visibility 0s linear 0s; }
+/* Primeiro risco na folha: o header sobe e deixa a area livre. */
+body.is-sketching .site-header {
+  translate: 0 -160%;
+  visibility: hidden;
+  pointer-events: none !important;
+  transition: translate .4s cubic-bezier(.22, .61, .36, 1), visibility 0s linear .4s;
+}
+@media (prefers-reduced-motion: reduce) {
+  .site-header, body.is-sketching .site-header { transition: none; }
+}
 .nav-shell { box-sizing: border-box; border-style: solid; border-width: 1px; }
 .nav-link {
   @apply relative transition-colors duration-300;
@@ -72,6 +82,19 @@ button { color: inherit; font: inherit; }
 }
 .nav-link:hover::after, .nav-link:focus-visible::after { transform: scaleX(1); }
 .nav-link.is-active::after, .product-label.is-active .product-word::after { transform: scaleX(1); }
+/* O preto enche a palavra da esquerda para a direita no hover. */
+.nav-link.vision-link, .product-word {
+  color: transparent;
+  background: linear-gradient(90deg, var(--ink) 0 50%, var(--muted) 50% 100%) 100% 0 / 200% 100% no-repeat;
+  -webkit-background-clip: text;
+  background-clip: text;
+  transition: background-position 460ms cubic-bezier(.2,.75,.25,1);
+}
+.nav-link.vision-link::after { background: var(--ink); }
+.nav-link.vision-link:hover, .nav-link.vision-link:focus-visible, .nav-link.vision-link.is-active,
+.product-label:hover .product-word, .product-label:focus-within .product-word, .product-label.is-active .product-word {
+  background-position: 0 0;
+}
 .vision-link { padding: 0; border: 0; background: transparent; cursor: pointer; }
 .nav-right { flex: 0 0 auto; }
 .location { position: relative; display: inline-block; white-space: nowrap; cursor: default; }
@@ -122,6 +145,7 @@ a:focus-visible, button:focus-visible { outline: 2px solid #a7a071; outline-offs
   min-width: 0;
   flex-direction: column;
   align-self: start;
+  position: relative;
   gap: 9px;
   color: var(--ink);
   text-decoration: none;
@@ -133,7 +157,7 @@ a:focus-visible, button:focus-visible { outline: 2px solid #a7a071; outline-offs
   height: clamp(132px, 19vh, 178px);
   align-items: center;
   justify-content: center;
-  overflow: hidden;
+  overflow: visible;
   border: 1px solid rgba(34, 35, 31, .08);
   border-radius: 10px;
   padding: 8px;
@@ -167,14 +191,16 @@ a:focus-visible, button:focus-visible { outline: 2px solid #a7a071; outline-offs
 @keyframes archive-paper { from { border-color: transparent; background-color: transparent; box-shadow: 0 0 0 transparent, inset 0 0 0 transparent; } }
 @keyframes archive-develop { from { opacity: 0; filter: blur(10px); } }
 .archive-card:hover .archive-art-surface,
-.archive-card:focus-visible .archive-art-surface {
-  transform: scale(1.045);
+.archive-card:focus-visible .archive-art-surface,
+.archive-card.is-active .archive-art-surface {
+  transform: translateY(-8px) scale(1.045);
   border-color: color-mix(in srgb, var(--ink) 22%, transparent);
   box-shadow: 0 18px 26px -10px rgba(34, 35, 31, .34), 0 16px 38px rgba(34, 35, 31, .18), inset 0 1px rgba(255, 255, 255, .95);
 }
 .dark .archive-art-surface { box-shadow: 0 12px 30px rgba(255, 255, 255, .12), 0 2px 6px rgba(255, 255, 255, .07), inset 0 1px rgba(255, 255, 255, .9); }
 .dark .archive-card:hover .archive-art-surface,
-.dark .archive-card:focus-visible .archive-art-surface {
+.dark .archive-card:focus-visible .archive-art-surface,
+.dark .archive-card.is-active .archive-art-surface {
   border-color: color-mix(in srgb, var(--ink) 22%, transparent);
   box-shadow: 0 18px 26px -10px rgba(255, 255, 255, .22), 0 16px 38px rgba(255, 255, 255, .14), inset 0 1px rgba(255, 255, 255, .95);
 }
@@ -184,8 +210,36 @@ a:focus-visible, button:focus-visible { outline: 2px solid #a7a071; outline-offs
   align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
-  padding: 0 2px;
+  /* Padding e margem negativa se anulam: o retangulo so aparece no hover,
+     sem deslocar o layout. */
+  position: relative;
+  margin: -6px -9px 0;
+  padding: 6px 9px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  transition:
+    transform 720ms cubic-bezier(.16,.84,.3,1) 140ms,
+    background-color 520ms ease 140ms,
+    border-color 520ms ease 140ms,
+    box-shadow 720ms ease 140ms;
 }
+/* O nome sobe depois da imagem, mais devagar, num retangulo proprio. */
+.archive-card:hover .archive-caption,
+.archive-card:focus-visible .archive-caption,
+.archive-card.is-active .archive-caption {
+  transform: translateY(-14px);
+  border-color: color-mix(in srgb, var(--ink) 12%, transparent);
+  background: #fffefa;
+  box-shadow: 0 22px 44px rgba(34, 35, 31, .2), 0 8px 18px rgba(34, 35, 31, .12), 0 2px 5px rgba(34, 35, 31, .08);
+}
+.dark .archive-card:hover .archive-caption,
+.dark .archive-card:focus-visible .archive-caption,
+.dark .archive-card.is-active .archive-caption {
+  background: #262723;
+  box-shadow: 0 22px 44px rgba(255, 255, 255, .14), 0 8px 18px rgba(255, 255, 255, .09), 0 2px 5px rgba(255, 255, 255, .06);
+}
+.archive-work, .archive-source { position: relative; z-index: 1; }
 .archive-work { display: grid; min-width: 0; gap: 3px; }
 .archive-title {
   overflow: hidden;
@@ -374,6 +428,20 @@ body.dark .sketch-canvas { cursor: url("data:image/svg+xml,%3Csvg xmlns='http://
   padding: 0 .018em;
   transition: color 260ms ease;
 }
+/* Teste: cada letra da marca da um pulinho quando o mouse passa por ela. */
+.wordmark-letter {
+  display: inline-block;
+  transition: transform 420ms cubic-bezier(.3,1.5,.5,1);
+}
+.wordmark-letter:hover { transform: translateY(-.07em); transition-duration: 200ms; }
+@media (prefers-reduced-motion: reduce) { .wordmark-letter { transition: none; } }
+/* A webcam acompanha o pulo do "w". */
+.webcam-anchor { transition: translate 420ms cubic-bezier(.3,1.5,.5,1); }
+.wordmark:has(.wordmark-letter:last-child:hover) ~ .webcam-interaction .webcam-anchor {
+  translate: 0 -.07em;
+  transition-duration: 200ms;
+}
+@media (prefers-reduced-motion: reduce) { .webcam-anchor { transition: none; } }
 .webcam-interaction { position: absolute; z-index: 3; inset: 0; pointer-events: none; }
 .webcam-anchor {
   position: absolute;
@@ -457,14 +525,14 @@ body.dark .sketch-canvas { cursor: url("data:image/svg+xml,%3Csvg xmlns='http://
 .product-word::after {
   position: absolute;
   right: 0;
-  bottom: -1px;
+  bottom: -5px;
   left: 0;
   height: 1px;
   transform: scaleX(0);
   transform-origin: left;
-  background: var(--accent);
+  background: var(--ink);
   content: '';
-  transition: transform 240ms cubic-bezier(.2,.75,.25,1);
+  transition: transform 260ms cubic-bezier(.2,.75,.25,1);
 }
 .product-label:hover .product-word::after, .product-label:focus-within .product-word::after { transform: scaleX(1); }
 .scrollbar-control {
@@ -562,6 +630,13 @@ body.dark .sketch-canvas { cursor: url("data:image/svg+xml,%3Csvg xmlns='http://
   content: '';
   filter: blur(18px);
 }
+/* Tema claro: fundo cinza bem claro atras da arte, ainda distinto do branco. */
+body:not(.dark) .construction-art::before {
+  inset: 6% 6% 2%;
+  border-radius: 40px;
+  background: radial-gradient(ellipse, rgba(34, 35, 31, .09), rgba(34, 35, 31, .06) 62%, transparent 82%);
+  filter: blur(12px);
+}
 .construction-ascii { @apply relative z-0 mx-auto w-full select-none; }
 .construction-ascii-canvas { display: block; width: 100%; height: auto; aspect-ratio: 3 / 2; }
 .product-headline { @apply mb-0 mt-8 font-sans text-[clamp(41px,6.9vw,71px)] font-medium leading-[1.02] tracking-[-.07em] text-ink; }
@@ -614,6 +689,7 @@ body.dark .sketch-canvas { cursor: url("data:image/svg+xml,%3Csvg xmlns='http://
   .vision-title-line, .vision-copy p, .vision-signoff { width: auto; opacity: 1; }
   .vision-mist { filter: none; }
   .archive-art-surface, .archive-art-surface img, .archive-caption, .product-emerge { animation: none; }
+  .archive-caption { transition: none; }
   .archive-card:hover .archive-art-surface, .archive-card:focus-visible .archive-art-surface { transform: none; }
   .archive-trace { display: none; }
   .wordmark { animation: none; }

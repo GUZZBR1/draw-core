@@ -6,6 +6,16 @@ const REVEAL_DURATION = 4.6;
 const REVEAL_FADE = 0.09;
 const ALT = 'Um macaco de capacete conversa com um australopiteco sobre uma planta de obra, enquanto um neandertal segura uma britadeira ao lado de uma maquete.';
 
+// Cor da tinta no tema claro: tons naturais (marrons e pele nao viram preto)
+// e branco trocado por um cinza suave.
+function lightInk(red: number, green: number, blue: number, ink: string, muted: string) {
+  if (Math.max(red, green, blue) < 45) return ink;
+  if (luminance([red, green, blue]) > 0.72) return muted;
+  // Mesma paleta do tema escuro, so um pouco mais profunda para ler no papel.
+  const tone = (value: number) => Math.round(Math.max(0, Math.min(255, (value * 1.3 + 30) * 0.8)));
+  return `rgb(${tone(red)}, ${tone(green)}, ${tone(blue)})`;
+}
+
 type Cell = { character: string; fill: string; appearAt: number; x: number; y: number };
 
 export default function ProductAsciiArt() {
@@ -140,8 +150,10 @@ export default function ProductAsciiArt() {
         }
       }
 
+      const ink = cssColor(host, '--ink', '#22231f');
+      const muted = cssColor(host, '--muted', '#777870');
       const maxDarkness = glyphs[0].darkness;
-      const channel = (value: number) => Math.round(Math.max(0, Math.min(255, light ? value * 0.6 : value * 1.3 + 30)));
+      const channel = (value: number) => Math.round(Math.max(0, Math.min(255, value * 1.3 + 30)));
       const next: Cell[] = [];
       for (let row = 0; row < rows; row += 1) {
         for (let col = 0; col < cols; col += 1) {
@@ -150,12 +162,14 @@ export default function ProductAsciiArt() {
           const stretched = Math.max(0, Math.min(1, (tones[index] - low) / Math.max(0.01, high - low)));
           const detail = tones[index] - (counts[index] ? sums[index] / counts[index] : 0);
           const base = light ? 1 - stretched : 0.18 + 0.82 * stretched;
-          const density = Math.max(0.08, Math.min(1, base + (light ? -4 : 4) * detail)) * Math.min(1, coverage[index] * 1.4);
+          const density = Math.max(light ? 0.22 : 0.08, Math.min(1, base + (light ? -4 : 4) * detail)) * Math.min(1, coverage[index] * 1.4);
           const glyph = chooseGlyph(glyphs, density * maxDarkness);
-          if (glyph.darkness < 0.012) continue;
+          if (glyph.darkness < (light ? 0.004 : 0.012)) continue;
           next.push({
             character: glyph.character,
-            fill: `rgb(${channel(rgb[index * 3])}, ${channel(rgb[index * 3 + 1])}, ${channel(rgb[index * 3 + 2])})`,
+            fill: light
+              ? lightInk(rgb[index * 3], rgb[index * 3 + 1], rgb[index * 3 + 2], ink, muted)
+              : `rgb(${channel(rgb[index * 3])}, ${channel(rgb[index * 3 + 1])}, ${channel(rgb[index * 3 + 2])})`,
             appearAt: (row / rows) * 0.55 + cellNoise(col, row) * 0.4,
             x: col * cellW,
             y: row * cellH,

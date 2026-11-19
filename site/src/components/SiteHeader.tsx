@@ -399,7 +399,9 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
             to="/"
             aria-label="Draw, início"
           >
-            Draw
+            {Array.from('Draw').map((letter, index) => (
+              <span className="wordmark-letter" aria-hidden="true" key={index}>{letter}</span>
+            ))}
           </Link>
           {isHome && (
             <div className="webcam-interaction" ref={webcamAnchorRef}>

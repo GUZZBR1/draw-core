@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 
-import { cellNoise, chooseGlyph, cssColor, interpolateInto, luminance, parseRgb, rankGlyphs, smoothstep, type RankedGlyph } from '../lib/ascii';
+import { cellNoise, chooseGlyph, cssColor, interpolateInto, luminance, parseRgb, portraitColor, rankGlyphs, smoothstep, type RankedGlyph } from '../lib/ascii';
 
 const SAMPLE_SIZE = 3;
 const REVEAL_DURATION = 2.8;
@@ -16,26 +16,6 @@ function motionPulse(elapsed: number, start: number, duration: number, period: n
   const phase = ((elapsed - start) % period + period) % period;
   if (elapsed < start || phase >= duration) return 0;
   return smoothstep(0, 0.13, phase) * (1 - smoothstep(duration - 0.13, duration, phase));
-}
-
-function textColor(red: number, green: number, blue: number, ink: string, muted: string, paper: number[], eyeDetail: boolean) {
-  const pixel = [red, green, blue];
-  const lightBackground = luminance(paper) > 0.5;
-  const sourceLightness = luminance(pixel);
-  const goldHair = red > green * 1.08 && green > blue * 1.25;
-  const blueEye = blue > red * 1.1 && blue > green * 1.08;
-  const warmSkin = red > green * 1.06 && green > blue * 1.04 && !goldHair;
-
-  if (blueEye && eyeDetail) return lightBackground ? 'rgb(42, 83, 142)' : 'rgb(136, 181, 241)';
-  if (blueEye) return lightBackground ? muted : `rgb(${Math.round(red)}, ${Math.round(green)}, ${Math.round(blue)})`;
-  if (sourceLightness < 0.16) return ink;
-  if (goldHair && lightBackground) {
-    const shade = (value: number) => Math.round(value * 0.68);
-    return `rgb(${shade(red)}, ${shade(green)}, ${shade(blue)})`;
-  }
-  if (warmSkin && lightBackground) return muted;
-  if (lightBackground && sourceLightness > 0.88) return muted;
-  return `rgb(${Math.round(red)}, ${Math.round(green)}, ${Math.round(blue)})`;
 }
 
 export default function VisionAsciiPortrait() {
@@ -226,7 +206,7 @@ export default function VisionAsciiPortrait() {
           densities[index] = Math.min(1, darkness * 1.38);
           const eyeDetail = horizontal > 0.36 && horizontal < 0.64 && vertical > 0.36 && vertical < 0.55;
           if (eyeDetail && blue > red * 1.1 && blue > green * 1.08) darkness = Math.max(darkness, 0.62);
-          colors[index] = textColor(red, green, blue, ink, muted, paper, eyeDetail);
+          colors[index] = portraitColor(red, green, blue, ink, muted, paper, eyeDetail);
         }
       }
 

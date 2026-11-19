@@ -1,13 +1,26 @@
+import { useEffect, useState } from 'react';
 import { historicDrawings } from '../data/historic-drawings';
 import SketchPad from '../components/SketchPad';
 
+// Tempo que cada cartao fica em destaque (igual ao hover) antes de passar ao proximo.
+const HIGHLIGHT_MS = 7000;
+
 export default function HomePage() {
+  const [active, setActive] = useState(0);
+  useEffect(() => {
+    const timer = window.setInterval(
+      () => setActive((current) => (current + 1) % historicDrawings.length),
+      HIGHLIGHT_MS,
+    );
+    return () => window.clearInterval(timer);
+  }, []);
+
   return (
     <main className="home-stage" id="page-content" aria-label="Draw, início">
       <section className="archive-gallery" aria-label="Desenhos que abriram caminhos">
         {historicDrawings.map((drawing, index) => (
           <a
-            className="archive-card"
+            className={`archive-card${index === active ? ' is-active' : ''}`}
             href={drawing.source}
             key={drawing.title}
             target="_blank"
