@@ -468,6 +468,8 @@ def _patch_marker_run(monkeypatch, feed, keys):
         return next(key_iter, ord("q"))
 
     monkeypatch.setattr(app_module, "_require_gui_backend", lambda: None)
+    monkeypatch.setattr(app_module, "_open_window", lambda fullscreen: None)
+    monkeypatch.setattr(app_module.cv2, "resizeWindow", lambda *a, **k: None)
     monkeypatch.setattr(app_module, "open_capture", lambda *a, **k: feed)
     monkeypatch.setattr(paper_module, "warp_paper", fake_warp)
     monkeypatch.setattr(app_module.cv2, "imshow", lambda *a, **k: None)
@@ -508,3 +510,222 @@ def test_markers_stall_apos_quadro_sem_folha_nao_salva(monkeypatch, tmp_path, ca
 
     assert list(tmp_path.glob("canvas_*.png")) == []
     assert "Nada a salvar" in capsys.readouterr().out
+
+
+def _reset_camera_menu(monkeypatch, current=0):
+    state = app_module._camera_menu
+    monkeypatch.setitem(state, "open", False)
+    monkeypatch.setitem(state, "items", [])
+    monkeypatch.setitem(state, "current", current)
+    monkeypatch.setitem(state, "busy", None)
+    monkeypatch.setitem(state, "request", None)
+    return state
+
+
+def test_camera_label_formats_each_kind_of_source():
+    assert app_module._camera_label(2) == "Camera 2"
+    assert app_module._camera_label("http://192.168.0.10:8080/video") == (
+        "Rede: 192.168.0.10:8080"
+    )
+    assert app_module._camera_label("captures/sessao.drawcap") == "sessao.drawcap"
+
+
+def test_list_cameras_adds_the_current_source_when_it_is_not_a_device(monkeypatch):
+    monkeypatch.setattr(
+        app_module, "_video_nodes", lambda: ["/dev/video0", "/dev/video2"]
+    )
+    assert app_module._list_cameras(0) == [("Camera 0", 0), ("Camera 2", 2)]
+    url = "http://host/video"
+    assert app_module._list_cameras(url)[0] == ("Rede: host", url)
+
+
+def test_camera_click_opens_the_menu_and_selects_another_camera(monkeypatch):
+    state = _reset_camera_menu(monkeypatch)
+    monkeypatch.setattr(
+        app_module, "_video_nodes", lambda: ["/dev/video0", "/dev/video2"]
+    )
+    monkeypatch.setattr(app_module, "_window_size", lambda: (1600, 640))
+    layout = app_module._camera_layout()
+    cx, cy, _ = layout["dot"]
+    assert app_module._camera_click(cx, cy) is True
+    assert state["open"] and len(state["items"]) == 2
+    layout = app_module._camera_layout()
+    rx, ry, _, _ = layout["rows"][1]
+    assert app_module._camera_click(rx + 3, ry + 3) is True
+    assert not state["open"] and state["request"] == 2
+
+
+def test_camera_click_on_the_current_camera_or_outside_requests_nothing(monkeypatch):
+    state = _reset_camera_menu(monkeypatch)
+    monkeypatch.setattr(
+        app_module, "_video_nodes", lambda: ["/dev/video0", "/dev/video2"]
+    )
+    monkeypatch.setattr(app_module, "_window_size", lambda: (1600, 640))
+    cx, cy, _ = app_module._camera_layout()["dot"]
+    app_module._camera_click(cx, cy)
+    rx, ry, _, _ = app_module._camera_layout()["rows"][0]
+    assert app_module._camera_click(rx + 3, ry + 3) is True
+    assert state["request"] is None and not state["open"]
+    app_module._camera_click(cx, cy)
+    assert app_module._camera_click(5, 5) is False
+    assert not state["open"] and state["request"] is None
+
+
+def _reset_settings(monkeypatch):
+    state = app_module._settings
+    monkeypatch.setitem(state, "open", False)
+    monkeypatch.setitem(
+        state, "on", {key: False for key, _ in app_module._SETTINGS_ITEMS}
+    )
+    monkeypatch.setitem(app_module._camera_menu, "open", False)
+    monkeypatch.setattr(app_module, "_window_size", lambda: (1600, 640))
+    return state
+
+
+def test_settings_click_opens_and_toggles_options_without_closing(monkeypatch):
+    state = _reset_settings(monkeypatch)
+    cx, cy, _ = app_module._settings_layout()["gear"]
+    assert app_module._settings_click(cx, cy) is True and state["open"]
+    rx, ry, _, _ = app_module._settings_layout()["rows"][1]
+    assert app_module._settings_click(rx + 3, ry + 3) is True
+    assert state["open"] and state["on"]["latency"] is True
+    assert app_module._settings_click(rx + 3, ry + 3) is True
+    assert state["on"]["latency"] is False
+    assert app_module._settings_click(5, 5) is False and not state["open"]
+
+
+def test_hud_values_only_show_what_is_enabled(monkeypatch):
+    state = _reset_settings(monkeypatch)
+    monkeypatch.setitem(app_module._hud, "captured_at", None)
+    monkeypatch.setitem(app_module._hud, "fps", 14.5)
+    monkeypatch.setitem(app_module._mouse, "pos", (10, 20))
+    assert app_module._hud_values() == {"probe": None, "latency": None, "fps": None}
+    state["on"].update(probe=True, fps=True)
+    values = app_module._hud_values()
+    assert values["probe"] == (10, 20) and values["fps"] == 14.5
+
+
+def test_apply_fullscreen_only_calls_cv2_when_the_option_changes(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        app_module.cv2, "setWindowProperty", lambda *args: calls.append(args)
+    )
+    monkeypatch.setattr(app_module, "_fullscreen_applied", [False])
+    monkeypatch.setitem(app_module._settings["on"], "fullscreen", False)
+    app_module._apply_fullscreen()
+    assert calls == []
+    app_module._settings["on"]["fullscreen"] = True
+    app_module._apply_fullscreen()
+    app_module._apply_fullscreen()
+    assert [c[2] for c in calls] == [app_module.cv2.WINDOW_FULLSCREEN]
+    app_module._settings["on"]["fullscreen"] = False
+    app_module._apply_fullscreen()
+    assert [c[2] for c in calls][-1] == app_module.cv2.WINDOW_NORMAL
+    assert len(calls) == 2
+
+
+def test_mouse_events_are_mapped_back_to_layout_coordinates(monkeypatch):
+    monkeypatch.setitem(app_module._view_map, "scale", 0.5)
+    monkeypatch.setitem(app_module._view_map, "offset", (100, 40))
+    monkeypatch.setitem(app_module._mouse, "pos", None)
+    app_module._on_mouse(app_module.cv2.EVENT_MOUSEMOVE, 300, 200, 0, None)
+    assert app_module._mouse["pos"] == (400, 320)
+
+
+def test_window_size_uses_the_real_rect_down_to_a_small_floor(monkeypatch):
+    monkeypatch.setattr(app_module, "_window_sized", {True})
+    monkeypatch.setattr(app_module, "_window_rect", lambda: (400, 200))
+    assert app_module._window_size() == (400, 200)
+    monkeypatch.setattr(app_module, "_window_rect", lambda: (300, 100))
+    assert app_module._window_size() == (1600, 640)
+
+
+def test_camera_menu_with_many_cameras_scrolls_and_selects_absolute_rows(monkeypatch):
+    state = _reset_camera_menu(monkeypatch)
+    monkeypatch.setattr(app_module, "_window_size", lambda: (1600, 640))
+    monkeypatch.setattr(
+        app_module,
+        "_list_cameras",
+        lambda current: [(f"Camera {i}", i) for i in range(30)],
+    )
+    monkeypatch.setitem(state, "scroll", 0)
+    cx, cy, _ = app_module._camera_layout()["dot"]
+    assert app_module._camera_click(cx, cy) is True
+    fx = app_module._camera_fx()
+    layout = app_module._camera_layout()
+    assert len(fx["items"]) == layout["visible"] < 30
+    monkeypatch.setitem(state, "scroll", 3)
+    layout = app_module._camera_layout()
+    assert layout["first"] == 3
+    rx, ry, _, _ = layout["rows"][0]
+    assert app_module._camera_click(rx + 3, ry + 3) is True
+    assert state["request"] == 3
+
+
+def test_open_ready_source_requires_a_first_frame(monkeypatch):
+    class _Dead:
+        released = 0
+
+        def isOpened(self):
+            return True
+
+        def read(self):
+            return False, None
+
+        def release(self):
+            _Dead.released += 1
+
+    monkeypatch.setattr(app_module, "open_capture", lambda *a, **k: _Dead())
+    with pytest.raises(RuntimeError, match="nao entregou quadros"):
+        app_module._open_ready_source("x", ready_seconds=0.3)
+
+    class _Live(_Dead):
+        def read(self):
+            return True, np.zeros((8, 8, 3), np.uint8)
+
+    monkeypatch.setattr(app_module, "open_capture", lambda *a, **k: _Live())
+    source = app_module._open_ready_source("x", ready_seconds=2.0)
+    try:
+        assert source.wait_next(0, timeout=1.0) is not None
+    finally:
+        source.stop()
+
+
+def test_waiting_view_keeps_the_controls_available():
+    from draw import view as view_module
+
+    waiting = app_module._waiting_view()
+    view = view_module.compose_view(waiting, view_module.blank_sheet())
+    assert waiting.shape == (720, 1280, 3) and view.shape == (640, 1600, 3)
+
+
+def test_camera_menu_arrows_scroll_within_bounds_without_selecting(monkeypatch):
+    state = _reset_camera_menu(monkeypatch)
+    monkeypatch.setattr(app_module, "_window_size", lambda: (1600, 640))
+    monkeypatch.setattr(
+        app_module,
+        "_list_cameras",
+        lambda current: [(f"Camera {i}", i) for i in range(30)],
+    )
+    cx, cy, _ = app_module._camera_layout()["dot"]
+    app_module._camera_click(cx, cy)
+    layout = app_module._camera_layout()
+    ux, uy, _, _ = layout["scroll_up"]
+    dx, dy, _, _ = layout["scroll_down"]
+    assert app_module._camera_click(ux + 2, uy + 2) is True and state["scroll"] == 0
+    for _ in range(100):
+        assert app_module._camera_click(dx + 2, dy + 2) is True
+    layout = app_module._camera_layout()
+    assert state["scroll"] == 30 - layout["visible"] == layout["first"]
+    assert state["open"] and state["request"] is None
+    assert app_module._camera_click(ux + 2, uy + 2) is True
+    assert state["scroll"] == 30 - layout["visible"] - 1, "sobe 1 de imediato"
+
+
+def test_mouse_wheel_events_are_ignored_by_the_handler(monkeypatch):
+    monkeypatch.setitem(app_module._view_map, "scale", 1.0)
+    monkeypatch.setitem(app_module._view_map, "offset", (0, 0))
+    monkeypatch.setitem(app_module._mouse, "pos", None)
+    _reset_camera_menu(monkeypatch)
+    app_module._camera_menu["open"] = True
+    app_module._on_mouse(app_module.cv2.EVENT_MOUSEWHEEL, 5, 5, 7 << 16, None)

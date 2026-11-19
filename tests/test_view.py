@@ -97,3 +97,111 @@ def test_dead_source_view_uses_the_message_card():
 def test_error_view_paints_title_and_lines():
     view = view_module.error_view(None, "falhou", ["linha 1", "linha 2"])
     assert view.shape == (640, 1280, 3)
+
+
+def test_camera_menu_layout_sits_inside_the_camera_corner():
+    cam, canvas = _camera(), np.full((1200, 850, 3), 255, np.uint8)
+    layout = view_module.camera_menu_layout((1600, 640), cam.shape, canvas.shape, 3)
+    cx, cy, r = layout["dot"]
+    x, y, w, h = layout["card"]
+    assert 0 < cx < 1120 and 0 < cy < 640
+    assert y + h < cy - r and x + w == cx + r
+    assert len(layout["rows"]) == 3
+    assert view_module.point_in_dot(layout, (cx, cy))
+    assert not view_module.point_in_dot(layout, (cx - 60, cy))
+    rx, ry, rw, rh = layout["rows"][1]
+    assert view_module.row_at(layout, (rx + 2, ry + 2)) == 1
+    assert view_module.row_at(layout, (cx, cy)) is None
+    assert view_module.point_in_card(layout, (x + 2, y + 2))
+
+
+def test_camera_menu_draws_without_mutating_inputs():
+    cam, canvas = _camera(), np.full((1200, 850, 3), 255, np.uint8)
+    closed = view_module.compose_view(cam, canvas)
+    items = [{"label": "Camera 0", "selected": True, "hover": 0.5}]
+    opened = view_module.compose_view(
+        cam,
+        canvas,
+        camera_menu={"dot": 1.0, "opened": True, "progress": 1.0, "items": items},
+    )
+    assert closed.shape == opened.shape and (closed != opened).any()
+    assert (cam == 120).all() and (canvas == 255).all()
+
+
+def test_settings_menu_layout_and_hud_render():
+    layout = view_module.settings_menu_layout((1600, 640), 3)
+    cx, cy, r = layout["gear"]
+    assert cx + r < 1600 and cy > 640 - 36
+    assert view_module.point_in_gear(layout, (cx, cy))
+    assert len(layout["rows"]) == 3 and layout["card"][1] + layout["card"][3] < 640 - 36
+    cam, canvas = _camera(), np.full((1200, 850, 3), 255, np.uint8)
+    base = view_module.compose_view(cam, canvas)
+    items = [{"label": "FPS", "on": True, "hover": 0.0}] * 3
+    with_ui = view_module.compose_view(
+        cam,
+        canvas,
+        settings_menu={"gear": 1.0, "opened": True, "progress": 1.0, "items": items},
+        hud={"probe": (300, 300), "latency": 80.0, "fps": 14.0},
+    )
+    assert base.shape == with_ui.shape and (base != with_ui).any()
+
+
+def test_camera_menu_layout_limits_rows_to_the_panel_and_scrolls():
+    cam, canvas = _camera(), np.full((1200, 850, 3), 255, np.uint8)
+    layout = view_module.camera_menu_layout((1600, 640), cam.shape, canvas.shape, 30)
+    assert 1 <= layout["visible"] < 30 and len(layout["rows"]) == layout["visible"]
+    x, y, w, h = layout["card"]
+    assert y >= 0 and all(ry >= 0 for _, ry, _, _ in layout["rows"])
+    scrolled = view_module.camera_menu_layout(
+        (1600, 640), cam.shape, canvas.shape, 30, first=99
+    )
+    assert scrolled["first"] == 30 - scrolled["visible"]
+
+
+def test_row_glow_clips_rows_that_leave_the_image():
+    studio = np.zeros((100, 200, 3), np.uint8)
+    view_module._row_glow(studio, (10, -14, 100, 28), 1.0, 1.0)
+    assert studio.any()
+
+
+def test_hud_moves_to_the_footer_when_the_camera_leaves_no_side_margin():
+    canvas = np.full((1200, 850, 3), 255, np.uint8)
+    cam = np.full((1080, 1920, 3), 120, np.uint8)
+    size = (1920, 1080)
+    base = view_module.compose_view(cam, canvas, size=size)
+    shown = view_module.compose_view(
+        cam, canvas, size=size, hud={"fps": 14.0, "latency": 50.0}
+    )
+    ys, _xs = np.nonzero((base != shown).any(axis=2))
+    assert ys.size and ys.min() > 1080 - 62
+
+
+def test_camera_menu_scroll_arrows_exist_only_when_the_list_overflows():
+    cam, canvas = _camera(), np.full((1200, 850, 3), 255, np.uint8)
+    short = view_module.camera_menu_layout((1600, 640), cam.shape, canvas.shape, 3)
+    assert short["scroll_up"] is None and short["scroll_down"] is None
+    layout = view_module.camera_menu_layout((1600, 640), cam.shape, canvas.shape, 30)
+    ux, uy, uw, uh = layout["scroll_up"]
+    dx, dy, dw, dh = layout["scroll_down"]
+    assert view_module.scroll_hit(layout, (ux + 2, uy + 2)) == -1
+    assert view_module.scroll_hit(layout, (dx + 2, dy + 2)) == 1
+    assert view_module.row_at(layout, (ux + 2, uy + 2)) is None
+    rx, ry, _, _ = layout["rows"][0]
+    assert view_module.scroll_hit(layout, (rx + 2, ry + 2)) is None
+    assert view_module.row_at(layout, (rx + 2, ry + 2)) == 0
+    items = [
+        {"label": f"Camera {i}", "selected": False, "hover": 0.0} for i in range(30)
+    ]
+    drawn = view_module.compose_view(
+        cam,
+        canvas,
+        camera_menu={
+            "dot": 0.0,
+            "opened": True,
+            "progress": 1.0,
+            "items": items[: layout["visible"]],
+            "count": 30,
+            "first": 0,
+        },
+    )
+    assert drawn.shape == (640, 1600, 3)
