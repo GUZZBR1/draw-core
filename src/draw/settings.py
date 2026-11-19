@@ -32,6 +32,30 @@ class PipelineConfig:
     - seg_hand_occlusion (era DRAW_SEG_HAND_OCCLUSION): a classe mão
       do segmentador vira segundo sinal de oclusão — basta um dizer
       "mão" para a passada não enxergar a folha ali.
+    - coverage_iou_floor: piso do IoU entre o quad retificado e a
+      máscara de cobertura seg, no espaço da câmera. O quad fantasma
+      da mesa vazia — a máscara marca um blob espúrio e o fit infla
+      quatro cantos sobre mesa — mede IoU perto de zero; a folha
+      real com quad estourado em movimento segue dominada pela
+      interseção. Abaixo do piso a passada de tinta não sobe:
+      submeter a região é trabalho morto e cada pixel é mesa.
+      Medido nas capturas s1–s4 com o draw_seg de produção
+      (2026-11-19, 1 frame a cada 5): 52 quads fantasmas de mesa
+      vazia com IoU 0,044–0,108; folhas reais com IoU ≥ 0,298 (pior
+      caso em s3, geometria; s2/s4 ≥ 0,86). 0,2 separa os dois lados
+      com margem ~1,5x para cada um. Fração do quad coberta e IoU por
+      componente conexo foram medidos e NÃO separam (se sobrepõem).
+      A máscara é a cobertura (papel+mão+tinta) de propósito: na mesa
+      vazia o seg marca 15%–24% do frame como mão fora do quad, e é
+      isso que derruba o IoU do fantasma — sem a classe mão o
+      fantasma sobe para 0,23–0,41 e cruza a folha real.
+      LIMITAÇÃO CONHECIDA (não medida): a mesma cobertura conta mão
+      ou antebraço FORA da folha na união do IoU. Folha pequena com um
+      antebraço grande em cena pode cair abaixo do piso e ser vetada
+      (a tinta não sobe até a mão sair). Nenhuma captura real desse
+      caso existe ainda; o pior caso medido com mão (s4, escrita) fica
+      em IoU 0,864. Se aparecer, `coverage_iou_floor=0` desliga o piso.
+      0 desliga o piso.
     - follow_move (era DRAW_INK_FOLLOW_MOVE): com a geometria de
       tinta congelada sem mão, um deslocamento sustentado da folha
       reparte o histórico de cantos na posição nova.
@@ -43,5 +67,6 @@ class PipelineConfig:
     canvas_persist: bool = True
     skip_stale: bool = True
     seg_hand_occlusion: bool = True
+    coverage_iou_floor: float = 0.2
     follow_move: bool = True
     ink: InkConfig = InkConfig()

@@ -233,6 +233,105 @@ def test_result_without_mask_clears_coverage():
     assert last[3] is None
 
 
+def _mask_block(y0, y1, x0, x1, shape=(720, 1280)):
+    mask = np.zeros(shape, dtype=np.uint8)
+    mask[y0:y1, x0:x1] = 255
+    return mask
+
+
+def test_coverage_iou_floor_vetoes_phantom_quad():
+    """Quad inflado sobre blob espúrio não sobe para a tinta.
+
+    Mesa vazia real: a seg marca um blob longe do quad que o fit
+    inflou (IoU quad×máscara ~0). Medido nas capturas s1–s4:
+    fantasmas 0,044–0,108, folha real a partir de 0,298.
+    """
+    mask = _mask_block(50, 400, 900, 1100)  # blob à direita, quad em x<500
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", {"coverage_mask": mask})
+    )
+    _drive(loop, 40)
+    assert loop.tracker.corners is not None
+    assert ink.submitted == []
+
+
+def test_coverage_iou_floor_vetoes_phantom_through_app_detector():
+    """Caminho real do app (review #45): a mascara do fantasma passa pelo
+    filtro de 5% do detector combinado, e publicada e o piso veta.
+
+    Medido nas capturas s1 (mesa vazia) com o draw_seg de producao:
+    as 52 mascaras fantasmas ocupam 17%-28% do frame (todas >5%) e
+    o IoU quad x mascara fica em 0,044-0,108. O fantasma do teste
+    reproduz o pior caso medido (IoU ~0,10, sobrepondo o quad): um
+    piso frouxo (0,05) deixa passar, o 0,2 veta.
+    """
+    from draw import app as app_module
+
+    phantom = _mask_block(100, 400, 400, 1100)  # cobre 1/4 do QUAD + mesa
+    assert 0.17 < np.count_nonzero(phantom) / phantom.size < 0.28
+
+    class _Neural:
+        last_presence_logit = 3.0
+        last_coverage_mask = phantom
+        last_hand_mask = None
+
+        def __call__(self, frame, *, return_mask=True):
+            return QUAD.copy(), "paper", phantom
+
+    corners, verdict, _trace, extras = app_module._detect_sheet_combined_traced(
+        _frame(), _Neural()
+    )
+    assert "coverage_mask" in extras  # sobreviveu ao filtro de 5%
+    quad = np.zeros(phantom.shape, bool)
+    quad[100:400, 100:500] = True  # QUAD é retângulo alinhado
+    mask = phantom > 0
+    iou = (quad & mask).sum() / (quad | mask).sum()
+    assert 0.09 < iou < 0.11  # pior fantasma medido: 0,108
+
+    loop, _det, ink = _make_loop(lambda _i: (corners, verdict, extras))
+    _drive(loop, 40)
+    assert loop.tracker.corners is not None
+    assert ink.submitted == []
+
+    loose, _det, ink_loose = _make_loop(
+        lambda _i: (corners, verdict, extras),
+        config=PipelineConfig(coverage_iou_floor=0.05),
+    )
+    _drive(loose, 40)
+    assert ink_loose.submitted, "o teste precisa discriminar o piso"
+
+
+def test_coverage_iou_floor_passes_aligned_sheet():
+    """Máscara alinhada ao quad (folha real) segue submetendo."""
+    mask = _mask_block(100, 400, 100, 500)  # coincide com o QUAD
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", {"coverage_mask": mask})
+    )
+    _drive(loop, 40)
+    assert ink.submitted, "a folha real não pode ser vetada"
+
+
+def test_coverage_iou_floor_zero_disables():
+    """coverage_iou_floor=0 desliga o piso (comportamento antigo)."""
+    mask = _mask_block(50, 400, 900, 1100)
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", {"coverage_mask": mask}),
+        config=PipelineConfig(coverage_iou_floor=0.0),
+    )
+    _drive(loop, 40)
+    assert ink.submitted, "piso zerado mantém a passada de antes"
+
+
+def test_coverage_iou_floor_inert_without_mask():
+    """Resultado sem máscara: piso inerte, submit segue normal."""
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None),
+        config=PipelineConfig(coverage_iou_floor=0.9),
+    )
+    _drive(loop, 40)
+    assert ink.submitted
+
+
 def _seen_then_lost():
     """Vê a folha nos 6 primeiros chamados, depois perde tudo."""
 
