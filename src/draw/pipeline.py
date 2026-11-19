@@ -34,7 +34,7 @@ import cv2
 import numpy as np
 
 from . import config as config_module
-from . import contracts, exposure, paper, tracker
+from . import contracts, exposure, paper, photometry, tracker
 from .ink import render as ink_render
 from .settings import PipelineConfig
 from .tracker import _SHEET_LOST_MIN_FRAMES
@@ -201,6 +201,25 @@ class Pipeline:
         self.last_ink_gain = 1.0
         self.generation_events = {"drop": 0, "reopen": 0}
 
+    @staticmethod
+    def _divnorm_page(ink_warped, coverage):
+        """ink_divnorm: domínio de entrada do modelo de tinta v4.
+
+        Paridade com o treino (draw-training pack_round4: mask_sheet
+        -> division_normalize): o fora-da-folha é preenchido ANTES da
+        normalização. Sem isso a mesa clara entra no blur de
+        iluminação e escurece a faixa de papel encostada nela — uma
+        borda falsa dentro da cobertura, que o preenchimento final
+        não alcança. O preenchimento usa a média da própria página
+        (o mesmo do caminho sem divnorm), não um branco fixo: papel
+        sob sombra ao lado de um branco fixo repetiria a borda.
+        """
+        if coverage is not None and coverage.any():
+            filled = ink_warped.copy()
+            filled[~coverage] = ink_warped[coverage].mean(axis=0).astype(np.uint8)
+            return photometry.division_normalize(filled)
+        return photometry.division_normalize(ink_warped)
+
     def _sheet_coverage_page(self, warp_corners):
         """Cobertura da folha na grade da página, ou None sem evidência.
 
@@ -306,7 +325,11 @@ class Pipeline:
                 seg_clear = ~seg_hand_dil
                 visible = seg_clear if visible is None else (visible & seg_clear)
         coverage = self._sheet_coverage_page(warp_corners)
-        if self._config.ink_auto_gain:
+        if self._config.ink_auto_gain and not self._config.ink_divnorm:
+            # Com ink_divnorm o ganho NÃO roda: a divisão por I/blur(I) já
+            # anula a escala, e o ganho só podia piorar — clipava em 255 o
+            # papel claro de uma folha com luz desigual e apagava o traço
+            # fraco sobre ele antes da normalização (review do PR #48).
             # Página escura (exposição no teto de 30 fps): o ganho que o
             # sensor não dá entra aqui, antes do page_clean. Estimado só
             # sobre a folha (coverage): a mesa clara do quad não cancela
@@ -324,6 +347,8 @@ class Pipeline:
             ink_warped, self.last_ink_gain = exposure.apply_paper_gain(
                 ink_warped, gain_mask
             )
+        if self._config.ink_divnorm:
+            ink_warped = self._divnorm_page(ink_warped, coverage)
         if coverage is not None:
             # Fora da folha o warp é preto: a transição
             # folha->preto é uma aresta artificial que o page_clean
