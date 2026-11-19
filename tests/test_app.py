@@ -751,3 +751,24 @@ def test_main_orientation_paisagem_recusa_markers(monkeypatch):
     with pytest.raises(SystemExit) as error:
         app_module.main()
     assert error.value.code == 2
+
+
+def test_main_ink_gain_liga_o_ganho_no_pipeline(monkeypatch):
+    """--ink-gain chega ao Pipeline como PipelineConfig(ink_auto_gain=True);
+    sem a flag, o preset de producao (desligado)."""
+    seen = []
+    monkeypatch.setattr(app_module, "run", lambda **kw: seen.append(kw))
+    for argv, expected in ((["draw"], False), (["draw", "--ink-gain"], True)):
+        monkeypatch.setattr(sys, "argv", argv)
+        app_module.main()
+        assert seen[-1]["pipeline_config"].ink_auto_gain is expected
+
+
+def test_markers_mode_rejects_ink_gain(monkeypatch):
+    """Modo marcadores não roda o pipeline de tinta: o ganho seria
+    ignorado em silêncio (review #52)."""
+    monkeypatch.setattr(app_module, "run", lambda **kw: None)
+    monkeypatch.setattr(sys, "argv", ["draw", "--markers", "--ink-gain"])
+    with pytest.raises(SystemExit) as error:
+        app_module.main()
+    assert error.value.code == 2

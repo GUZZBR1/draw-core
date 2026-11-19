@@ -34,7 +34,7 @@ import cv2
 import numpy as np
 
 from . import config as config_module
-from . import contracts, paper, tracker
+from . import contracts, exposure, paper, tracker
 from .ink import render as ink_render
 from .settings import PipelineConfig
 from .tracker import _SHEET_LOST_MIN_FRAMES
@@ -197,6 +197,8 @@ class Pipeline:
         # Observabilidade (sem efeito no laco): ultimo evento do
         # rastreador e contagem das aberturas de geracao por causa.
         self.last_tracker_event = None
+        # Ganho digital do ultimo warp de tinta (ink_auto_gain); 1.0 sem ganho.
+        self.last_ink_gain = 1.0
         self.generation_events = {"drop": 0, "reopen": 0}
 
     def _sheet_coverage_page(self, warp_corners):
@@ -304,6 +306,24 @@ class Pipeline:
                 seg_clear = ~seg_hand_dil
                 visible = seg_clear if visible is None else (visible & seg_clear)
         coverage = self._sheet_coverage_page(warp_corners)
+        if self._config.ink_auto_gain:
+            # Página escura (exposição no teto de 30 fps): o ganho que o
+            # sensor não dá entra aqui, antes do page_clean. Estimado só
+            # sobre a folha (coverage): a mesa clara do quad não cancela
+            # o ganho do papel, e o preenchimento abaixo já trabalha no
+            # domínio clareado.
+            # A mão visível fica fora da conta: a cobertura a inclui (o seg
+            # a conta como folha), mas uma mão clara não é papel e
+            # cancelaria o ganho do papel escuro ao redor (review do PR
+            # #52). `visible` já une os dois sinais de oclusão.
+            # Sem cobertura (detecção clássica não a fornece) a mão ainda
+            # sai da conta: `visible` sozinha serve de máscara.
+            gain_mask = coverage
+            if visible is not None:
+                gain_mask = visible if coverage is None else coverage & visible
+            ink_warped, self.last_ink_gain = exposure.apply_paper_gain(
+                ink_warped, gain_mask
+            )
         if coverage is not None:
             # Fora da folha o warp é preto: a transição
             # folha->preto é uma aresta artificial que o page_clean

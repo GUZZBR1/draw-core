@@ -126,7 +126,14 @@ class _FakeHandPresenceWorker:
 
 
 def _make_loop(
-    script, *, config=None, traces=None, ink=None, hand_presence=None, clock=None
+    script,
+    *,
+    config=None,
+    traces=None,
+    ink=None,
+    hand_presence=None,
+    hand_masker=None,
+    clock=None,
 ):
     det = _SyncDetectionWorker(script, traces=traces)
     ink = _FakeInkWorker() if ink is None else ink
@@ -134,6 +141,7 @@ def _make_loop(
         detection_worker=det,
         ink_worker=ink,
         hand_presence_worker=hand_presence,
+        hand_masker=hand_masker,
         config=config,
         clock=clock or (lambda: 0.0),
         log=lambda *_a: None,
@@ -347,6 +355,115 @@ def test_paisagem_submete_pagina_deitada_a_tinta():
         assert page.shape[:2] == (850, 1200)
     finally:
         config_module.apply_format("a4")
+
+
+def test_ink_auto_gain_brightens_dark_page_before_ink():
+    """ink_auto_gain: página escura (teto de exposição a 30 fps) chega
+    clara à tinta; sem o campo, o warp cru segue intacto."""
+    frame = np.full((720, 1280, 3), 80, np.uint8)  # papel subexposto
+    frame[200:300, 200:400] = 25  # traço
+
+    loop, _det, ink_raw = _make_loop(lambda _i: (QUAD.copy(), "paper", None))
+    _drive(loop, 40, frame=frame)
+    raw = ink_raw.pages[-1].image
+    assert loop.last_ink_gain == 1.0
+    assert abs(float(np.percentile(raw, 90)) - 80) < 2
+
+    loop, _det, ink_gain = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None),
+        config=PipelineConfig(ink_auto_gain=True),
+    )
+    _drive(loop, 40, frame=frame)
+    lit = ink_gain.pages[-1].image
+    assert loop.last_ink_gain == pytest.approx(2.5)
+    assert abs(float(np.percentile(lit, 90)) - 200) < 3
+    # Linear: o traço segue mais escuro que o papel.
+    assert float(lit.min()) < 0.5 * float(np.percentile(lit, 90))
+
+
+def test_ink_auto_gain_ignores_bright_desk_inside_the_quad():
+    """Review #52: o quad abrange papel escuro (86%) e mesa clara (14%);
+    o ganho é estimado só sobre a folha (cobertura), então o papel é
+    clareado em vez de o p90 da mesa cancelar o ganho."""
+    frame = np.full((720, 1280, 3), 225, np.uint8)  # mesa clara
+    frame[100:400, 100:442] = 80  # papel: 342 de 400 colunas do QUAD
+    coverage = _mask_block(100, 400, 100, 442)
+    script = lambda _i: (QUAD.copy(), "paper", {"coverage_mask": coverage})  # noqa: E731
+
+    loop, _det, _ink = _make_loop(script, config=PipelineConfig(ink_auto_gain=False))
+    _drive(loop, 40, frame=frame)
+    assert loop.last_ink_gain == 1.0
+
+    loop, _det, ink = _make_loop(script, config=PipelineConfig(ink_auto_gain=True))
+    _drive(loop, 40, frame=frame)
+    assert loop.last_ink_gain == pytest.approx(2.5, rel=0.1)
+    page = ink.pages[-1].image
+    assert float(np.percentile(page[page.mean(axis=2) < 255], 50)) > 150
+
+
+def test_ink_auto_gain_ignores_a_bright_hand_over_the_sheet():
+    """Review #52: a cobertura do seg inclui a mão; uma mão clara sobre
+    metade do quad cancelaria o ganho do papel escuro. O ganho usa só a
+    folha visível (cobertura & sem mão)."""
+    frame = np.full((720, 1280, 3), 80, np.uint8)  # papel escuro
+    frame[100:400, 100:300] = 235  # mão clara sobre metade do quad
+    coverage = _mask_block(100, 400, 100, 500)  # inclui a mão
+    hand = _mask_block(100, 400, 100, 300)
+    script = lambda _i: (  # noqa: E731
+        QUAD.copy(),
+        "paper",
+        {"coverage_mask": coverage, "hand_mask": hand},
+    )
+
+    loop, _det, _ink = _make_loop(script, config=PipelineConfig(ink_auto_gain=True))
+    _drive(loop, 40, frame=frame)
+    assert loop._hand_mask_det is not None
+    assert loop.last_ink_gain == pytest.approx(2.5, rel=0.1)  # papel, não a mão
+
+
+def test_ink_auto_gain_excludes_the_hand_without_sheet_coverage():
+    """Review #52: na detecção clássica não há máscara de cobertura; a mão
+    (landmarker/seg) ainda precisa sair da estimativa do ganho."""
+    frame = np.full((720, 1280, 3), 80, np.uint8)
+    frame[100:400, 100:300] = 235  # mão clara sobre metade do quad
+    hand = _mask_block(100, 400, 100, 300)
+    loop, _det, _ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", {"hand_mask": hand}),
+        config=PipelineConfig(ink_auto_gain=True),
+    )
+    _drive(loop, 40, frame=frame)
+    assert loop._hand_mask_det is not None
+    assert loop.last_ink_gain == pytest.approx(2.5, rel=0.1)
+
+
+def test_ink_auto_gain_excludes_the_hand_from_the_classic_hand_masker():
+    """Review #52: sem modelo neural, a detecção clássica só tem o
+    HandMasker (landmarker) para saber onde está a mão. Sem cobertura e
+    sem máscara semântica, a mão clara ainda sai da estimativa do ganho."""
+    frame = np.full((720, 1280, 3), 80, np.uint8)
+    frame[100:400, 100:300] = 235  # mão clara sobre metade do quad
+
+    class _Masker:
+        def mask(self, image):
+            camera = np.zeros(image.shape[:2], np.uint8)
+            camera[100:400, 100:300] = 255
+            return camera
+
+    loop, _det, _ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None),  # clássica: sem extras
+        config=PipelineConfig(ink_auto_gain=True),
+        hand_masker=_Masker(),
+    )
+    _drive(loop, 40, frame=frame)
+    assert loop._hand_mask_det is None  # nenhuma máscara semântica
+    assert loop.last_ink_gain == pytest.approx(2.5, rel=0.1)
+
+    loop, _det, _ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None),
+        config=PipelineConfig(ink_auto_gain=True),
+    )  # sem o masker, a mão clara cancela o ganho: o teste discrimina
+    _drive(loop, 40, frame=frame)
+    assert loop.last_ink_gain == 1.0
 
 
 def _seen_then_lost():
