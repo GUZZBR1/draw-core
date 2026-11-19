@@ -142,3 +142,47 @@ def test_sugestao_se_abstem_para_centros_de_marcadores():
         result = suggester.observe(projected_quad(), (720, 1280), sheet_boundary=False)
     assert result["suggestion"] is None
     assert result["reason"] == "marker_centers_not_sheet_boundary"
+
+
+def test_paisagem_troca_a_grade_e_mantem_mm_por_px():
+    """Caderno aberto/folha deitada: a grade deita, o lado longo segue
+    1200 px e a escala em mm não muda."""
+    assert config.paper_grid("a4", "paisagem") == (1200, 850)
+    assert (
+        config.paper_grid("caderno", "paisagem") == config.paper_grid("caderno")[::-1]
+    )
+    unit = config.mm_per_px("a4")
+    assert config.apply_format("a4", "paisagem") == (1200, 850)
+    assert (config.PAPER_W, config.PAPER_H) == (1200, 850)
+    assert config.PAPER_ORIENTATION == "paisagem"
+    assert config.mm_per_px() == unit
+    assert config.paper_mm() == (297.0, 210.0)
+    assert config.MARKER_CENTERS[2] == (1200 - 90, 850 - 90)
+    config.apply_format("a4")
+    assert config.PAPER_ORIENTATION == "retrato"
+    assert config.paper_mm() == (210.0, 297.0)
+
+
+def test_orientacao_desconhecida_e_recusada():
+    with pytest.raises(ValueError, match="orientacao"):
+        config.paper_grid("a4", "diagonal")
+
+
+def test_warp_sheet_em_paisagem_sai_deitado():
+    config.apply_format("a4", "paisagem")
+    try:
+        frame = np.zeros((600, 900, 3), np.uint8)
+        quad = np.float32([[50, 100], [850, 100], [850, 500], [50, 500]])
+        assert paper.warp_sheet(frame, quad).shape == (850, 1200, 3)
+    finally:
+        config.apply_format("a4")
+
+
+def test_paper_mm_valida_como_paper_grid():
+    """Mesma validação nas duas funções (review #50): orientação ou
+    formato desconhecido é ValueError, não dimensões inventadas."""
+    with pytest.raises(ValueError, match="orientacao"):
+        config.paper_mm("a4", "diagonal")
+    with pytest.raises(ValueError, match="formato"):
+        config.paper_mm("a9")
+    assert config.paper_mm("carta", "paisagem") == (279.0, 216.0)
