@@ -32,6 +32,8 @@ Draw is a bridge from a person’s paper sketch to digital tools that can interp
 - Hover feedback should be small and clear: a fine underline, slight color change, or a one-pixel lift. Avoid jitter, looping motion, and pointer-driven movement of content. The one exception is the webcam's red recording dot, which blinks only while the pointer or keyboard focus is on the webcam and stops (steady red under reduced motion) when it leaves.
 - The definition opens from the Draw wordmark only. It stays open while the pointer moves from the wordmark onto the card and closes when moving to Product or another control.
 - The custom page scrubber is a visible, compact glass capsule with a readable track and thumb. Keep pointer dragging and keyboard navigation; do not reduce it to a tiny line.
+- Drawing mode (Home sheet): the first stroke slides the header, the compact wordmark and its Product link out of the way. They return when the pointer reaches the top edge, when the page scrolls, or through the "Mostrar menu" button (touch and keyboard).
+- Home exceptions to the hover rule above: each Draw letter hops on hover (and the webcam follows the "w"), and the gallery highlights one card at a time every 7 s with the same lift as hover. Both are disabled under reduced motion.
 - Respect reduced-motion preferences.
 - The Product construction illustration is rendered as colored ASCII symbols on a canvas, using the same glyph-ranking approach as the Vision portrait. On entry its symbols appear from the top down, scattered, slowly over about 4.6 s, then the artwork stays still. Do not animate or parallax it afterward. Reduced-motion users see it at once.
 

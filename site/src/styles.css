@@ -63,7 +63,7 @@ body.is-sketching .brand-lockup {
   transition: translate .4s cubic-bezier(.22, .61, .36, 1), visibility 0s linear .4s;
 }
 @media (prefers-reduced-motion: reduce) {
-  .site-header, body.is-sketching .site-header, .brand-lockup { transition: none; }
+  .site-header, body.is-sketching .site-header, .brand-lockup, body.is-sketching .brand-lockup { transition: none; }
 }
 .nav-shell { box-sizing: border-box; border-style: solid; border-width: 1px; }
 .nav-link {
@@ -453,14 +453,14 @@ body.dark .sketch-canvas { cursor: url("data:image/svg+xml,%3Csvg xmlns='http://
   transition: transform 420ms cubic-bezier(.3,1.5,.5,1);
 }
 .wordmark-letter:hover { transform: translateY(-.07em); transition-duration: 200ms; }
-@media (prefers-reduced-motion: reduce) { .wordmark-letter { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .wordmark-letter, .wordmark-letter:hover { transition: none; transform: none; } }
 /* A webcam acompanha o pulo do "w". */
 .webcam-anchor { transition: translate 420ms cubic-bezier(.3,1.5,.5,1); }
 .wordmark:has(.wordmark-letter:last-child:hover) ~ .webcam-interaction .webcam-anchor {
   translate: 0 -.07em;
   transition-duration: 200ms;
 }
-@media (prefers-reduced-motion: reduce) { .webcam-anchor { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .webcam-anchor { transition: none; } .wordmark:has(.wordmark-letter:last-child:hover) ~ .webcam-interaction .webcam-anchor { translate: none; } }
 .webcam-interaction { position: absolute; z-index: 3; inset: 0; pointer-events: none; }
 .webcam-anchor {
   position: absolute;

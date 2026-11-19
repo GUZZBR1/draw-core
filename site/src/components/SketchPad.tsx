@@ -335,7 +335,15 @@ export default function SketchPad() {
       <button
         className="sketch-show-nav"
         type="button"
-        onClick={() => document.body.classList.remove('is-sketching')}
+        onClick={(event) => {
+          document.body.classList.remove('is-sketching');
+          // Acionado pelo teclado (detail 0): leva o foco ao menu que voltou.
+          if (event.detail === 0) {
+            requestAnimationFrame(() =>
+              document.querySelector<HTMLElement>('.site-header a[href], .site-header button')?.focus(),
+            );
+          }
+        }}
       >
         Mostrar menu
       </button>
