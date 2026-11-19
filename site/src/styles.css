@@ -55,14 +55,15 @@ button { color: inherit; font: inherit; }
 
 .site-header { transform: translateX(-50%); transition: translate .4s cubic-bezier(.22, .61, .36, 1), visibility 0s linear 0s; }
 /* Primeiro risco na folha: o header sobe e deixa a area livre. */
-body.is-sketching .site-header {
+body.is-sketching .site-header,
+body.is-sketching .brand-lockup {
   translate: 0 -160%;
   visibility: hidden;
   pointer-events: none !important;
   transition: translate .4s cubic-bezier(.22, .61, .36, 1), visibility 0s linear .4s;
 }
 @media (prefers-reduced-motion: reduce) {
-  .site-header, body.is-sketching .site-header { transition: none; }
+  .site-header, body.is-sketching .site-header, .brand-lockup { transition: none; }
 }
 .nav-shell { box-sizing: border-box; border-style: solid; border-width: 1px; }
 .nav-link {
@@ -364,6 +365,24 @@ a:focus-visible, button:focus-visible { outline: 2px solid #a7a071; outline-offs
   will-change: transform;
 }
 .sketch-brush-preview.is-visible { opacity: .7; }
+/* Alcance por toque/teclado para trazer o menu de volta durante o desenho. */
+.sketch-show-nav {
+  position: fixed;
+  z-index: 70;
+  top: 8px;
+  left: 50%;
+  display: none;
+  transform: translateX(-50%);
+  padding: 6px 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  cursor: pointer;
+}
+body.is-sketching .sketch-show-nav { display: block; }
 .sketch-hint {
   position: absolute;
   z-index: 1;
@@ -690,6 +709,8 @@ body:not(.dark) .construction-art::before {
   .vision-mist { filter: none; }
   .archive-art-surface, .archive-art-surface img, .archive-caption, .product-emerge { animation: none; }
   .archive-caption { transition: none; }
+  .archive-card:hover .archive-art-surface, .archive-card:focus-visible .archive-art-surface, .archive-card.is-active .archive-art-surface { transform: none; }
+  .archive-card:hover .archive-caption, .archive-card:focus-visible .archive-caption, .archive-card.is-active .archive-caption { transform: none; }
   .archive-card:hover .archive-art-surface, .archive-card:focus-visible .archive-art-surface { transform: none; }
   .archive-trace { display: none; }
   .wordmark { animation: none; }

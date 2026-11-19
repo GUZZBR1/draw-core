@@ -156,7 +156,14 @@ export default function SketchPad() {
   }, [repaint]);
 
   useEffect(() => {
-    const themeObserver = new MutationObserver(repaint);
+    let wasDark = document.body.classList.contains('dark');
+    const themeObserver = new MutationObserver(() => {
+      // So repinta quando o tema muda; outras classes (is-sketching) nao importam.
+      const isDark = document.body.classList.contains('dark');
+      if (isDark === wasDark) return;
+      wasDark = isDark;
+      repaint();
+    });
     themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
     return () => themeObserver.disconnect();
   }, [repaint]);
@@ -184,6 +191,10 @@ export default function SketchPad() {
     };
     let lastY = window.scrollY;
     const onScroll = () => {
+      if (!body.classList.contains('is-sketching')) {
+        lastY = window.scrollY;
+        return;
+      }
       if (Math.abs(window.scrollY - lastY) > 24) reveal();
     };
     window.addEventListener('pointermove', onMove);
@@ -211,7 +222,9 @@ export default function SketchPad() {
     activeBoundsRef.current = bounds;
     const point = makePoint(event.clientX, event.clientY, event.pressure, bounds);
     activePointerRef.current = event.pointerId;
-    document.body.classList.add('is-sketching');
+    if (!document.body.classList.contains('is-sketching')) {
+      document.body.classList.add('is-sketching');
+    }
     activeStrokeRef.current = { color, width: brushSize, tool, points: [point] };
     paintStroke(event.currentTarget.getContext('2d')!, activeStrokeRef.current, event.currentTarget.clientWidth, event.currentTarget.clientHeight);
   }
@@ -319,6 +332,13 @@ export default function SketchPad() {
           <TrashIcon />
         </button>
       </div>
+      <button
+        className="sketch-show-nav"
+        type="button"
+        onClick={() => document.body.classList.remove('is-sketching')}
+      >
+        Mostrar menu
+      </button>
       <p className="sketch-hint" aria-hidden="true">Toque e arraste, solte quando terminar</p>
       <span
         ref={previewRef}
