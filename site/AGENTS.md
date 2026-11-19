@@ -7,7 +7,7 @@ Before changing the website, read [`design.md`](design.md). Treat it as the sour
 - Website source lives in this directory and uses React, TypeScript, Tailwind CSS v4, React Router, and Motion (`motion/react`). Keep that stack unless the user asks to change it.
 - Reuse the existing design tokens and shared header patterns. Do not introduce fonts, colors, page sections, decorative rules, or animations that conflict with `design.md`.
 - Keep the Draw definition card in the shared header only. Do not add another definition block to Vision or Product.
-- Keep the Product construction artwork static.
+- The Product construction artwork is ASCII symbols that reveal once on entry, then stay still.
 - Preserve keyboard access, reduced-motion support, dark mode, and responsive behavior when editing interactions.
 - Open the definition card from the Draw wordmark only. Moving into the card keeps it open; moving to Product closes it.
 - Keep the custom scroll scrubber large enough to read and interact with. Preserve pointer dragging and keyboard control.

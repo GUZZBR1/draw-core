@@ -1,39 +1,11 @@
 import { useEffect, useRef } from 'react';
 
-const SOURCE_GLYPHS = Array.from("$@B%8&WM#*oahkbdpqwmZO0QLCJUYXzcvunxrjft/\\|()1{}[]?-_+~<>i!lI;:,\"^`'. ");
-const SAMPLE_SIZE = 5;
+import { cellNoise, chooseGlyph, cssColor, interpolateInto, luminance, parseRgb, rankGlyphs, smoothstep, type RankedGlyph } from '../lib/ascii';
+
+const SAMPLE_SIZE = 3;
 const REVEAL_DURATION = 2.8;
 const REVEAL_LEAD = 2.1;
 const REVEAL_FADE = 0.09;
-
-function cellNoise(col: number, row: number) {
-  const value = Math.sin(col * 127.1 + row * 311.7) * 43758.5453;
-  return value - Math.floor(value);
-}
-
-function cssColor(element: Element, token: string, fallback: string) {
-  return getComputedStyle(element).getPropertyValue(token).trim() || fallback;
-}
-
-function parseRgb(color: string) {
-  const hex = color.match(/^#([\da-f]{6})$/i)?.[1];
-  if (hex) return [0, 2, 4].map((offset) => Number.parseInt(hex.slice(offset, offset + 2), 16));
-  const values = color.match(/[\d.]+/g)?.slice(0, 3).map(Number);
-  return values?.length === 3 ? values : [34, 35, 31];
-}
-
-function luminance([red, green, blue]: number[]) {
-  const channel = (value: number) => {
-    const normalized = value / 255;
-    return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
-  };
-  return channel(red) * 0.2126 + channel(green) * 0.7152 + channel(blue) * 0.0722;
-}
-
-function smoothstep(edge0: number, edge1: number, value: number) {
-  const progress = Math.max(0, Math.min(1, (value - edge0) / (edge1 - edge0)));
-  return progress * progress * (3 - 2 * progress);
-}
 
 function eyeMask(x: number, y: number, centerX: number) {
   const distance = Math.hypot((x - centerX) / 0.052, (y - 0.432) / 0.067);
@@ -44,57 +16,6 @@ function motionPulse(elapsed: number, start: number, duration: number, period: n
   const phase = ((elapsed - start) % period + period) % period;
   if (elapsed < start || phase >= duration) return 0;
   return smoothstep(0, 0.13, phase) * (1 - smoothstep(duration - 0.13, duration, phase));
-}
-
-function rankGlyphs(font: string, cellW: number, cellH: number) {
-  const measure = document.createElement('canvas');
-  measure.width = Math.ceil(cellW);
-  measure.height = Math.ceil(cellH);
-  const context = measure.getContext('2d', { willReadFrequently: true });
-  if (!context) return SOURCE_GLYPHS.map((character, index) => ({ character, darkness: 1 - index / SOURCE_GLYPHS.length }));
-
-  context.font = font;
-  context.textBaseline = 'top';
-  return SOURCE_GLYPHS.map((character) => {
-    context.fillStyle = '#fff';
-    context.fillRect(0, 0, measure.width, measure.height);
-    context.fillStyle = '#000';
-    context.fillText(character, 0, 0);
-    const pixels = context.getImageData(0, 0, measure.width, measure.height).data;
-    let darkness = 0;
-    for (let index = 0; index < pixels.length; index += 4) darkness += 255 - pixels[index];
-    return { character, darkness: darkness / (measure.width * measure.height * 255) };
-  }).sort((a, b) => b.darkness - a.darkness);
-}
-
-function chooseGlyph(glyphs: Array<{ character: string; darkness: number }>, target: number) {
-  let low = 0;
-  let high = glyphs.length - 1;
-  while (low < high) {
-    const middle = Math.floor((low + high) / 2);
-    if (glyphs[middle].darkness > target) low = middle + 1;
-    else high = middle;
-  }
-  if (low === 0) return glyphs[0];
-  const before = glyphs[low - 1];
-  const after = glyphs[low];
-  return Math.abs(before.darkness - target) < Math.abs(after.darkness - target) ? before : after;
-}
-
-function interpolatePixel(pixels: Uint8ClampedArray, width: number, height: number, x: number, y: number) {
-  const x0 = Math.max(0, Math.min(width - 1, Math.floor(x)));
-  const y0 = Math.max(0, Math.min(height - 1, Math.floor(y)));
-  const x1 = Math.min(width - 1, x0 + 1);
-  const y1 = Math.min(height - 1, y0 + 1);
-  const tx = x - Math.floor(x);
-  const ty = y - Math.floor(y);
-  const output = [0, 0, 0, 0];
-  for (let channel = 0; channel < 4; channel += 1) {
-    const top = pixels[(y0 * width + x0) * 4 + channel] * (1 - tx) + pixels[(y0 * width + x1) * 4 + channel] * tx;
-    const bottom = pixels[(y1 * width + x0) * 4 + channel] * (1 - tx) + pixels[(y1 * width + x1) * 4 + channel] * tx;
-    output[channel] = top * (1 - ty) + bottom * ty;
-  }
-  return output;
 }
 
 function textColor(red: number, green: number, blue: number, ink: string, muted: string, paper: number[], eyeDetail: boolean) {
@@ -141,7 +62,9 @@ export default function VisionAsciiPortrait() {
     let paperLightness = luminance(paper);
     let closedPixels: Uint8ClampedArray | null = null;
     let openPixels: Uint8ClampedArray | null = null;
-    let glyphs: Array<{ character: string; darkness: number }> = [];
+    let glyphs: RankedGlyph[] = [];
+    const scratchClosed = [0, 0, 0, 0];
+    const scratchOpen = [0, 0, 0, 0];
     let frame = 0;
     let lastPaint = 0;
     let startTime = performance.now();
@@ -216,6 +139,8 @@ export default function VisionAsciiPortrait() {
       const errors = new Float32Array(cols * rows);
       const densities = new Float32Array(cols * rows);
       const colors = new Array<string>(cols * rows);
+      const closed = scratchClosed;
+      const open = scratchOpen;
       const paperLum = paperLightness;
       let previousFill = '';
       let previousAlpha = 1;
@@ -230,43 +155,58 @@ export default function VisionAsciiPortrait() {
           let alpha = 0;
           let samples = 0;
 
+          const cellX = (col + 0.5) / cols;
+          const cellY = (row + 0.5) / rows;
+          const side = cellX < 0.5 ? -1 : 1;
+          const hairBand = Math.max(
+            1 - smoothstep(0.16, 0.39, cellX),
+            smoothstep(0.61, 0.84, cellX),
+          ) * smoothstep(0.34, 0.53, cellY) * (1 - smoothstep(0.94, 1, cellY));
+          let hairShift = 0;
+          if (hairBand > 0 && hairFlow > 0 && !reducedMotion.matches) {
+            const wave = Math.sin(elapsed * 0.78 - cellY * 17 + side * 0.6) * 0.5
+              + Math.sin(elapsed * 1.13 - cellY * 29 - side * 0.9) * 0.3
+              + Math.sin(elapsed * 0.49 - cellY * 9 + side * 1.8) * 0.2;
+            hairShift = wave * hairBand * hairFlow * source.width * 0.03;
+          }
+          const closedBlend = Math.max(
+            eyeMask(cellX, cellY, 0.416) * Math.max(1 - eyeOpen, blink, wink),
+            eyeMask(cellX, cellY, 0.579) * Math.max(1 - eyeOpen, blink),
+          );
+          const bodyCurve = smoothstep(0.77, 1, cellY);
+          const halfWidth = 0.48 * Math.sqrt(1 - bodyCurve);
+          const sideFade = 1 - smoothstep(halfWidth - 0.025, halfWidth + 0.025, Math.abs(cellX - 0.5));
+          const alphaMask = (1 - bodyCurve * (1 - sideFade)) * (1 - smoothstep(0.985, 1, cellY));
+          if (alphaMask <= 0.001) continue;
+
           for (let sy = 0; sy < SAMPLE_SIZE; sy += 1) {
             for (let sx = 0; sx < SAMPLE_SIZE; sx += 1) {
               const x = col * SAMPLE_SIZE + sx;
               const y = row * SAMPLE_SIZE + sy;
-              const sourceX = (x + 0.5) / source.width;
-              const sourceY = (y + 0.5) / source.height;
-              const side = sourceX < 0.5 ? -1 : 1;
-              const hairBand = Math.max(
-                1 - smoothstep(0.16, 0.39, sourceX),
-                smoothstep(0.61, 0.84, sourceX),
-              ) * smoothstep(0.34, 0.53, sourceY) * (1 - smoothstep(0.94, 1, sourceY));
-              const wave = Math.sin(elapsed * 0.78 - sourceY * 17 + side * 0.6) * 0.5
-                + Math.sin(elapsed * 1.13 - sourceY * 29 - side * 0.9) * 0.3
-                + Math.sin(elapsed * 0.49 - sourceY * 9 + side * 1.8) * 0.2;
-              const hairShift = reducedMotion.matches ? 0 : wave * hairBand * hairFlow * source.width * 0.03;
               const sampleX = Math.max(0, Math.min(source.width - 1, x + hairShift));
-              const closed = interpolatePixel(closedPixels, source.width, source.height, sampleX, y);
-              const open = interpolatePixel(openPixels, source.width, source.height, sampleX, y);
-              const closedAlpha = closed[3] / 255;
-              const openAlpha = open[3] / 255;
-              const localX = (x + 0.5) / source.width;
-              const localY = (y + 0.5) / source.height;
-              const leftEye = eyeMask(localX, localY, 0.416);
-              const rightEye = eyeMask(localX, localY, 0.579);
-              const leftClose = leftEye * Math.max(1 - eyeOpen, blink, wink);
-              const rightClose = rightEye * Math.max(1 - eyeOpen, blink);
-              const closedBlend = Math.max(leftClose, rightClose);
-              const bodyCurve = smoothstep(0.77, 1, localY);
-              const halfWidth = 0.48 * Math.sqrt(1 - bodyCurve);
-              const sideFade = 1 - smoothstep(halfWidth - 0.025, halfWidth + 0.025, Math.abs(localX - 0.5));
-              const roundedEnd = 1 - smoothstep(0.985, 1, localY);
-              const shapeFade = 1 - bodyCurve * (1 - sideFade);
-              const alphaMask = shapeFade * roundedEnd;
-              alpha += (closedAlpha * closedBlend + openAlpha * (1 - closedBlend)) * alphaMask;
-              red += (closed[0] * closedAlpha * closedBlend + open[0] * openAlpha * (1 - closedBlend)) * alphaMask;
-              green += (closed[1] * closedAlpha * closedBlend + open[1] * openAlpha * (1 - closedBlend)) * alphaMask;
-              blue += (closed[2] * closedAlpha * closedBlend + open[2] * openAlpha * (1 - closedBlend)) * alphaMask;
+              let closedAlpha = 0;
+              let openAlpha = 0;
+              if (closedBlend > 0) {
+                interpolateInto(closed, closedPixels, source.width, source.height, sampleX, y);
+                closedAlpha = closed[3] / 255;
+              }
+              if (closedBlend < 1) {
+                interpolateInto(open, openPixels, source.width, source.height, sampleX, y);
+                openAlpha = open[3] / 255;
+              }
+              const closedWeight = closedAlpha * closedBlend;
+              const openWeight = openAlpha * (1 - closedBlend);
+              alpha += (closedWeight + openWeight) * alphaMask;
+              if (closedBlend > 0) {
+                red += closed[0] * closedWeight * alphaMask;
+                green += closed[1] * closedWeight * alphaMask;
+                blue += closed[2] * closedWeight * alphaMask;
+              }
+              if (closedBlend < 1) {
+                red += open[0] * openWeight * alphaMask;
+                green += open[1] * openWeight * alphaMask;
+                blue += open[2] * openWeight * alphaMask;
+              }
               samples += 1;
             }
           }
@@ -371,7 +311,10 @@ export default function VisionAsciiPortrait() {
     }, { threshold: 0.01 });
     observer.observe(host);
 
-    const resizeObserver = new ResizeObserver(() => {
+    let observedWidth = 0;
+    const resizeObserver = new ResizeObserver(([entry]) => {
+      if (Math.abs(entry.contentRect.width - observedWidth) < 0.5) return;
+      observedWidth = entry.contentRect.width;
       layout();
       if (!frame && inView && !reducedMotion.matches) frame = requestAnimationFrame(draw);
       else if (reducedMotion.matches) draw(performance.now());
