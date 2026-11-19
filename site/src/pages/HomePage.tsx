@@ -8,14 +8,28 @@ const HIGHLIGHT_MS = 7000;
 export default function HomePage() {
   const [active, setActive] = useState(0);
   useEffect(() => {
-    // Com "reduzir movimento" nao ha destaque automatico: so o hover reage.
+    // Com "reduzir movimento" nao ha destaque automatico (nenhum cartao fica
+    // marcado); so o hover reage. Acompanha mudancas da preferencia ao vivo.
     const reduce = window.matchMedia('(prefers-reduced-motion: reduce)');
-    if (reduce.matches) return;
-    const timer = window.setInterval(
-      () => setActive((current) => (current + 1) % historicDrawings.length),
-      HIGHLIGHT_MS,
-    );
-    return () => window.clearInterval(timer);
+    let timer = 0;
+    const sync = () => {
+      window.clearInterval(timer);
+      if (reduce.matches) {
+        setActive(-1);
+        return;
+      }
+      setActive(0);
+      timer = window.setInterval(
+        () => setActive((current) => (current + 1) % historicDrawings.length),
+        HIGHLIGHT_MS,
+      );
+    };
+    sync();
+    reduce.addEventListener('change', sync);
+    return () => {
+      window.clearInterval(timer);
+      reduce.removeEventListener('change', sync);
+    };
   }, []);
 
   return (
