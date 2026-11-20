@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, Navigate, useOutletContext, useParams } from 'react-router-dom';
 import type { StudioContext } from '../components/StudioShell';
 import { DrawCloud, isCloudConfigured, type CloudResult, type CloudStatus } from '../lib/drawCloud';
-import { getDrawing, getProject, saveDrawing, type Drawing, type Pt } from '../lib/studioProjects';
+import { getDrawing, getProject, saveDrawing, saveStrokes, saveStrokesAsCopy, type Drawing, type Pt } from '../lib/studioProjects';
 
 const INKS = ['#22231f', '#3b5ba5', '#b5483a'];
 
@@ -48,18 +48,41 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
   const [inkIdx, setInkIdx] = useState(0);
   const clearRef = useRef<(() => void) | undefined>(undefined);
   const [title, setTitle] = useState(drawing.name);
+  const savedName = useRef(drawing.name); // o ultimo nome gravado (drawing.name e o do momento em que abriu)
 
   const saveTimer = useRef(0);
   const pendingSave = useRef(false);
-  const [saveError, setSaveError] = useState(false);
+  // Falhas separadas: renomear com sucesso nao pode esconder traços ainda nao gravados.
+  const [strokeError, setStrokeError] = useState(false);
+  const [nameError, setNameError] = useState(false);
+  const [forked, setForked] = useState<string | null>(null);
+  const saveError = strokeError || nameError;
+  // Onde os traços sao gravados e a revisao que este editor carregou/gravou por ultimo (outra aba pode ter gravado antes).
+  const target = useRef({ id: drawing.id, rev: drawing.rev ?? 0 });
 
-  // Grava os traços neste mesmo desenho; se o navegador recusou, avisa.
+  // Grava os traços; enquanto a gravacao nao der certo eles continuam pendentes (a saida tenta de novo).
   const flushAutosave = useCallback(() => {
     window.clearTimeout(saveTimer.current);
     if (!pendingSave.current) return;
     pendingSave.current = false;
-    setSaveError(!saveDrawing(drawing.projectId, drawing.id, { strokes: strokes.current }));
-  }, [drawing.projectId, drawing.id]);
+    let result = saveStrokes(drawing.projectId, target.current.id, strokes.current, target.current.rev);
+    if (result.status === 'stale') {
+      // outra aba gravou este desenho depois que ele foi aberto aqui: nao sobrescreve, guarda uma copia
+      const copy = saveStrokesAsCopy(drawing.projectId, drawing.name, strokes.current);
+      if (copy) {
+        target.current = { id: copy.id, rev: copy.rev ?? 0 };
+        setForked(copy.name);
+        result = { status: 'ok', rev: target.current.rev };
+      } else {
+        result = { status: 'failed', rev: target.current.rev };
+      }
+    } else if (result.status === 'ok') {
+      target.current.rev = result.rev;
+    }
+    const ok = result.status === 'ok';
+    if (!ok) pendingSave.current = true;
+    setStrokeError(!ok);
+  }, [drawing.projectId, drawing.name]);
 
   const scheduleAutosave = useCallback(() => {
     pendingSave.current = true;
@@ -84,7 +107,10 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
   const rename = () => {
     const name = title.trim() || 'Sem título';
     setTitle(name);
-    if (name !== drawing.name) setSaveError(!saveDrawing(drawing.projectId, drawing.id, { name }));
+    if (name === savedName.current) return;
+    const ok = saveDrawing(drawing.projectId, drawing.id, { name });
+    if (ok) savedName.current = name;
+    setNameError(!ok);
   };
 
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -344,7 +370,7 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
     <>
       {slot && createPortal(
         <>
-          <Link className="studio-crumb" to={`/app/p/${drawing.projectId}`} title="Voltar ao projeto">‹ {projectName}</Link>
+          <Link className="studio-crumb" to={`/app/p/${drawing.projectId}`} title="Voltar ao projeto" aria-label={`Voltar ao projeto ${projectName}`}><span aria-hidden="true">‹</span><span className="studio-crumb-name"> {projectName}</span></Link>
           <input
             className="studio-title"
             value={title}
@@ -356,6 +382,7 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
           />
           <span className="studio-pill"><span className={`status-dot${camId ? ' is-live' : ''}`} /> {camId ? `câmera · ${activeCam?.label || 'ativa'}${cloudLabel}` : 'câmera desligada'}</span>
           {saveError && <span className="studio-save-error" role="alert">sem espaço para salvar — o desenho continua só nesta tela</span>}
+          {forked && <span className="studio-save-error" role="status">outra aba alterou este desenho; suas mudanças foram salvas em “{forked}”</span>}
         </>,
         slot,
       )}

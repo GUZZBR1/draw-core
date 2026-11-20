@@ -1,9 +1,16 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Stroke } from '../lib/studioProjects';
 
 /** Miniatura de um desenho: redesenha os traços normalizados em um canvas pequeno. */
 export default function StrokeThumb({ strokes }: { strokes: Stroke[] }) {
   const ref = useRef<HTMLCanvasElement>(null);
+  // O tema muda a tinta padrao: observa a classe do body para redesenhar a miniatura.
+  const [dark, setDark] = useState(() => document.body.classList.contains('dark'));
+  useEffect(() => {
+    const watch = new MutationObserver(() => setDark(document.body.classList.contains('dark')));
+    watch.observe(document.body, { attributes: true, attributeFilter: ['class'] });
+    return () => watch.disconnect();
+  }, []);
   useEffect(() => {
     const c = ref.current!;
     const ctx = c.getContext('2d')!;
@@ -24,6 +31,6 @@ export default function StrokeThumb({ strokes }: { strokes: Stroke[] }) {
       s.pts.forEach(([x, y], i) => (i ? ctx.lineTo(x * c.width, y * c.height) : ctx.moveTo(x * c.width, y * c.height)));
       ctx.stroke();
     }
-  }, [strokes]);
+  }, [strokes, dark]);
   return <canvas ref={ref} width={240} height={160} className="studio-thumb" aria-hidden="true" />;
 }

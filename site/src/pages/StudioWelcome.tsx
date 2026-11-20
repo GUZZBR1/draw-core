@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import StrokeThumb from '../components/StrokeThumb';
-import { listProjects, recentDrawings } from '../lib/studioProjects';
+import { drawingCount as countDrawings, listProjects, recentDrawings } from '../lib/studioProjects';
 
 /** Tela de entrada: o bonequinho da webcam pergunta o que construir; os desenhos mais recentes giram em volta. */
 export default function StudioWelcome() {
   const recents = useMemo(() => recentDrawings(12), []);
   const projects = useMemo(() => listProjects(), []);
-  const drawingCount = useMemo(() => recentDrawings(Infinity).length, []);
+  const drawingCount = useMemo(() => countDrawings(), []);
   const ringRef = useRef<HTMLDivElement>(null);
 
   // Carrossel elíptico: cada desenho percorre a elipse da tela; os de trás ficam menores e mais apagados.
@@ -49,21 +49,24 @@ export default function StudioWelcome() {
     const stop = () => { cancelAnimationFrame(raf); raf = 0; };
     place();
     window.addEventListener('resize', place);
+    const resume = () => { if (!ring.matches(':hover, :focus-within')) run(); };
+    const resumeSoon = () => { requestAnimationFrame(resume); }; // no focusout o foco ainda esta saindo
     if (!reduce) {
       run();
       // para enquanto o mouse ou o foco estiver sobre um desenho, para dar para clicar
       ring.addEventListener('pointerover', stop);
-      ring.addEventListener('pointerout', run);
+      // so volta a girar quando nem o ponteiro nem o foco estao mais em um desenho
+      ring.addEventListener('pointerout', resumeSoon);
       ring.addEventListener('focusin', stop);
-      ring.addEventListener('focusout', run);
+      ring.addEventListener('focusout', resumeSoon);
     }
     return () => {
       stop();
       window.removeEventListener('resize', place);
       ring.removeEventListener('pointerover', stop);
-      ring.removeEventListener('pointerout', run);
+      ring.removeEventListener('pointerout', resumeSoon);
       ring.removeEventListener('focusin', stop);
-      ring.removeEventListener('focusout', run);
+      ring.removeEventListener('focusout', resumeSoon);
     };
   }, [recents]);
 

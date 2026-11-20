@@ -182,6 +182,8 @@ export function ProjectView() {
   const project = getProject(projectId);
   const [drawings, setDrawings] = useState(() => listDrawings(projectId));
   const [error, setError] = useState(false);
+  // O editor que acabou de fechar grava na limpeza, depois deste primeiro render: le de novo ao montar.
+  useEffect(() => setDrawings(listDrawings(projectId)), [projectId]);
   if (!project) return <Navigate to="/app/projects" replace />;
 
   const add = () => {
@@ -207,8 +209,9 @@ export function ProjectView() {
 }
 
 export function Library() {
-  const [projects] = useState(() => listProjects());
-  const groups = projects.map((p) => ({ project: p, drawings: listDrawings(p.id).filter((d) => d.strokes.length) })).filter((g) => g.drawings.length);
+  const load = () => listProjects().map((p) => ({ project: p, drawings: listDrawings(p.id) })).filter((g) => g.drawings.length);
+  const [groups, setGroups] = useState(load);
+  useEffect(() => setGroups(load()), []); // eslint-disable-line react-hooks/exhaustive-deps -- le de novo apos a limpeza do editor
   return (
     <Page title="Biblioteca" sub="todos os desenhos, de todos os projetos" back={{ to: '/app', label: 'início' }}>
       {groups.map(({ project, drawings }) => (
