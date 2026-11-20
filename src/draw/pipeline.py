@@ -171,6 +171,19 @@ class Pipeline:
         self._hand_mask_det = None
 
         self.tracker = tracker.SheetTracker()
+        self._detect_wake = (
+            tracker.DetectWakeGate(
+                settled_interval_s=self._config.detect_wake_interval_s
+            )
+            if self._config.detect_wake
+            else None
+        )
+        self._detect_wake_frames = (
+            deque(maxlen=16) if self._config.detect_wake else None
+        )
+        self._last_ink_submit_at = None
+        self._hand_exit_at = None
+        self._stale_hand_woke = False
         self.corner_history = deque(maxlen=_INK_CORNER_HISTORY)
         self.ink_session_open = False
         self.accumulated_canvas = None
@@ -278,8 +291,15 @@ class Pipeline:
         entre passadas re-projeta a tinta assentada e cada
         alinhamento confirma a sua copia.
         """
-        if self._config.skip_stale and (
-            self.tracker._frames_since_seen > _STALE_PASS_MIN_FRAMES
+        settled_wake = (
+            self._detect_wake is not None
+            and self._detect_wake.settled
+            and not self.tracker.missed
+        )
+        if (
+            self._config.skip_stale
+            and not settled_wake
+            and self.tracker._frames_since_seen > _STALE_PASS_MIN_FRAMES
         ):
             # skip_stale: os cantos retidos sao de graça —
             # frames_since_seen passou do piso da queda sem
@@ -444,6 +464,15 @@ class Pipeline:
         # A tinta antiga morreu: a saida ao vivo precisa saber (canvas limpo).
         self._on_ink(contracts.InkPublication(-1, 0, None))
         self.tracker.reset()
+        detect_wake = getattr(self, "_detect_wake", None)
+        if detect_wake is not None:
+            detect_wake.reset()
+        detect_wake_frames = getattr(self, "_detect_wake_frames", None)
+        if detect_wake_frames is not None:
+            detect_wake_frames.clear()
+        self._last_ink_submit_at = None
+        self._hand_exit_at = None
+        self._stale_hand_woke = False
         self.corner_history.clear()
         self.display_corners = None
         self.display_gray = None
@@ -480,6 +509,26 @@ class Pipeline:
             # limpa a evidência velha em vez de deixar oclusão
             # defasada.
             self._hand_mask_det = det_result.hand_mask
+            if (
+                self._detect_wake is not None
+                and self.clean_hand_present is False
+                and not self._stale_hand_woke
+                and self._hand_mask_det is not None
+                and np.any(self._hand_mask_det)
+                and self._hand_exit_at is not None
+                and det_captured_at is not None
+                and det_captured_at < self._hand_exit_at
+            ):
+                # Heartbeat capturado ANTES de a mao sair chegou atrasado
+                # com mascara de mao velha: descarta a mascara defasada e
+                # acorda o detector uma unica vez neste episodio de ausencia.
+                self._hand_mask_det = None
+                self._stale_hand_woke = True
+                self._detect_wake.wake()
+                # Re-arma a confirmacao caso a trabalhadora ja tenha gasto
+                # a passada de confirmacao sob mascara velha e descansado.
+                self.ink_worker.set_hand_presence(True)
+                self.ink_worker.set_hand_presence(False)
             if self._config.coverage:
                 # A máscara de cobertura acompanha o quad que saiu
                 # dela — chegou junto, guarda junto; sem ela limpa
@@ -490,7 +539,20 @@ class Pipeline:
             detected_corners, detected_verdict = None, None
             det_captured_at = None
             ran_detection = False
-        if self.tracker.should_detect(self.frame_number):
+        base_should_detect = self.tracker.should_detect(self.frame_number)
+        if self._detect_wake is not None:
+            should_detect = self._detect_wake.should_detect(
+                frame,
+                packet.captured_at,
+                base_should_detect=base_should_detect,
+                hand_mask=self._hand_mask_det,
+                wake_signal=self.tracker.missed or self.tracker.has_pending,
+            )
+        else:
+            should_detect = base_should_detect
+        if should_detect:
+            if self._detect_wake_frames is not None:
+                self._detect_wake_frames.append((packet.captured_at, frame))
             self.detection_worker.submit(frame, packet.captured_at, self.frame_number)
         if self.detection_worker.error is not None:
             raise self.detection_worker.error
@@ -501,6 +563,27 @@ class Pipeline:
             ran_detection,
             det_captured_at if ran_detection else self._clock(),
         )
+        if ran_detection and self._detect_wake is not None:
+            ref_frame = None
+            if self._detect_wake_frames is not None and det_captured_at is not None:
+                while (
+                    self._detect_wake_frames
+                    and self._detect_wake_frames[0][0] <= det_captured_at + 1e-6
+                ):
+                    ts, submitted = self._detect_wake_frames.popleft()
+                    if abs(ts - det_captured_at) < 1e-6:
+                        ref_frame = submitted
+            if ref_frame is not None:
+                self._detect_wake.on_detection(
+                    self.tracker.corners,
+                    ref_frame,
+                    det_captured_at,
+                    hand_mask=self._hand_mask_det,
+                    missed=self.tracker.missed,
+                    has_pending=self.tracker.has_pending,
+                )
+            elif self.tracker.corners is None or self.tracker.missed:
+                self._detect_wake.reset()
         if ran_detection:
             tracker_after = self.tracker.diagnostic_state()
             for trace in self.detection_worker.take_traces(self.last_det_seq):
@@ -576,6 +659,7 @@ class Pipeline:
                 else None
             )
             if hp_result is not None:
+                prev_hand_present = self.clean_hand_present
                 (
                     self.hand_presence_seq,
                     self.clean_hand_present,
@@ -585,6 +669,25 @@ class Pipeline:
                     self.clean_hand_present,
                     moved=clean_hand_moved,
                 )
+                if self.clean_hand_present is False:
+                    if prev_hand_present is not False:
+                        self._hand_exit_at = packet.captured_at
+                        self._stale_hand_woke = False
+                    if (
+                        not self._stale_hand_woke
+                        and self._detect_wake is not None
+                        and self._detect_wake.settled
+                        and self._hand_mask_det is not None
+                        and np.any(self._hand_mask_det)
+                    ):
+                        # Transicao para mao ausente enquanto o detector dormia
+                        # com mascara de mao velha: acorda uma vez para renovar
+                        # _hand_mask_det antes da passada de confirmacao.
+                        self._stale_hand_woke = True
+                        self._detect_wake.wake()
+                else:
+                    self._hand_exit_at = None
+                    self._stale_hand_woke = False
         # Quad de EXIBICAO (T9): em quadro com resultado de
         # deteccao, o exibido e o confirmado; nos demais,
         # propaga por LK sobre o cinza anterior. Falha de
@@ -661,9 +764,40 @@ class Pipeline:
             ink_corners = np.median(np.stack(self.corner_history), axis=0).astype(
                 np.float32
             )
+            self._last_ink_submit_at = packet.captured_at
             self._warp_and_submit_ink(
                 frame, ink_corners, captured_at=packet.captured_at
             )
+        elif (
+            self._detect_wake is not None
+            and self._detect_wake.settled
+            and self.tracker.corners is not None
+            and self.ink_session_open
+            and self.corner_history
+        ):
+            # Com detect_wake assentado, o detector dorme a 1 Hz mas a
+            # tinta e a presenca de mao seguem alimentadas na cadencia
+            # normal sobre o quad assentado.
+            settled_due = base_should_detect
+            ink_interval = self._config.ink.pass_interval_s
+            if (
+                not settled_due
+                and ink_interval is not None
+                and self._last_ink_submit_at is not None
+            ):
+                settled_due = (
+                    packet.captured_at - self._last_ink_submit_at >= ink_interval - 1e-9
+                )
+            if settled_due:
+                if self.hand_presence_worker is not None:
+                    self.hand_presence_worker.submit(frame, packet.captured_at * 1000.0)
+                ink_corners = np.median(np.stack(self.corner_history), axis=0).astype(
+                    np.float32
+                )
+                self._last_ink_submit_at = packet.captured_at
+                self._warp_and_submit_ink(
+                    frame, ink_corners, captured_at=packet.captured_at
+                )
 
         return self.collect_ink()
 

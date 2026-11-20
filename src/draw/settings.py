@@ -83,3 +83,12 @@ class PipelineConfig:
     follow_move: bool = True
     ink_auto_gain: bool = False
     ink: InkConfig = InkConfig()
+    detect_wake: bool = False
+    detect_wake_interval_s: float = 1.0
+
+    def __post_init__(self):
+        if not 0.0 < self.detect_wake_interval_s <= 5.0:
+            raise ValueError(
+                "detect_wake_interval_s fora de (0, 5] s: "
+                f"{self.detect_wake_interval_s!r}"
+            )
