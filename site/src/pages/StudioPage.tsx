@@ -411,12 +411,14 @@ export default function StudioPage() {
     window.addEventListener('resize', render);
     const clear = () => {
       flushAutosave(); // o que estava na folha fica nos salvamentos automaticos
+      pendingSave.current = false; // se a gravacao falhou, o descarte e explicito: o pendente nao passa para a folha nova
       strokes.current = [];
       sessionRef.current = null;
       render();
     };
     loadRef.current = (entry) => {
       flushAutosave();
+      pendingSave.current = false; // idem: sem isso a saida regravaria o desenho aberto, sem edicao, como copia
       strokes.current = entry.strokes.map((st) => ({ ink: st.ink, pts: st.pts.map(([x, y]) => [x, y] as Pt) }));
       sessionRef.current = null; // continuar desenhando cria um novo automatico; o original nao e alterado
       render();
