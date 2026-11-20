@@ -229,10 +229,11 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
         videoRef.current.srcObject = stream;
         void videoRef.current.play().catch(() => {});
       }
-      setCamId(stream.getVideoTracks()[0]?.getSettings().deviceId ?? deviceId ?? null);
+      setCamId(stream.getVideoTracks()[0]?.getSettings().deviceId || deviceId || 'default');
       await refreshCams(); // com permissao, os nomes das câmeras aparecem
     } catch (err) {
       if (request !== camRequest.current) return;
+      streamRef.current?.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
       if (videoRef.current) videoRef.current.srcObject = null;
       setCamId(null);

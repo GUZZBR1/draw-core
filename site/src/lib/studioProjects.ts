@@ -62,10 +62,18 @@ let legacyPending: { project: Project; drawings: Drawing[] } | null = null;
 const isPendingProject = (id: string) => legacyPending?.project.id === id;
 
 function commitLegacy(project: Project, drawings: Drawing[]): boolean {
-  if (!write(drawingsKey(project.id), drawings)) return false;
-  const stored = read(PROJECTS_KEY, isProject).filter((p) => p.id !== project.id); // sem duplicar se ja estiver gravado
+  const written: string[] = [];
+  for (const drawing of drawings) {
+    const key = recordKey(project.id, drawing.id);
+    if (!write(key, drawing)) {
+      for (const saved of written) localStorage.removeItem(saved);
+      return false;
+    }
+    written.push(key);
+  }
+  const stored = storedProjects().filter((p) => p.id !== project.id);
   if (!write(PROJECTS_KEY, [...stored, project])) {
-    try { localStorage.removeItem(drawingsKey(project.id)); } catch { /* nada a fazer */ } // sem registro orfao ocupando cota
+    for (const key of written) localStorage.removeItem(key);
     return false;
   }
   try { localStorage.removeItem(LEGACY_KEY); } catch { /* nada a fazer */ }
@@ -154,6 +162,34 @@ function recordKeys(projectId: string): string[] {
   return Object.keys(localStorage).filter((key) => key.startsWith(recordPrefix(projectId)));
 }
 
+// Keep old array entries editable in place, including when storage is full.
+function writeDrawing(projectId: string, id: string, drawing: Drawing | null): boolean {
+  const key = recordKey(projectId, id);
+  const legacyKey = drawingsKey(projectId);
+  const legacy = read(legacyKey, isDrawing);
+  try {
+    const existing = localStorage.getItem(key);
+    if (legacy.some((entry) => entry.id === id)) {
+      if (existing === null && drawing) {
+        return write(legacyKey, legacy.map((entry) => entry.id === id ? drawing : entry));
+      }
+      if (!drawing) {
+        if (!write(legacyKey, legacy.filter((entry) => entry.id !== id))) return false;
+        localStorage.removeItem(key);
+        return true;
+      }
+      if (!write(key, drawing)) return false;
+      write(legacyKey, legacy.filter((entry) => entry.id !== id));
+      return true;
+    }
+    if (drawing) return write(key, drawing);
+    localStorage.removeItem(key);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function listDrawings(projectId: string): Drawing[] {
   if (legacyPending && isPendingProject(projectId)) return [...legacyPending.drawings].sort((a, b) => b.updatedAt - a.updatedAt);
   const drawings = new Map(read(drawingsKey(projectId), isDrawing).map((drawing) => [drawing.id, drawing]));
@@ -202,7 +238,7 @@ export function saveDrawing(projectId: string, id: string, patch: { strokes?: St
   if (patch.strokes) found.strokes = patch.strokes.map((s) => ({ ink: s.ink, pts: s.pts.map(([x, y]) => [round(x), round(y)] as Pt) }));
   if (patch.name !== undefined) found.name = patch.name.trim() || namesOf(names).noTitle;
   found.updatedAt = Date.now();
-  const ok = write(recordKey(projectId, id), found);
+  const ok = writeDrawing(projectId, id, found);
   if (ok) touchProject(projectId, found.updatedAt);
   return ok;
 }
@@ -225,7 +261,7 @@ export function saveStrokes(projectId: string, id: string, strokes: Stroke[], ba
   found.strokes = snapshot(strokes);
   found.rev = current + 1;
   found.updatedAt = Date.now();
-  if (!write(recordKey(projectId, id), found)) return { status: 'failed', rev: baseRev };
+  if (!writeDrawing(projectId, id, found)) return { status: 'failed', rev: baseRev };
   touchProject(projectId, found.updatedAt);
   return { status: 'ok', rev: found.rev };
 }
@@ -242,7 +278,7 @@ export function saveStrokesAsCopy(projectId: string, name: string, strokes: Stro
 
 export function deleteDrawing(projectId: string, id: string) {
   if (isPendingProject(projectId)) return;
-  write(recordKey(projectId, id), null);
+  writeDrawing(projectId, id, null);
 }
 
 function touchProject(id: string, at: number) {
