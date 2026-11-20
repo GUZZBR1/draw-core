@@ -379,6 +379,7 @@ export default function StudioPage() {
     };
     const down = (e: PointerEvent) => {
       if (streamRef.current) return; // com a camera ligada, o papel e so visualizacao
+      if (!e.isPrimary || (e.pointerType === 'mouse' && e.button !== 0)) return; // botao direito/auxiliar nao desenha
       paper.setPointerCapture(e.pointerId);
       current = { pts: [pos(e)], ink: inkRef.current };
       strokes.current.push(current);
@@ -446,8 +447,10 @@ export default function StudioPage() {
         saves={saves}
         onOpenEntry={(e) => { loadRef.current?.(e); setSideOpen(false); }}
         onSave={(id) => {
-          if (id === sessionRef.current) sessionRef.current = null; // o proximo traco abre um automatico novo, sem sobrescrever o salvo
+          const active = id === sessionRef.current;
+          if (active) flushAutosave(); // grava os ultimos tracos nesse mesmo id antes de promove-lo
           commitSaves(makePermanent(id));
+          if (active) sessionRef.current = null; // o proximo traco abre um automatico novo, sem sobrescrever o salvo
         }}
         onDelete={(id) => {
           if (id === sessionRef.current) {
