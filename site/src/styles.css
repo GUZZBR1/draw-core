@@ -1023,6 +1023,8 @@ body:not(.dark) .article-meta { color: #4a4b45; }
 .article ul:not(.article-refs) { list-style-type: disc; }
 .article ol { list-style-type: decimal; }
 
+.article-retry { padding: 0; border: 0; background: none; color: var(--ink); font: inherit; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.article-retry:hover, .article-retry:focus-visible { text-decoration-color: var(--accent); }
 /* Papers: subprojetos, logo abaixo do carrossel. */
 .papers-more { max-width: 680px; margin: 0 auto; padding: 160px 20px 120px; color: var(--ink); }
 .papers-more-kicker { margin: 0 0 8px; font: 400 11px 'DM Mono', monospace; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }

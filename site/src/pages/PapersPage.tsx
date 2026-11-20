@@ -89,7 +89,10 @@ export default function PapersPage() {
 
   useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(null); };
+    const onKey = (e: KeyboardEvent) => {
+      if (ringRef.current?.contains(document.activeElement)) focusRef.current = true;
+      if (e.key === 'Escape') setOpen(null);
+    };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
   }, [open]);
@@ -103,6 +106,7 @@ export default function PapersPage() {
         style={{ '--emerge': 1500 } as CSSProperties}
         ref={ringRef}
         onFocus={(e) => { focusRef.current = e.target instanceof HTMLElement && e.target.matches(':focus-visible'); }}
+        onPointerDown={() => { focusRef.current = false; }}
         onBlur={() => { focusRef.current = false; }}
         role="group"
         aria-label="Artigos"

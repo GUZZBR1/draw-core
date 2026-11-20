@@ -1,4 +1,4 @@
-import { Component, lazy, Suspense, useEffect, useState, type ErrorInfo, type ReactNode } from 'react';
+import { Component, lazy, Suspense, useEffect, useMemo, useState, type ErrorInfo, type ReactNode } from 'react';
 import { motion } from 'motion/react';
 import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import ScrollbarControl from '../components/ScrollbarControl';
@@ -12,12 +12,11 @@ import StudioPage from '../pages/StudioPage';
 import StudioWelcome from '../pages/StudioWelcome';
 import VisionPage from '../pages/VisionPage';
 
-// Os manuscritos (~374 KB de texto) so carregam quando alguem abre um artigo.
-const ArticlePage = lazy(() => import('../pages/ArticlePage'));
-
 export default function App() {
   const location = useLocation();
   const [productRefresh, setProductRefresh] = useState(0);
+  const [articleLoadAttempt, setArticleLoadAttempt] = useState(0);
+  const ArticlePage = useMemo(() => lazy(() => import('../pages/ArticlePage')), [articleLoadAttempt]);
 
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'instant' });
@@ -46,7 +45,10 @@ export default function App() {
           <Route path="/vision" element={<VisionPage />} />
           <Route path="/papers" element={<PapersPage />} />
           <Route path="/papers/:n" element={
-            <ArticleLoadBoundary key={location.pathname}>
+            <ArticleLoadBoundary
+              key={`${location.pathname}:${articleLoadAttempt}`}
+              onRetry={() => setArticleLoadAttempt((attempt) => attempt + 1)}
+            >
               <Suspense fallback={<ArticleLoading />}><ArticlePage /></Suspense>
             </ArticleLoadBoundary>
           } />
@@ -76,7 +78,7 @@ function ArticleLoading() {
   );
 }
 
-class ArticleLoadBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+class ArticleLoadBoundary extends Component<{ children: ReactNode; onRetry: () => void }, { failed: boolean }> {
   state = { failed: false };
 
   static getDerivedStateFromError() {
@@ -92,7 +94,8 @@ class ArticleLoadBoundary extends Component<{ children: ReactNode }, { failed: b
       return (
         <main className="article" id="page-content">
           <Link className="article-back" to="/papers">← papers</Link>
-          <p role="alert">Não foi possível carregar este artigo. Volte à lista ou tente novamente.</p>
+          <p role="alert">Não foi possível carregar este artigo.</p>
+          <button className="article-retry" type="button" onClick={this.props.onRetry}>Tentar novamente</button>
         </main>
       );
     }
