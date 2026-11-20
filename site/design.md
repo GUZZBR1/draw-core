@@ -23,6 +23,7 @@ Draw is a bridge from a person’s paper sketch to digital tools that can interp
 - Serif italics are reserved for the short editorial accent in the Product headline. Do not apply italics or bold to whole paragraphs.
 - Definition card: a restrained medium-weight sans title; small mono part-of-speech label; readable, regular-weight sans definition; muted secondary line. Italicize only the part-of-speech word.
 - Do not add a new font family without updating this system and getting an explicit design reason.
+- Exception, Papers page only (explicit design request for a calligraphic voice): the “papers” headline is Pinyon Script; the card names and the open paper's title are Cormorant Garamond italic. Metadata, the cycling line and body text keep DM Mono and Manrope. Do not use these two families elsewhere.
 
 ## Header and motion
 
