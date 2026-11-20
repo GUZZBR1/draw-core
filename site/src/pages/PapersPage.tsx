@@ -12,6 +12,7 @@ export default function PapersPage() {
   const moreRef = useRef<HTMLElement>(null);
   const [moreSeen, setMoreSeen] = useState(reduceMotionInitial());
   const openRef = useRef(false); // com um resumo aberto o carrossel desacelera ate parar, sem corte seco
+  const focusRef = useRef(false); // idem enquanto o foco do teclado esta num cartao (o alvo nao pode fugir)
   const [open, setOpen] = useState<Paper | null>(null);
   const [line, setLine] = useState(0);
   const reduce = useRef(window.matchMedia('(prefers-reduced-motion: reduce)').matches);
@@ -31,7 +32,7 @@ export default function PapersPage() {
 
   // Carrossel elíptico: o que passa à frente fica maior e mais nítido, o de trás menor e apagado.
   // Por quadro so se escrevem transform/opacity (nenhuma leitura de layout): medidas ficam em cache e
-  // so mudam num ResizeObserver; o ponteiro nunca pausa a rotacao, so abrir um resumo a desacelera.
+  // so mudam num ResizeObserver; o ponteiro nunca pausa a rotacao; so abrir um resumo ou focar um cartao a desacelera.
   useEffect(() => {
     const ring = ringRef.current;
     if (!ring) return;
@@ -63,7 +64,7 @@ export default function PapersPage() {
     const tick = (now: number) => {
       const dt = Math.min((now - last) / 1000, 0.05); // aba em segundo plano nao da salto
       last = now;
-      const target = openRef.current ? 0 : 0.09;
+      const target = openRef.current || focusRef.current ? 0 : 0.09;
       speed += (target - speed) * Math.min(1, dt * 4);
       angle += speed * dt;
       place();
@@ -101,6 +102,8 @@ export default function PapersPage() {
         className="papers-orbit product-emerge"
         style={{ '--emerge': 1500 } as CSSProperties}
         ref={ringRef}
+        onFocus={() => { focusRef.current = true; }}
+        onBlur={() => { focusRef.current = false; }}
         role="group"
         aria-label="Artigos"
       >

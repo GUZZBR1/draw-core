@@ -1,17 +1,19 @@
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { motion } from 'motion/react';
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import ScrollbarControl from '../components/ScrollbarControl';
 import SiteHeader from '../components/SiteHeader';
 import HomePage from '../pages/HomePage';
 import PapersPage from '../pages/PapersPage';
-import ArticlePage from '../pages/ArticlePage';
 import ProductPage from '../pages/ProductPage';
 import StudioShell from '../components/StudioShell';
 import { Library, NewProject, ProjectList, ProjectView } from '../pages/StudioLists';
 import StudioPage from '../pages/StudioPage';
 import StudioWelcome from '../pages/StudioWelcome';
 import VisionPage from '../pages/VisionPage';
+
+// Os manuscritos (~374 KB de texto) so carregam quando alguem abre um artigo.
+const ArticlePage = lazy(() => import('../pages/ArticlePage'));
 
 export default function App() {
   const location = useLocation();
@@ -43,7 +45,7 @@ export default function App() {
           <Route path="/" element={<HomePage />} />
           <Route path="/vision" element={<VisionPage />} />
           <Route path="/papers" element={<PapersPage />} />
-          <Route path="/papers/:n" element={<ArticlePage />} />
+          <Route path="/papers/:n" element={<Suspense fallback={null}><ArticlePage /></Suspense>} />
           <Route path="/product" element={<ProductPage key={productRefresh} />} />
           <Route path="/app" element={<StudioShell />}>
             <Route index element={<StudioWelcome />} />

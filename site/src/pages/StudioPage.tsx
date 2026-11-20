@@ -398,13 +398,13 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
         </>,
         slot,
       )}
-      {(saveError || readOnly || forked) && (
-        <div className="studio-notices">
+      <div className="studio-notices">
+        <div className="studio-notices-list">
           {saveError && <span className="studio-save-error" role="alert">sem espaço para salvar — o desenho continua só nesta tela</span>}
           {readOnly && <span className="studio-save-error" role="status">importação pendente: sem espaço para gravar — somente leitura</span>}
           {forked && <span className="studio-save-error" role="status">outra aba alterou este desenho; suas mudanças foram salvas em “{forked}”</span>}
         </div>
-      )}
+      </div>
 
       <section className="studio-stage">
         <figure className="studio-pane">
