@@ -30,7 +30,9 @@ export function readSaves(now = Date.now()): SaveEntry[] {
 
 const round = (n: number) => Math.round(n * 1000) / 1000;
 
-export function upsertAutosave(id: string, strokes: Stroke[]): SaveEntry[] {
+export type SaveResult = { list: SaveEntry[]; ok: boolean };
+
+export function upsertAutosave(id: string, strokes: Stroke[]): SaveResult {
   const list = readSaves();
   const snapshot = strokes.map((s) => ({ ink: s.ink, pts: s.pts.map(([x, y]) => [round(x), round(y)] as Pt) }));
   const found = list.find((e) => e.id === id);
@@ -40,20 +42,18 @@ export function upsertAutosave(id: string, strokes: Stroke[]): SaveEntry[] {
   } else {
     list.push({ id, strokes: snapshot, updatedAt: Date.now(), permanent: false });
   }
-  persist(list);
-  return list.sort((a, b) => b.updatedAt - a.updatedAt);
+  const ok = persist(list);
+  return { list: list.sort((a, b) => b.updatedAt - a.updatedAt), ok };
 }
 
-export function makePermanent(id: string): SaveEntry[] {
+export function makePermanent(id: string): SaveResult {
   const list = readSaves();
   const entry = list.find((e) => e.id === id);
   if (entry) entry.permanent = true;
-  persist(list);
-  return list;
+  return { list, ok: persist(list) };
 }
 
-export function removeSave(id: string): SaveEntry[] {
+export function removeSave(id: string): SaveResult {
   const list = readSaves().filter((e) => e.id !== id);
-  persist(list);
-  return list;
+  return { list, ok: persist(list) };
 }

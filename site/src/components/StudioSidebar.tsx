@@ -12,6 +12,13 @@ function Thumb({ strokes }: { strokes: SaveEntry['strokes'] }) {
     ctx.lineCap = ctx.lineJoin = 'round';
     for (const s of strokes) {
       ctx.strokeStyle = s.ink === '#22231f' ? ink : s.ink;
+      if (s.pts.length === 1) { // toque sem arrasto: um ponto
+        ctx.fillStyle = ctx.strokeStyle;
+        ctx.beginPath();
+        ctx.arc(s.pts[0][0] * c.width, s.pts[0][1] * c.height, ctx.lineWidth / 2, 0, Math.PI * 2);
+        ctx.fill();
+        continue;
+      }
       ctx.beginPath();
       s.pts.forEach(([x, y], i) => (i ? ctx.lineTo(x * c.width, y * c.height) : ctx.moveTo(x * c.width, y * c.height)));
       ctx.stroke();

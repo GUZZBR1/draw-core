@@ -3,11 +3,18 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import StudioSidebar from '../components/StudioSidebar';
 import { DrawCloud, isCloudConfigured, type CloudResult, type CloudStatus } from '../lib/drawCloud';
-import { makePermanent, readSaves, removeSave, upsertAutosave, type Pt, type SaveEntry } from '../lib/studioSaves';
+import { makePermanent, readSaves, removeSave, upsertAutosave, type Pt, type SaveEntry, type SaveResult } from '../lib/studioSaves';
 
 const INKS = ['#22231f', '#3b5ba5', '#b5483a'];
 
 function drawSmooth(ctx: CanvasRenderingContext2D, pts: Pt[], w: number, h: number) {
+  if (pts.length === 1) { // toque sem arrasto: um ponto da cor e da espessura do traço
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.beginPath();
+    ctx.arc(pts[0][0] * w, pts[0][1] * h, ctx.lineWidth / 2, 0, Math.PI * 2);
+    ctx.fill();
+    return;
+  }
   if (pts.length < 2) return;
   ctx.beginPath();
   ctx.moveTo(pts[0][0] * w, pts[0][1] * h);
@@ -27,7 +34,7 @@ export default function StudioPage() {
   const countRef = useRef<HTMLSpanElement>(null);
   const strokes = useRef<{ pts: Pt[]; ink: string }[]>([]);
   const inkRef = useRef(INKS[0]);
-  const swatches = useRef<HTMLDivElement>(null);
+  const [inkIdx, setInkIdx] = useState(0);
   const clearRef = useRef<(() => void) | undefined>(undefined);
   const navigate = useNavigate();
   const [leaving, setLeaving] = useState(false);
@@ -59,6 +66,15 @@ export default function StudioPage() {
   const brandRef = useRef<HTMLButtonElement>(null);
   const [saves, setSaves] = useState<SaveEntry[]>(() => readSaves());
   const [sideOpen, setSideOpen] = useState(false);
+  const [saveError, setSaveError] = useState(false);
+  const storageFailed = useRef(false);
+
+  // Mostra a lista devolvida; se o navegador recusou a gravacao, avisa e nao a descarta ao reabrir a barra.
+  const commitSaves = useCallback((result: SaveResult) => {
+    storageFailed.current = !result.ok;
+    setSaveError(!result.ok);
+    setSaves(result.list);
+  }, []);
 
   const flushAutosave = useCallback(() => {
     window.clearTimeout(saveTimer.current);
@@ -66,8 +82,8 @@ export default function StudioPage() {
     pendingSave.current = false;
     if (!strokes.current.length) return;
     sessionRef.current ??= crypto.randomUUID?.() ?? String(Date.now());
-    setSaves(upsertAutosave(sessionRef.current, strokes.current));
-  }, []);
+    commitSaves(upsertAutosave(sessionRef.current, strokes.current));
+  }, [commitSaves]);
 
   const scheduleAutosave = useCallback(() => {
     pendingSave.current = true;
@@ -77,9 +93,21 @@ export default function StudioPage() {
 
   useEffect(() => () => flushAutosave(), [flushAutosave]);
 
+  // Recarregar ou fechar a aba nao roda a limpeza do React: grava o que estiver pendente.
+  useEffect(() => {
+    const flush = () => flushAutosave();
+    const onVisibility = () => { if (document.visibilityState === 'hidden') flush(); };
+    window.addEventListener('pagehide', flush);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('pagehide', flush);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [flushAutosave]);
+
   useEffect(() => {
     if (!sideOpen) return;
-    setSaves(readSaves()); // descarta o que passou de 24 h
+    if (!storageFailed.current) setSaves(readSaves()); // descarta o que passou de 24 h (com gravacao recusada, a lista em memoria e a unica copia)
     const onDown = (e: PointerEvent) => {
       const t = e.target as Node;
       if (!sideRef.current?.contains(t) && !brandRef.current?.contains(t)) setSideOpen(false);
@@ -100,6 +128,7 @@ export default function StudioPage() {
   const [camOpen, setCamOpen] = useState(false);
   const camBoxRef = useRef<HTMLDivElement>(null);
   const [camError, setCamError] = useState('');
+  const camRequest = useRef(0); // invalida pedidos de camera pendentes (parar, trocar, sair)
   const cloudRef = useRef<{ quad: [number, number][] | null; img: HTMLImageElement | null } | null>(null);
   const renderRef = useRef<(() => void) | undefined>(undefined);
   const [cloudStatus, setCloudStatus] = useState<CloudStatus>('off');
@@ -153,6 +182,7 @@ export default function StudioPage() {
   }, []);
 
   const stopCam = useCallback(() => {
+    camRequest.current += 1;
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     if (videoRef.current) videoRef.current.srcObject = null;
@@ -165,12 +195,17 @@ export default function StudioPage() {
       setCamError('Este navegador não expõe câmeras (use https ou localhost).');
       return;
     }
+    const request = ++camRequest.current;
     try {
       streamRef.current?.getTracks().forEach((t) => t.stop());
       const stream = await navigator.mediaDevices.getUserMedia({
         video: deviceId ? { deviceId: { exact: deviceId }, width: { ideal: 1920 }, height: { ideal: 1080 } } : { width: { ideal: 1920 }, height: { ideal: 1080 } },
         audio: false,
       });
+      if (request !== camRequest.current) { // o estudio fechou ou outro pedido venceu enquanto o navegador pedia permissao
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
@@ -189,12 +224,24 @@ export default function StudioPage() {
     void refreshCams();
     navigator.mediaDevices.addEventListener?.('devicechange', refreshCams);
     return () => {
+      camRequest.current += 1;
       navigator.mediaDevices.removeEventListener?.('devicechange', refreshCams);
       streamRef.current?.getTracks().forEach((t) => t.stop());
     };
   }, [refreshCams]);
 
   const [dark, setDark] = useState(() => document.body.classList.contains('dark'));
+  // Na visita direta ao estudio o cabecalho (que le a preferencia salva) nao esta montado: aplica o tema salvo aqui.
+  useEffect(() => {
+    let saved = false;
+    try { saved = localStorage.getItem('draw-theme') === 'dark'; } catch { /* sem armazenamento: fica no tema atual */ }
+    if (saved && !document.body.classList.contains('dark')) {
+      document.body.classList.add('dark');
+      document.querySelector('meta[name="theme-color"]')?.setAttribute('content', '#1b1c19');
+      setDark(true);
+      window.dispatchEvent(new Event('resize'));
+    }
+  }, []);
   const toggleTheme = () => {
     const apply = () => {
       const next = !document.body.classList.contains('dark');
@@ -278,9 +325,16 @@ export default function StudioPage() {
         pc.strokeStyle = s.ink === INKS[0] ? css('--ink') || s.ink : s.ink;
         pc.lineWidth = 2.2 * dpr;
         pc.lineCap = pc.lineJoin = 'round';
-        pc.beginPath();
-        s.pts.forEach(([x, y], i) => (i ? pc.lineTo(x * pw, y * ph) : pc.moveTo(x * pw, y * ph)));
-        pc.stroke();
+        if (s.pts.length === 1) {
+          pc.fillStyle = pc.strokeStyle;
+          pc.beginPath();
+          pc.arc(s.pts[0][0] * pw, s.pts[0][1] * ph, pc.lineWidth / 2, 0, Math.PI * 2);
+          pc.fill();
+        } else {
+          pc.beginPath();
+          s.pts.forEach(([x, y], i) => (i ? pc.lineTo(x * pw, y * ph) : pc.moveTo(x * pw, y * ph)));
+          pc.stroke();
+        }
         dc.strokeStyle = s.ink === INKS[0] ? css('--ink') || s.ink : s.ink;
         dc.lineWidth = 3 * dpr;
         dc.lineCap = dc.lineJoin = 'round';
@@ -292,7 +346,17 @@ export default function StudioPage() {
           pc.strokeStyle = '#d0342c';
           pc.lineWidth = 2 * dpr;
           pc.beginPath();
-          cloud.quad.forEach(([x, y], i) => (i ? pc.lineTo(x * pw, y * ph) : pc.moveTo(x * pw, y * ph)));
+          // o video usa object-fit: cover; a quad vem normalizada sobre o quadro inteiro
+          const vw = videoRef.current?.videoWidth || pw;
+          const vh = videoRef.current?.videoHeight || ph;
+          const k = Math.max(pw / vw, ph / vh);
+          const ox = (pw - vw * k) / 2;
+          const oy = (ph - vh * k) / 2;
+          cloud.quad.forEach(([x, y], i) => {
+            const px = x * vw * k + ox;
+            const py = y * vh * k + oy;
+            if (i) pc.lineTo(px, py); else pc.moveTo(px, py);
+          });
           pc.closePath();
           pc.stroke();
         }
@@ -318,6 +382,7 @@ export default function StudioPage() {
       paper.setPointerCapture(e.pointerId);
       current = { pts: [pos(e)], ink: inkRef.current };
       strokes.current.push(current);
+      render(); // o toque sem arrasto ja deixa o ponto
     };
     const move = (e: PointerEvent) => {
       if (!current) return;
@@ -360,7 +425,7 @@ export default function StudioPage() {
 
   const pick = (i: number) => {
     inkRef.current = INKS[i];
-    swatches.current?.querySelectorAll('button').forEach((b, j) => b.setAttribute('aria-pressed', String(i === j)));
+    setInkIdx(i);
   };
 
   return (
@@ -370,6 +435,7 @@ export default function StudioPage() {
       <header className="studio-bar">
         <button type="button" ref={brandRef} className="studio-mark" aria-expanded={sideOpen} aria-controls="studio-side" onClick={() => setSideOpen((o) => !o)}>Draw<i>studio</i></button>
         <span className="studio-pill"><span className={`status-dot${camId ? ' is-live' : ''}`} /> {camId ? `câmera · ${activeCam?.label || 'ativa'}${cloudLabel}` : 'sessão local · câmera desligada'}</span>
+        {saveError && <span className="studio-save-error" role="alert">sem espaço para salvar — o desenho continua só nesta tela</span>}
         <button type="button" className="studio-exit" aria-label={`Ativar tema ${dark ? 'claro' : 'escuro'}`} onClick={toggleTheme}>{dark ? 'light' : 'dark'}</button>
         <Link className="studio-exit" to="/product" onClick={leave}>sair ↗</Link>
       </header>
@@ -379,8 +445,18 @@ export default function StudioPage() {
         open={sideOpen}
         saves={saves}
         onOpenEntry={(e) => { loadRef.current?.(e); setSideOpen(false); }}
-        onSave={(id) => setSaves(makePermanent(id))}
-        onDelete={(id) => setSaves(removeSave(id))}
+        onSave={(id) => {
+          if (id === sessionRef.current) sessionRef.current = null; // o proximo traco abre um automatico novo, sem sobrescrever o salvo
+          commitSaves(makePermanent(id));
+        }}
+        onDelete={(id) => {
+          if (id === sessionRef.current) {
+            sessionRef.current = null;
+            pendingSave.current = false; // nao recria o que acabou de ser excluido
+            window.clearTimeout(saveTimer.current);
+          }
+          commitSaves(removeSave(id));
+        }}
         onClose={() => setSideOpen(false)}
       />
 
@@ -397,9 +473,9 @@ export default function StudioPage() {
       </section>
 
       <footer className="studio-dock">
-        {!camId && <div className="studio-swatches" ref={swatches} role="group" aria-label="Tinta">
+        {!camId && <div className="studio-swatches" role="group" aria-label="Tinta">
           {INKS.map((c, i) => (
-            <button key={c} type="button" aria-label={`Tinta ${i + 1}`} aria-pressed={i === 0} style={{ background: i === 0 ? 'var(--ink)' : c }} onClick={() => pick(i)} />
+            <button key={c} type="button" aria-label={`Tinta ${i + 1}`} aria-pressed={i === inkIdx} style={{ background: i === 0 ? 'var(--ink)' : c }} onClick={() => pick(i)} />
           ))}
         </div>}
         {!camId && <button type="button" className="studio-clear" onClick={() => clearRef.current?.()}>limpar</button>}

@@ -17,7 +17,7 @@ export default function App() {
     document.body.classList.toggle('home-scroll', location.pathname === '/');
   }, [location.pathname]);
 
-  const inStudio = location.pathname === '/app';
+  const inStudio = location.pathname.replace(/\/+$/, '') === '/app'; // '/app/' tambem e o estudio
 
   return (
     <>
