@@ -1,0 +1,493 @@
+"""Stream de tinta (draw.stream, bridge/STREAM.md)."""
+
+import io
+import socket
+import struct
+import threading
+import time
+
+import numpy as np
+import pytest
+
+from draw import contracts, stream
+from draw.protocol import (
+    ProtocolError,
+    client_handshake,
+)
+
+TOKEN = "t" * 32
+
+
+needs_private_files = pytest.mark.skipif(
+    not stream._PRIVATE_FILES,
+    reason="gravacao privada exige os.fchmod (nao no Windows nativo)",
+)
+
+
+def _pub(pub, generation, version, mask):
+    pub.publish(contracts.InkPublication(generation, version, mask))
+
+
+def _mask(h=40, w=30, fill=0):
+    return np.full((h, w), fill, np.uint8)
+
+
+def _canvas_from(data):
+    canvas = stream.InkCanvas()
+    boxes = [canvas.apply(r) for r in stream.iter_records(io.BytesIO(data).read)]
+    return canvas, boxes
+
+
+def test_header_is_32_bytes():
+    assert stream.HEADER_SIZE == 32
+
+
+def test_full_then_delta_roundtrip():
+    a = _mask()
+    b = a.copy()
+    b[5:9, 3:12] = 255
+    data = stream.pack_full(1, 1, 10, a, (210.0, 297.0))
+    data += stream.pack_delta(1, 2, 20, b, stream.diff_box(a, b))
+    canvas, boxes = _canvas_from(data)
+    assert boxes == [(0, 0, 30, 40), (3, 5, 9, 4)]
+    assert np.array_equal(canvas.mask, b)
+    assert canvas.paper_mm == pytest.approx((210.0, 297.0))
+    assert (canvas.generation, canvas.ink_version) == (1, 2)
+
+
+def test_diff_box_none_when_equal():
+    assert stream.diff_box(_mask(), _mask()) is None
+
+
+def test_delta_without_full_is_protocol_error():
+    a = _mask()
+    b = a.copy()
+    b[0, 0] = 255
+    data = stream.pack_delta(1, 2, 0, b, (0, 0, 1, 1))
+    with pytest.raises(ProtocolError):
+        _canvas_from(data)
+
+
+def test_delta_other_generation_is_protocol_error():
+    a = _mask()
+    b = a.copy()
+    b[0, 0] = 255
+    data = stream.pack_full(1, 1, 0, a, (1.0, 1.0))
+    data += stream.pack_delta(2, 2, 0, b, (0, 0, 1, 1))
+    with pytest.raises(ProtocolError):
+        _canvas_from(data)
+
+
+def test_bad_magic_and_oversized_payload_rejected_before_alloc():
+    good = stream.pack_full(1, 1, 0, _mask(), (1.0, 1.0))
+    with pytest.raises(ProtocolError):
+        list(stream.iter_records(io.BytesIO(b"XXXX" + good[4:]).read))
+    huge = stream.HEADER.pack(
+        stream.MAGIC,
+        1,
+        stream.KIND_FULL,
+        0,
+        1,
+        1,
+        0,
+        10,
+        10,
+        stream.MAX_PAYLOAD_LEN + 1,
+    )
+    with pytest.raises(ProtocolError):
+        list(stream.iter_records(io.BytesIO(huge).read))
+
+
+def test_truncated_tail_is_error():
+    good = stream.pack_full(1, 1, 0, _mask(), (1.0, 1.0))
+    with pytest.raises(ProtocolError):
+        list(stream.iter_records(io.BytesIO(good[:-3]).read))
+
+
+def test_zlib_bomb_rejected():
+    import zlib
+
+    bomb = zlib.compress(bytes(10_000_000))
+    payload = struct.pack("<ff", 1.0, 1.0) + bomb
+    data = (
+        stream.HEADER.pack(
+            stream.MAGIC, 1, stream.KIND_FULL, 0, 1, 1, 0, 4, 4, len(payload)
+        )
+        + payload
+    )
+    with pytest.raises(ProtocolError):
+        _canvas_from(data)
+
+
+def _connect(port, token=TOKEN):
+    sock = socket.create_connection(("127.0.0.1", port), timeout=3)
+    client_handshake(sock, token)
+    return sock
+
+
+def _wait(cond, timeout=3.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if cond():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def _read_until(sock, canvas, version):
+    reader = stream.iter_records(sock.recv)
+    for rec in reader:
+        canvas.apply(rec)
+        if canvas.ink_version >= version:
+            return
+
+
+@needs_private_files
+def test_publisher_socket_and_record_reconstruct_same_canvas(tmp_path):
+    rec_path = tmp_path / "s.drawink"
+    pub = stream.InkStreamPublisher(
+        port=0,
+        token=TOKEN,
+        paper_mm=(210.0, 297.0),
+        record_path=rec_path,
+        log=lambda *_: None,
+    )
+    try:
+        sock = _connect(pub.port)
+        assert _wait(lambda: len(pub._sinks) == 2)
+        a = _mask()
+        _pub(pub, 1, 1, a)
+        b = a.copy()
+        b[2:6, 2:6] = 255
+        time.sleep(0.1)
+        _pub(pub, 1, 2, b)
+        canvas = stream.InkCanvas()
+        _read_until(sock, canvas, 2)
+        assert np.array_equal(canvas.mask, b)
+        sock.close()
+    finally:
+        pub.close()
+    file_canvas = stream.InkCanvas()
+    for rec in stream.records_from_file(rec_path):
+        file_canvas.apply(rec)
+    assert np.array_equal(file_canvas.mask, b)
+
+
+def test_wrong_token_gets_nothing():
+    pub = stream.InkStreamPublisher(port=0, token=TOKEN, log=lambda *_: None)
+    try:
+        sock = socket.create_connection(("127.0.0.1", pub.port), timeout=3)
+        sock.sendall(struct.pack("<4sHH", b"DRAH", 1, 32) + b"x" * 32)
+        assert sock.recv(4) == b""
+        sock.close()
+        assert pub._sinks == []
+    finally:
+        pub.close()
+
+
+def test_late_consumer_gets_full_of_latest():
+    pub = stream.InkStreamPublisher(port=0, token=TOKEN, log=lambda *_: None)
+    try:
+        a = _mask()
+        a[1:3, 1:3] = 255
+        _pub(pub, 3, 7, a)
+        time.sleep(0.1)
+        sock = _connect(pub.port)
+        canvas = stream.InkCanvas()
+        _read_until(sock, canvas, 7)
+        assert np.array_equal(canvas.mask, a)
+        assert canvas.generation == 1  # geracao do publicador, nao a da trabalhadora
+        sock.close()
+    finally:
+        pub.close()
+
+
+def test_publish_never_blocks_with_stalled_consumer():
+    pub = stream.InkStreamPublisher(port=0, token=TOKEN, log=lambda *_: None)
+    try:
+        sock = _connect(pub.port)  # nunca le
+        big = np.random.default_rng(0).integers(0, 256, (1200, 850), dtype=np.uint8)
+        start = time.monotonic()
+        for i in range(50):
+            _pub(pub, 1, i + 1, big ^ np.uint8(i))
+        assert time.monotonic() - start < 0.5
+        sock.close()
+    finally:
+        pub.close()
+
+
+def test_no_consumer_publish_is_cheap_and_close_is_clean():
+    pub = stream.InkStreamPublisher(port=0, token=TOKEN, log=lambda *_: None)
+    for i in range(20):
+        _pub(pub, 1, i + 1, _mask())
+    pub.close()
+    assert not any(t.is_alive() for t in pub._threads)
+
+
+def test_missing_token_refused():
+    with pytest.raises(Exception, match="token"):
+        stream.InkStreamPublisher(port=0, token=None)
+
+
+def test_pipeline_forwards_on_ink():
+    from draw import pipeline as pipeline_module
+
+    calls = []
+
+    class Worker:
+        error = None
+
+        def poll_display(self, generation, version):
+            from draw.contracts import InkDisplaySnapshot
+
+            return InkDisplaySnapshot(
+                version=4, confirmed=_mask(fill=255), provisional=_mask()
+            )
+
+    pipe = pipeline_module.Pipeline.__new__(pipeline_module.Pipeline)
+    pipe.ink_worker = Worker()
+    pipe.clean_generation = 2
+    pipe.clean_display_version = 0
+    pipe._on_ink = lambda *a: calls.append(a)
+    pipe._render_display = lambda *a, **k: None
+    pipe.canvas_buffer = None
+    pipe._log = lambda *_: None
+    pipe.collect_ink()
+    assert len(calls) == 1
+    pub = calls[0][0]
+    assert isinstance(pub, contracts.InkPublication)
+    assert (pub.generation, pub.version) == (2, 4)
+    assert pub.confirmed.min() == 255
+    assert threading.active_count() >= 1
+
+
+def test_zlib_garbage_and_trailing_bytes_are_protocol_errors():
+    import zlib
+
+    prefix = struct.pack("<ff", 1.0, 1.0)
+    for body in (b"not zlib at all", zlib.compress(bytes(16)) + b"extra"):
+        payload = prefix + body
+        data = stream.HEADER.pack(
+            stream.MAGIC, 1, stream.KIND_FULL, 0, 1, 1, 0, 4, 4, len(payload)
+        )
+        with pytest.raises(ProtocolError):
+            _canvas_from(data + payload)
+
+
+@needs_private_files
+def test_record_only_needs_no_token_and_keeps_final_ink(tmp_path):
+    path = tmp_path / "r.drawink"
+    pub = stream.InkStreamPublisher(port=None, record_path=path, log=lambda *_: None)
+    assert pub.port is None
+    final = _mask()
+    final[3:5, 3:5] = 255
+    _pub(pub, 1, 1, _mask())
+    time.sleep(0.1)
+    _pub(pub, 1, 2, final)
+    pub.close()  # a ultima publicacao pendente ainda precisa ser gravada
+    canvas = stream.InkCanvas()
+    for rec in stream.records_from_file(path):
+        canvas.apply(rec)
+    assert canvas.ink_version == 2
+    assert np.array_equal(canvas.mask, final)
+
+
+def test_nothing_to_publish_is_refused():
+    with pytest.raises(ValueError):
+        stream.InkStreamPublisher(port=None)
+
+
+@needs_private_files
+def test_recording_is_private(tmp_path):
+    import os
+    import stat
+
+    path = tmp_path / "p.drawink"
+    old = os.umask(0)
+    try:
+        pub = stream.InkStreamPublisher(
+            port=None, record_path=path, log=lambda *_: None
+        )
+    finally:
+        os.umask(old)
+    pub.close()
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+@needs_private_files
+def test_failing_recording_does_not_stop_live_stream(tmp_path):
+    pub = stream.InkStreamPublisher(
+        port=0, token=TOKEN, record_path=tmp_path / "f.drawink", log=lambda *_: None
+    )
+    try:
+        record_sink = next(s for s in pub._sinks if not s.is_socket)
+
+        def boom(_data):
+            raise OSError("disco cheio")
+
+        def boom_close():
+            raise OSError("flush falhou")
+
+        record_sink.write = boom
+        record_sink.close = boom_close
+        sock = _connect(pub.port)
+        assert _wait(lambda: len(pub._sinks) == 2)
+        _pub(pub, 1, 1, _mask())
+        time.sleep(0.2)
+        b = _mask()
+        b[1:3, 1:3] = 255
+        _pub(pub, 1, 2, b)
+        canvas = stream.InkCanvas()
+        _read_until(sock, canvas, 2)
+        assert np.array_equal(canvas.mask, b)
+        sock.close()
+    finally:
+        pub.close()
+
+
+def test_closed_idle_consumer_is_pruned():
+    pub = stream.InkStreamPublisher(port=0, token=TOKEN, log=lambda *_: None)
+    try:
+        sock = _connect(pub.port)
+        assert _wait(lambda: len(pub._sinks) == 1)
+        sock.close()
+        assert _wait(lambda: len(pub._sinks) == 0, timeout=3)
+    finally:
+        pub.close()
+
+
+def test_consumer_cap_evicts_oldest(monkeypatch):
+    monkeypatch.setattr(stream, "MAX_CONSUMERS", 2)
+    pub = stream.InkStreamPublisher(port=0, token=TOKEN, log=lambda *_: None)
+    try:
+        socks = [_connect(pub.port) for _ in range(3)]
+        assert _wait(lambda: len(pub._sinks) == 2)
+        socks[0].settimeout(2)
+        assert socks[0].recv(1) == b""
+        for s in socks:
+            s.close()
+    finally:
+        pub.close()
+
+
+def test_pending_handshake_cap_refuses_without_thread(monkeypatch):
+    monkeypatch.setattr(stream, "MAX_PENDING_HANDSHAKES", 1)
+    pub = stream.InkStreamPublisher(port=0, token=TOKEN, log=lambda *_: None)
+    try:
+        silent = socket.create_connection(("127.0.0.1", pub.port), timeout=3)
+        time.sleep(0.4)  # ocupa o unico slot (handshake sem HELLO)
+        second = socket.create_connection(("127.0.0.1", pub.port), timeout=3)
+        second.settimeout(2)
+        assert second.recv(1) == b""  # recusado de cara
+        silent.close()
+        second.close()
+    finally:
+        pub.close()
+
+
+def test_clear_bumps_generation_and_sends_empty_canvas():
+    pub = stream.InkStreamPublisher(port=0, token=TOKEN, log=lambda *_: None)
+    try:
+        sock = _connect(pub.port)
+        assert _wait(lambda: len(pub._sinks) == 1)
+        full = _mask(fill=255)
+        _pub(pub, 5, 3, full)
+        canvas = stream.InkCanvas()
+        _read_until(sock, canvas, 3)
+        first_generation = canvas.generation
+        time.sleep(0.1)
+        pub.publish(contracts.InkPublication(-1, 0, None))
+        _read_until(sock, canvas, 0)
+        assert canvas.generation == first_generation + 1
+        assert canvas.mask.max() == 0
+        sock.close()
+    finally:
+        pub.close()
+
+
+def test_clear_before_any_publication_is_a_noop(monkeypatch):
+    monkeypatch.setattr(stream.InkStreamPublisher, "_send_loop", lambda self: None)
+    pub = stream.InkStreamPublisher(port=0, token=TOKEN, log=lambda *_: None)
+    try:
+        pub.publish(contracts.InkPublication(-1, 0, None))
+        assert pub._pending is None
+    finally:
+        pub.close()
+
+
+def test_worker_generation_maps_to_monotonic_stream_generation(monkeypatch):
+    # Sem thread de envio: _pending fica estavel e o teste nao corre contra ela.
+    monkeypatch.setattr(stream.InkStreamPublisher, "_send_loop", lambda self: None)
+    pub = stream.InkStreamPublisher(port=0, token=TOKEN, log=lambda *_: None)
+    try:
+        _pub(pub, 7, 1, _mask())
+        g1 = pub._pending[0]
+        _pub(pub, 7, 2, _mask())
+        assert pub._pending[0] == g1
+        _pub(pub, 9, 1, _mask())
+        assert pub._pending[0] == g1 + 1
+    finally:
+        pub.close()
+
+
+def test_reset_source_publishes_clear():
+    from draw import pipeline as pipeline_module
+
+    calls = []
+    pipe = pipeline_module.Pipeline.__new__(pipeline_module.Pipeline)
+    pipe._on_ink = calls.append
+    pipe.tracker = type("T", (), {"reset": lambda self: None})()
+    pipe.corner_history = type("C", (), {"clear": lambda self: None})()
+    pipe.reset_source(1.0)
+    assert len(calls) == 1 and calls[0].confirmed is None
+
+
+def test_reconnect_at_capacity_does_not_evict_healthy_consumer(monkeypatch):
+    monkeypatch.setattr(stream, "MAX_CONSUMERS", 2)
+    # Sem a thread de envio nao ha poda periodica: so a poda do _adopt age,
+    # e o teste fica deterministico.
+    monkeypatch.setattr(stream.InkStreamPublisher, "_send_loop", lambda self: None)
+    pub = stream.InkStreamPublisher(port=0, token=TOKEN, log=lambda *_: None)
+    try:
+        healthy = _connect(pub.port)
+        assert _wait(lambda: len(pub._sinks) == 1)
+        healthy_sink = pub._sinks[0]
+        gone = _connect(pub.port)
+        assert _wait(lambda: len(pub._sinks) == 2)
+        gone_sink = pub._sinks[1]
+        gone.close()
+        time.sleep(0.05)
+        again = _connect(pub.port)
+        assert _wait(lambda: gone_sink not in pub._sinks and len(pub._sinks) == 2)
+        assert healthy_sink in pub._sinks and len(pub._sinks) == 2
+        healthy.settimeout(0.3)
+        with pytest.raises(TimeoutError):
+            healthy.recv(1)  # segue aberto, sem EOF
+        healthy.close()
+        again.close()
+    finally:
+        pub.close()
+
+
+def test_recording_refused_without_private_files(monkeypatch, tmp_path):
+    monkeypatch.setattr(stream, "_PRIVATE_FILES", False)
+    path = tmp_path / "w.drawink"
+    with pytest.raises(RuntimeError, match="privada"):
+        stream.InkStreamPublisher(port=None, record_path=path, log=lambda *_: None)
+    assert not path.exists()
+
+
+@needs_private_files
+def test_close_reports_recording_flush_failure(tmp_path):
+    messages = []
+    pub = stream.InkStreamPublisher(
+        port=None, record_path=tmp_path / "x.drawink", log=messages.append
+    )
+    sink = pub._sinks[0]
+
+    def boom():
+        raise OSError("flush falhou")
+
+    sink.close = boom
+    pub.close()
+    assert any("falha ao fechar" in m for m in messages)
