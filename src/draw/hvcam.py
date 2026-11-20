@@ -3,8 +3,9 @@
 O hvcam é o transporte nativo para a webcam que mora no lado Windows:
 hvcam-host.exe captura por Media Foundation e serve o quadro mais novo
 por AF_HYPERV (vsock) na porta 8765 — sem IP, sem firewall, sem usbipd.
-Dentro do WSL o cliente fala vsock direto; fora dele, hvcam+tcp://host
-usa o fallback TCP do host.
+`hvcam://` conecta ao host (requer o serviço vsock registrado uma vez no
+Windows); `hvcam+reverse://` escuta no WSL para `hvcam-host.exe --reverse`
+e não requer registro; fora do WSL, `hvcam+tcp://host` usa TCP.
 
 O cliente ctypes abaixo é vendored de santleme/hvcam
 (bindings/python/hvcam.py). A libhvcam.so é um artefato do build do
@@ -20,7 +21,11 @@ LatestFrameCapture usa na telemetria.
 """
 
 import ctypes
+import errno
 import os
+import selectors
+import socket
+import time
 from urllib.parse import urlparse
 
 import cv2
@@ -31,7 +36,15 @@ import numpy as np
 DEFAULT_PORT = 8765
 
 _TIMEOUT_MS = 1000
+# No Hyper-V (AF_HYPERV), uma tentativa de connect() do host antes de o
+# listener existir no WSL pode levar 30 s para o host rescindir a oferta
+# mais 1 s de espera antes do retry do hvcam-host.exe --reverse: 35 s
+# mantem o accept limitado e cobre um ciclo completo de timeout + retry.
+_LISTEN_TIMEOUT_MS = 35_000
 _MAX_PAYLOAD = 64 * 1024 * 1024
+# Portas AF_VSOCK sao uint32; 0xFFFFFFFF e VMADDR_PORT_ANY (reservado).
+_VSOCK_PORT_MAX = 0xFFFFFFFF - 1
+_TCP_PORT_MAX = 65535
 
 
 class HvFrameHeader(ctypes.Structure):
@@ -49,13 +62,27 @@ class HvFrameHeader(ctypes.Structure):
     ]
 
 
-def _load():
+def _candidates():
     here = os.path.dirname(os.path.abspath(__file__))
-    for cand in (
+    paths = [
         os.path.join(here, "libhvcam.so"),
         os.path.join(here, "..", "..", "build", "libhvcam.so"),
         "libhvcam.so",
-    ):
+        os.path.join(here, "..", "..", "..", "hvcam", "build", "libhvcam.so"),
+    ]
+    try:
+        import pwd
+
+        home_dir = pwd.getpwuid(os.getuid()).pw_dir
+    except (ImportError, AttributeError, KeyError, OSError):
+        home_dir = None
+    if home_dir:
+        paths.append(os.path.join(home_dir, "hvcam", "build", "libhvcam.so"))
+    return tuple(paths)
+
+
+def _load():
+    for cand in _candidates():
         try:
             lib = ctypes.CDLL(cand)
             break
@@ -95,6 +122,61 @@ def _lib():
     return _LIB
 
 
+def _listen_vsock_bounded(
+    port,
+    timeout_ms=_LISTEN_TIMEOUT_MS,
+    *,
+    socket_factory=socket.socket,
+    selector_factory=selectors.DefaultSelector,
+    clock=time.monotonic,
+):
+    """Escuta em AF_VSOCK com prazo de accept e exige peer CID do host (2).
+
+    `hvcam_listen` da libhvcam C chama `accept()` bloqueante sem prazo e
+    sem checar o CID de origem; aqui o listener fecha no timeout com
+    `-ETIMEDOUT` (para nao travar o startup nem o `--check`) e descarta
+    conexoes que nao venham de `VMADDR_CID_HOST`.
+    """
+    if timeout_ms is not None and timeout_ms <= 0:
+        return -errno.ETIMEDOUT
+    af_vsock = getattr(socket, "AF_VSOCK", 40)
+    cid_any = getattr(socket, "VMADDR_CID_ANY", 0xFFFFFFFF)
+    cid_host = getattr(socket, "VMADDR_CID_HOST", 2)
+    try:
+        listener = socket_factory(af_vsock, socket.SOCK_STREAM)
+    except OSError as error:
+        return -(error.errno or errno.EIO)
+    try:
+        listener.setblocking(False)
+        listener.bind((cid_any, int(port)))
+        listener.listen(1)
+        deadline = None if timeout_ms is None else clock() + (timeout_ms / 1000.0)
+        with selector_factory() as selector:
+            selector.register(listener, selectors.EVENT_READ)
+            while True:
+                remaining = None if deadline is None else deadline - clock()
+                if remaining is not None and remaining <= 0:
+                    return -errno.ETIMEDOUT
+                if not selector.select(remaining):
+                    return -errno.ETIMEDOUT
+                try:
+                    conn, peer = listener.accept()
+                except BlockingIOError:
+                    continue
+                peer_cid = (
+                    peer[0] if isinstance(peer, tuple) and len(peer) >= 1 else None
+                )
+                if peer_cid != cid_host:
+                    conn.close()
+                    continue
+                conn.setblocking(True)
+                return conn.detach()
+    except OSError as error:
+        return -(error.errno or errno.EIO)
+    finally:
+        listener.close()
+
+
 class Camera:
     """Uma conexao hvcam; puxa o quadro mais novo sob demanda.
 
@@ -103,14 +185,51 @@ class Camera:
     repartida no ':' — que quebrava IPv6 (`[::1]` -> "::1:8765").
     """
 
-    def __init__(self, port=DEFAULT_PORT, host=None):
+    def __init__(
+        self,
+        port=DEFAULT_PORT,
+        host=None,
+        listen=False,
+        timeout_ms=_LISTEN_TIMEOUT_MS,
+        listener=None,
+    ):
+        if host is not None and listen:
+            raise ValueError("hvcam: listen mode cannot use a TCP host")
+        if listen and not 1 <= int(port) <= _VSOCK_PORT_MAX:
+            raise ValueError(f"porta hvcam invalida: {port!r}")
         lib = _lib()
+        self._lib = lib
         if host is not None:
             self.fd = lib.hvcam_connect_tcp(host.encode(), port)
+        elif listen:
+            listen_fn = _listen_vsock_bounded if listener is None else listener
+            self.fd = listen_fn(port, timeout_ms)
         else:
             self.fd = lib.hvcam_connect(port)
         if self.fd < 0:
-            raise OSError(f"hvcam: connect failed ({self.fd})")
+            operation = "listen" if listen else "connect"
+            detail = f"hvcam: {operation} failed ({self.fd})"
+            if self.fd == -errno.ETIMEDOUT:
+                if listen:
+                    detail += (
+                        "; timeout: hvcam-host.exe --reverse nao conectou a "
+                        f"tempo na porta {port}. No Windows, inicie "
+                        f"hvcam-host.exe --reverse --port {port}"
+                    )
+                else:
+                    reverse_source = (
+                        "hvcam+reverse://"
+                        if port == DEFAULT_PORT
+                        else f"hvcam+reverse://:{port}"
+                    )
+                    detail += (
+                        "; timeout: hvcam-host.exe nao respondeu. No Windows, "
+                        f"inicie hvcam-host.exe --reverse --port {port} e use "
+                        f"--source {reverse_source} no Draw, ou registre o "
+                        "servico uma vez como administrador com "
+                        f"hvcam-host.exe --register-vsock --port {port}"
+                    )
+            raise OSError(detail)
         self._buf = (ctypes.c_ubyte * _MAX_PAYLOAD)()
         self._hdr = HvFrameHeader()
         self._last = ctypes.c_uint64(0xFFFFFFFFFFFFFFFF)
@@ -122,7 +241,8 @@ class Camera:
         timeout vencer (TimeoutError). O ndarray e uma view sobre o
         buffer persistente — to_bgr() ja materializa a imagem.
         """
-        n = _lib().hvcam_grab_next(
+        lib = getattr(self, "_lib", None) or _lib()
+        n = lib.hvcam_grab_next(
             self.fd,
             ctypes.byref(self._hdr),
             self._buf,
@@ -198,7 +318,8 @@ class Camera:
 
     def close(self):
         if self.fd >= 0:
-            _lib().hvcam_close(self.fd)
+            lib = getattr(self, "_lib", None) or _lib()
+            lib.hvcam_close(self.fd)
             self.fd = -1
 
     def __enter__(self):
@@ -209,39 +330,62 @@ class Camera:
 
 
 def is_hvcam_source(source):
-    """True para `hvcam://` (vsock) ou `hvcam+tcp://host` (TCP)."""
+    """True para fontes vsock, reverse-vsock ou TCP do hvcam."""
     if not isinstance(source, str):
         return False
     lower = source.strip().lower()
-    return lower.startswith("hvcam://") or lower.startswith("hvcam+tcp://")
+    return lower.startswith(("hvcam://", "hvcam+tcp://", "hvcam+reverse://"))
 
 
 def parse_hvcam_endpoint(source):
     """Extrai (host, porta) da URL hvcam. host None = vsock.
 
     `hvcam://` e `hvcam://:porta` falam vsock com o host Windows da
-    propria maquina (o vsock nao tem host — um hostname ali e erro de
-    digitacao). `hvcam+tcp://host[:porta]` usa o fallback TCP.
+    propria maquina; `hvcam+reverse://[:porta]` escuta por uma conexao
+    iniciada pelo hvcam-host. Vsock nao tem hostname e aceita portas de
+    32 bits (1..2^32-2; 0xFFFFFFFF e VMADDR_PORT_ANY).
+    `hvcam+tcp://host[:porta]` usa o fallback TCP (1..65535).
     """
     text = source.strip()
     parsed = urlparse(text)
-    port = parsed.port if parsed.port is not None else DEFAULT_PORT
-    if port < 1:
-        raise ValueError(f"porta hvcam invalida: {source!r}")
-    if text.lower().startswith("hvcam+tcp://"):
+    scheme = parsed.scheme.lower()
+    if scheme == "hvcam+tcp":
+        try:
+            port = parsed.port if parsed.port is not None else DEFAULT_PORT
+        except ValueError as error:
+            raise ValueError(f"porta hvcam invalida: {source!r}") from error
+        if not 1 <= port <= _TCP_PORT_MAX:
+            raise ValueError(f"porta hvcam invalida: {source!r}")
         if not parsed.hostname:
             raise ValueError(f"hvcam+tcp sem host: {source!r}")
         return parsed.hostname, port
-    if parsed.hostname:
+
+    host_part, sep, port_text = parsed.netloc.partition(":")
+    if host_part:
+        hostname = parsed.hostname or host_part
+        if scheme == "hvcam+reverse":
+            raise ValueError(
+                f"hvcam+reverse nao aceita host ({hostname!r}); "
+                "use hvcam:// para conexao direta"
+            )
+        shown_port = port_text if (sep and port_text) else DEFAULT_PORT
         raise ValueError(
-            f"vsock nao tem host ({parsed.hostname!r}); para TCP use "
-            f"hvcam+tcp://{parsed.hostname}:{port}"
+            f"vsock nao tem host ({hostname!r}); para TCP use "
+            f"hvcam+tcp://{hostname}:{shown_port}"
         )
+    if not sep or not port_text:
+        port = DEFAULT_PORT
+    else:
+        if not port_text.isascii() or not port_text.isdigit():
+            raise ValueError(f"porta hvcam invalida: {source!r}")
+        port = int(port_text, 10)
+    if not 1 <= port <= _VSOCK_PORT_MAX:
+        raise ValueError(f"porta hvcam invalida: {source!r}")
     return None, port
 
 
 class HvcamCapture:
-    """Adaptador compativel com VideoCapture sobre hvcam://.
+    """Adaptador compativel com VideoCapture sobre fontes hvcam.
 
     Alem de read() -> (ok, frame), expoe last_frame_id,
     last_capture_ts_ms e source_dropped (saltos de seq do emissor)
@@ -249,9 +393,16 @@ class HvcamCapture:
     A camera_factory injeta um Camera fake nos testes.
     """
 
-    def __init__(self, source, timeout_ms=_TIMEOUT_MS, camera_factory=None):
+    def __init__(
+        self,
+        source,
+        timeout_ms=_TIMEOUT_MS,
+        camera_factory=None,
+        connect_timeout_ms=None,
+    ):
         self.source = str(source).strip()
         self._timeout_ms = timeout_ms
+        self._connect_timeout_ms = connect_timeout_ms
         self._cam = None
         self._opened = False
         self.last_frame_id = None
@@ -271,11 +422,16 @@ class HvcamCapture:
             self.open_error = error
             return
         try:
-            self._cam = (
-                camera_factory(host=host, port=port)
-                if host is not None
-                else camera_factory(port=port)
-            )
+            scheme = urlparse(self.source).scheme.lower()
+            if host is not None:
+                self._cam = camera_factory(host=host, port=port)
+            elif scheme == "hvcam+reverse":
+                listen_kwargs = {"port": port, "listen": True}
+                if self._connect_timeout_ms is not None:
+                    listen_kwargs["timeout_ms"] = self._connect_timeout_ms
+                self._cam = camera_factory(**listen_kwargs)
+            else:
+                self._cam = camera_factory(port=port)
         except OSError as error:
             self._cam = None
             self.open_error = error
