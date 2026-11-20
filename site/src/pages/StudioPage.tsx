@@ -1,9 +1,9 @@
-import { createPortal } from 'react-dom';
+import { flushSync } from 'react-dom';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Link, Navigate, useOutletContext, useParams } from 'react-router-dom';
-import type { StudioContext } from '../components/StudioShell';
+import { Link, useNavigate } from 'react-router-dom';
+import StudioSidebar from '../components/StudioSidebar';
 import { DrawCloud, isCloudConfigured, type CloudResult, type CloudStatus } from '../lib/drawCloud';
-import { getDrawing, getProject, saveDrawing, type Drawing, type Pt } from '../lib/studioProjects';
+import { makePermanent, readSaves, removeSave, upsertAutosave, type Pt, type SaveEntry, type SaveResult } from '../lib/studioSaves';
 
 const INKS = ['#22231f', '#3b5ba5', '#b5483a'];
 
@@ -28,38 +28,66 @@ function drawSmooth(ctx: CanvasRenderingContext2D, pts: Pt[], w: number, h: numb
   ctx.stroke();
 }
 
-/** Carrega o desenho da URL; se ele não existir mais, volta para o projeto. */
 export default function StudioPage() {
-  const { projectId = '', drawingId = '' } = useParams();
-  const project = getProject(projectId);
-  const drawing = project ? getDrawing(projectId, drawingId) : null;
-  if (!project || !drawing) return <Navigate to={project ? `/app/p/${projectId}` : '/app/projects'} replace />;
-  return <StudioEditor key={drawing.id} projectName={project.name} drawing={drawing} />;
-}
-
-function StudioEditor({ projectName, drawing }: { projectName: string; drawing: Drawing }) {
-  const { slot } = useOutletContext<StudioContext>();
   const paperRef = useRef<HTMLCanvasElement>(null);
   const digitalRef = useRef<HTMLCanvasElement>(null);
   const countRef = useRef<HTMLSpanElement>(null);
-  const [initialStrokes] = useState(() => drawing.strokes.map((st) => ({ ink: st.ink, pts: st.pts.map(([x, y]) => [x, y] as Pt) })));
-  const strokes = useRef<{ pts: Pt[]; ink: string }[]>(initialStrokes);
+  const strokes = useRef<{ pts: Pt[]; ink: string }[]>([]);
   const inkRef = useRef(INKS[0]);
   const [inkIdx, setInkIdx] = useState(0);
   const clearRef = useRef<(() => void) | undefined>(undefined);
-  const [title, setTitle] = useState(drawing.name);
+  const navigate = useNavigate();
+  const [leaving, setLeaving] = useState(false);
+  const leaveTimer = useRef(0);
+  useEffect(() => () => window.clearTimeout(leaveTimer.current), []);
 
+  // Saida = entrada ao contrario: o estudio estoura em branco, e o site volta de longe, encolhendo ate o tamanho normal.
+  const leave = (event: React.MouseEvent) => {
+    event.preventDefault();
+    if (leaving) return;
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      navigate('/product');
+      return;
+    }
+    setSideOpen(false);
+    setLeaving(true);
+    leaveTimer.current = window.setTimeout(() => {
+      document.body.classList.add('is-arriving');
+      navigate('/product');
+      window.setTimeout(() => document.body.classList.remove('is-arriving'), 1500);
+    }, 1100);
+  };
+
+  const loadRef = useRef<((e: SaveEntry) => void) | undefined>(undefined);
+  const sessionRef = useRef<string | null>(null);
   const saveTimer = useRef(0);
   const pendingSave = useRef(false);
+  const sideRef = useRef<HTMLElement>(null);
+  const brandRef = useRef<HTMLButtonElement>(null);
+  const [saves, setSaves] = useState<SaveEntry[]>(() => readSaves());
+  const [sideOpen, setSideOpen] = useState(false);
   const [saveError, setSaveError] = useState(false);
+  const storageFailed = useRef(false);
 
-  // Grava os traços neste mesmo desenho; se o navegador recusou, avisa.
-  const flushAutosave = useCallback(() => {
+  // Mostra a lista devolvida; se o navegador recusou a gravacao, avisa e nao a descarta ao reabrir a barra.
+  const commitSaves = useCallback((result: SaveResult) => {
+    storageFailed.current = !result.ok;
+    setSaveError(!result.ok);
+    setSaves(result.list);
+  }, []);
+
+  // true se nao ha nada pendente ou a gravacao deu certo; em falha os tracos continuam pendentes.
+  const flushAutosave = useCallback((): boolean => {
     window.clearTimeout(saveTimer.current);
-    if (!pendingSave.current) return;
+    if (!pendingSave.current) return true;
     pendingSave.current = false;
-    setSaveError(!saveDrawing(drawing.projectId, drawing.id, { strokes: strokes.current }));
-  }, [drawing.projectId, drawing.id]);
+    if (!strokes.current.length) return true;
+    sessionRef.current ??= crypto.randomUUID?.() ?? String(Date.now());
+    const result = upsertAutosave(sessionRef.current, strokes.current);
+    commitSaves(result);
+    if (!result.ok) pendingSave.current = true;
+    return result.ok;
+  }, [commitSaves]);
 
   const scheduleAutosave = useCallback(() => {
     pendingSave.current = true;
@@ -67,7 +95,7 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
     saveTimer.current = window.setTimeout(flushAutosave, 900);
   }, [flushAutosave]);
 
-  useEffect(() => () => flushAutosave(), [flushAutosave]);
+  useEffect(() => () => { flushAutosave(); }, [flushAutosave]);
 
   // Recarregar ou fechar a aba nao roda a limpeza do React: grava o que estiver pendente.
   useEffect(() => {
@@ -81,11 +109,21 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
     };
   }, [flushAutosave]);
 
-  const rename = () => {
-    const name = title.trim() || 'Sem título';
-    setTitle(name);
-    if (name !== drawing.name) setSaveError(!saveDrawing(drawing.projectId, drawing.id, { name }));
-  };
+  useEffect(() => {
+    if (!sideOpen) return;
+    if (!storageFailed.current) setSaves(readSaves()); // descarta o que passou de 24 h (com gravacao recusada, a lista em memoria e a unica copia)
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as Node;
+      if (!sideRef.current?.contains(t) && !brandRef.current?.contains(t)) setSideOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setSideOpen(false); };
+    document.addEventListener('pointerdown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('pointerdown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [sideOpen]);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -196,6 +234,55 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
     };
   }, [refreshCams]);
 
+  const [dark, setDark] = useState(() => document.body.classList.contains('dark'));
+  // Na visita direta ao estudio o cabecalho (que le a preferencia salva) nao esta montado: aplica o tema salvo aqui.
+  useEffect(() => {
+    let saved = false;
+    try { saved = localStorage.getItem('draw-theme') === 'dark'; } catch { /* sem armazenamento: fica no tema atual */ }
+    if (saved && !document.body.classList.contains('dark')) {
+      document.body.classList.add('dark');
+      document.querySelector('meta[name="theme-color"]')?.setAttribute('content', '#1b1c19');
+      setDark(true);
+      window.dispatchEvent(new Event('resize'));
+    }
+  }, []);
+  const toggleTheme = () => {
+    const apply = () => {
+      const next = !document.body.classList.contains('dark');
+      document.body.classList.toggle('dark', next);
+      document.querySelector('meta[name="theme-color"]')?.setAttribute('content', next ? '#1b1c19' : '#f7f7f4');
+      try { localStorage.setItem('draw-theme', next ? 'dark' : 'light'); } catch { /* sem armazenamento: o botao ainda funciona */ }
+      setDark(next);
+      window.dispatchEvent(new Event('resize')); // redesenha os traços com a tinta do novo tema
+    };
+    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reduce || !document.startViewTransition) {
+      apply();
+      return;
+    }
+    // Explosao em onda: o novo tema se abre do centro em aneis concentricos (ondas de choque) que se espalham ate cobrir tudo.
+    const root = document.documentElement;
+    root.classList.add('theme-tearing', 'theme-wave');
+    const transition = document.startViewTransition(() => flushSync(apply));
+    transition.ready.then(() => {
+      const radius = Math.hypot(window.innerWidth, window.innerHeight) / 2 + 260;
+      const blast = { duration: 1500, fill: 'forwards' as const };
+      root.animate(
+        { '--wave-r': ['0px', `${radius}px`] },
+        { ...blast, easing: 'cubic-bezier(.2,.6,.3,1)', pseudoElement: '::view-transition-new(root)' },
+      );
+      root.animate(
+        { filter: ['brightness(2.8) saturate(1.4)', 'brightness(1.5)', 'brightness(1)'], offset: [0, 0.2, 1] },
+        { ...blast, duration: 1300, pseudoElement: '::view-transition-new(root)' },
+      );
+      root.animate(
+        { transform: ['scale(1)', 'scale(1.05)'], filter: ['blur(0px)', 'blur(3px)'], easing: ['cubic-bezier(.2,.6,.3,1)'] },
+        { ...blast, pseudoElement: '::view-transition-old(root)' },
+      );
+    });
+    transition.finished.catch(() => undefined).finally(() => root.classList.remove('theme-tearing', 'theme-wave'));
+  };
+
   useEffect(() => {
     if (!camOpen) return;
     const onDown = (e: PointerEvent) => {
@@ -212,6 +299,11 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
 
   const activeCam = cams.find((c) => c.deviceId === camId);
   const cloudLabel = !isCloudConfigured() ? '' : cloudStatus === 'ready' ? ' · draw ativo' : cloudStatus === 'connecting' ? ' · conectando ao draw…' : cloudStatus === 'error' ? ` · draw indisponível${cloudDetail ? ` (${cloudDetail})` : ''}` : '';
+
+  useEffect(() => {
+    document.body.classList.add('in-studio');
+    return () => document.body.classList.remove('in-studio');
+  }, []);
 
   useEffect(() => {
     const paper = paperRef.current!;
@@ -318,8 +410,15 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
     paper.addEventListener('pointercancel', up);
     window.addEventListener('resize', render);
     const clear = () => {
+      flushAutosave(); // o que estava na folha fica nos salvamentos automaticos
       strokes.current = [];
-      scheduleAutosave(); // a folha vazia tambem e gravada
+      sessionRef.current = null;
+      render();
+    };
+    loadRef.current = (entry) => {
+      flushAutosave();
+      strokes.current = entry.strokes.map((st) => ({ ink: st.ink, pts: st.pts.map(([x, y]) => [x, y] as Pt) }));
+      sessionRef.current = null; // continuar desenhando cria um novo automatico; o original nao e alterado
       render();
     };
     clearRef.current = clear;
@@ -332,6 +431,7 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
       paper.removeEventListener('pointercancel', up);
       window.removeEventListener('resize', render);
       clearRef.current = undefined;
+      loadRef.current = undefined;
     };
   }, [scheduleAutosave, flushAutosave]);
 
@@ -341,24 +441,40 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
   };
 
   return (
-    <>
-      {slot && createPortal(
-        <>
-          <Link className="studio-crumb" to={`/app/p/${drawing.projectId}`} title="Voltar ao projeto">‹ {projectName}</Link>
-          <input
-            className="studio-title"
-            value={title}
-            maxLength={60}
-            aria-label="Nome do desenho"
-            onChange={(e) => setTitle(e.target.value)}
-            onBlur={rename}
-            onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
-          />
-          <span className="studio-pill"><span className={`status-dot${camId ? ' is-live' : ''}`} /> {camId ? `câmera · ${activeCam?.label || 'ativa'}${cloudLabel}` : 'câmera desligada'}</span>
-          {saveError && <span className="studio-save-error" role="alert">sem espaço para salvar — o desenho continua só nesta tela</span>}
-        </>,
-        slot,
-      )}
+    <main className={`studio${leaving ? ' is-leaving' : ''}`} id="page-content">
+      <div className="studio-flash" aria-hidden="true" />
+      {leaving && <div className="studio-leave" aria-hidden="true" />}
+      <header className="studio-bar">
+        <button type="button" ref={brandRef} className="studio-mark" aria-expanded={sideOpen} aria-controls="studio-side" onClick={() => setSideOpen((o) => !o)}>Draw<i>studio</i></button>
+        <span className="studio-pill"><span className={`status-dot${camId ? ' is-live' : ''}`} /> {camId ? `câmera · ${activeCam?.label || 'ativa'}${cloudLabel}` : 'sessão local · câmera desligada'}</span>
+        {saveError && <span className="studio-save-error" role="alert">sem espaço para salvar — o desenho continua só nesta tela</span>}
+        <button type="button" className="studio-exit" aria-label={`Ativar tema ${dark ? 'claro' : 'escuro'}`} onClick={toggleTheme}>{dark ? 'light' : 'dark'}</button>
+        <Link className="studio-exit" to="/product" onClick={leave}>sair ↗</Link>
+      </header>
+
+      <StudioSidebar
+        ref={sideRef}
+        open={sideOpen}
+        saves={saves}
+        onOpenEntry={(e) => { loadRef.current?.(e); setSideOpen(false); }}
+        onSave={(id) => {
+          const active = id === sessionRef.current;
+          // grava os ultimos tracos nesse mesmo id antes de promove-lo; se nao couberem, nao promove
+          // a copia antiga como se fosse a atual (o aviso de falta de espaco ja esta na tela)
+          if (active && !flushAutosave()) return;
+          commitSaves(makePermanent(id));
+          if (active) sessionRef.current = null; // o proximo traco abre um automatico novo, sem sobrescrever o salvo
+        }}
+        onDelete={(id) => {
+          if (id === sessionRef.current) {
+            sessionRef.current = null;
+            pendingSave.current = false; // nao recria o que acabou de ser excluido
+            window.clearTimeout(saveTimer.current);
+          }
+          commitSaves(removeSave(id));
+        }}
+        onClose={() => setSideOpen(false)}
+      />
 
       <section className="studio-stage">
         <figure className="studio-pane">
@@ -402,6 +518,6 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
           )}
         </div>
       </footer>
-    </>
+    </main>
   );
 }
