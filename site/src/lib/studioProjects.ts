@@ -41,7 +41,8 @@ const isPendingProject = (id: string) => legacyPending?.project.id === id;
 
 function commitLegacy(project: Project, drawings: Drawing[]): boolean {
   if (!write(drawingsKey(project.id), drawings)) return false;
-  if (!write(PROJECTS_KEY, [...read(PROJECTS_KEY, isProject), project])) {
+  const stored = read(PROJECTS_KEY, isProject).filter((p) => p.id !== project.id); // sem duplicar se ja estiver gravado
+  if (!write(PROJECTS_KEY, [...stored, project])) {
     try { localStorage.removeItem(drawingsKey(project.id)); } catch { /* nada a fazer */ } // sem registro orfao ocupando cota
     return false;
   }
@@ -52,6 +53,12 @@ function commitLegacy(project: Project, drawings: Drawing[]): boolean {
 /** Traz os salvamentos da barra lateral antiga para um projeto, uma única vez. */
 function migrateLegacy() {
   if (legacyPending) {
+    let sourceLeft = true;
+    try { sourceLeft = localStorage.getItem(LEGACY_KEY) !== null; } catch { /* sem leitura: tenta como antes */ }
+    if (!sourceLeft) { // outra aba ja concluiu esta importacao: descarta a copia em memoria desta
+      legacyPending = null;
+      return;
+    }
     if (commitLegacy(legacyPending.project, legacyPending.drawings)) legacyPending = null;
     return;
   }
@@ -82,23 +89,29 @@ function migrateLegacy() {
   try { localStorage.removeItem(LEGACY_KEY); } catch { /* nada a fazer */ }
 }
 
+/** Só o que está gravado: todo caminho de escrita parte daqui (o projeto pendente só existe em memória). */
+const storedProjects = () => read(PROJECTS_KEY, isProject);
+
 export function listProjects(): Project[] {
   migrateLegacy();
-  const list = read(PROJECTS_KEY, isProject);
+  const list = storedProjects();
   if (legacyPending) list.push(legacyPending.project);
   return list.sort((a, b) => b.updatedAt - a.updatedAt);
 }
+
+/** O projeto é a importação ainda não gravada: abre só para leitura (nada que se faça nele pode ser gravado). */
+export const isPendingImport = (projectId: string) => isPendingProject(projectId);
 
 export const getProject = (id: string) => listProjects().find((p) => p.id === id) ?? null;
 
 export function createProject(name: string): Project | null {
   const now = Date.now();
   const project: Project = { id: newId(), name: name.trim() || 'Sem nome', createdAt: now, updatedAt: now };
-  return write(PROJECTS_KEY, [...listProjects(), project]) ? project : null;
+  return write(PROJECTS_KEY, [...storedProjects(), project]) ? project : null;
 }
 
 export function renameProject(id: string, name: string): boolean {
-  const list = listProjects();
+  const list = storedProjects();
   const project = list.find((p) => p.id === id);
   if (!project || isPendingProject(id)) return false;
   project.name = name.trim() || project.name;
@@ -107,7 +120,7 @@ export function renameProject(id: string, name: string): boolean {
 
 export function deleteProject(id: string) {
   if (isPendingProject(id)) return; // ainda nao gravado: nada a apagar (e o arquivo antigo segue intacto)
-  write(PROJECTS_KEY, listProjects().filter((p) => p.id !== id));
+  write(PROJECTS_KEY, storedProjects().filter((p) => p.id !== id));
   try { localStorage.removeItem(drawingsKey(id)); } catch { /* nada a fazer */ }
 }
 
@@ -194,7 +207,7 @@ export function deleteDrawing(projectId: string, id: string) {
 }
 
 function touchProject(id: string, at: number) {
-  const list = listProjects();
+  const list = storedProjects();
   const project = list.find((p) => p.id === id);
   if (project) {
     project.updatedAt = at;

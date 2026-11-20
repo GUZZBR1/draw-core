@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, Navigate, useOutletContext, useParams } from 'react-router-dom';
 import type { StudioContext } from '../components/StudioShell';
 import { DrawCloud, isCloudConfigured, type CloudResult, type CloudStatus } from '../lib/drawCloud';
-import { getDrawing, getProject, saveDrawing, saveStrokes, saveStrokesAsCopy, type Drawing, type Pt } from '../lib/studioProjects';
+import { getDrawing, getProject, isPendingImport, saveDrawing, saveStrokes, saveStrokesAsCopy, type Drawing, type Pt } from '../lib/studioProjects';
 
 const INKS = ['#22231f', '#3b5ba5', '#b5483a'];
 
@@ -48,6 +48,7 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
   const [inkIdx, setInkIdx] = useState(0);
   const clearRef = useRef<(() => void) | undefined>(undefined);
   const [title, setTitle] = useState(drawing.name);
+  const readOnly = isPendingImport(drawing.projectId); // importacao ainda nao gravada: nao aceita edicoes
   const savedName = useRef(drawing.name); // o ultimo nome gravado (drawing.name e o do momento em que abriu)
 
   const saveTimer = useRef(0);
@@ -71,6 +72,8 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
       const copy = saveStrokesAsCopy(drawing.projectId, drawing.name, strokes.current);
       if (copy) {
         target.current = { id: copy.id, rev: copy.rev ?? 0 };
+        savedName.current = copy.name; // o titulo passa a ser o da copia
+        setTitle(copy.name);
         setForked(copy.name);
         result = { status: 'ok', rev: target.current.rev };
       } else {
@@ -108,7 +111,7 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
     const name = title.trim() || 'Sem título';
     setTitle(name);
     if (name === savedName.current) return;
-    const ok = saveDrawing(drawing.projectId, drawing.id, { name });
+    const ok = saveDrawing(drawing.projectId, target.current.id, { name });
     if (ok) savedName.current = name;
     setNameError(!ok);
   };
@@ -317,7 +320,7 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
       return [(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height];
     };
     const down = (e: PointerEvent) => {
-      if (streamRef.current) return; // com a camera ligada, o papel e so visualizacao
+      if (streamRef.current || readOnly) return; // com a camera ligada (ou importacao pendente), o papel e so visualizacao
       if (!e.isPrimary || (e.pointerType === 'mouse' && e.button !== 0)) return; // botao direito/auxiliar nao desenha
       paper.setPointerCapture(e.pointerId);
       activePointer = e.pointerId;
@@ -376,12 +379,14 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
             value={title}
             maxLength={60}
             aria-label="Nome do desenho"
+            readOnly={readOnly}
             onChange={(e) => setTitle(e.target.value)}
             onBlur={rename}
             onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
           />
           <span className="studio-pill"><span className={`status-dot${camId ? ' is-live' : ''}`} /> {camId ? `câmera · ${activeCam?.label || 'ativa'}${cloudLabel}` : 'câmera desligada'}</span>
           {saveError && <span className="studio-save-error" role="alert">sem espaço para salvar — o desenho continua só nesta tela</span>}
+          {readOnly && <span className="studio-save-error" role="status">importação pendente: sem espaço para gravar — somente leitura</span>}
           {forked && <span className="studio-save-error" role="status">outra aba alterou este desenho; suas mudanças foram salvas em “{forked}”</span>}
         </>,
         slot,
@@ -400,12 +405,12 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
       </section>
 
       <footer className="studio-dock">
-        {!camId && <div className="studio-swatches" role="group" aria-label="Tinta">
+        {!camId && !readOnly && <div className="studio-swatches" role="group" aria-label="Tinta">
           {INKS.map((c, i) => (
             <button key={c} type="button" aria-label={`Tinta ${i + 1}`} aria-pressed={i === inkIdx} style={{ background: i === 0 ? 'var(--ink)' : c }} onClick={() => pick(i)} />
           ))}
         </div>}
-        {!camId && <button type="button" className="studio-clear" onClick={() => clearRef.current?.()}>limpar</button>}
+        {!camId && !readOnly && <button type="button" className="studio-clear" onClick={() => clearRef.current?.()}>limpar</button>}
         <div className="studio-cam" ref={camBoxRef}>
           <button type="button" className="studio-clear" aria-expanded={camOpen} aria-controls="studio-cam-card" onClick={() => setCamOpen((o) => !o)}>
             <span className={`studio-rec${camId ? ' is-on' : ''}`} aria-hidden="true" /> câmera

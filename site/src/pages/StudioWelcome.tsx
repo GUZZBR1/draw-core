@@ -50,7 +50,8 @@ export default function StudioWelcome() {
     place();
     window.addEventListener('resize', place);
     const resume = () => { if (!ring.matches(':hover, :focus-within')) run(); };
-    const resumeSoon = () => { requestAnimationFrame(resume); }; // no focusout o foco ainda esta saindo
+    let resumeRaf = 0;
+    const resumeSoon = () => { cancelAnimationFrame(resumeRaf); resumeRaf = requestAnimationFrame(resume); }; // no focusout o foco ainda esta saindo
     if (!reduce) {
       run();
       // para enquanto o mouse ou o foco estiver sobre um desenho, para dar para clicar
@@ -61,6 +62,7 @@ export default function StudioWelcome() {
       ring.addEventListener('focusout', resumeSoon);
     }
     return () => {
+      cancelAnimationFrame(resumeRaf);
       stop();
       window.removeEventListener('resize', place);
       ring.removeEventListener('pointerover', stop);
