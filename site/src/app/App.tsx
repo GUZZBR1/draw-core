@@ -4,6 +4,7 @@ import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import ScrollbarControl from '../components/ScrollbarControl';
 import SiteHeader from '../components/SiteHeader';
 import HomePage from '../pages/HomePage';
+import PapersPage from '../pages/PapersPage';
 import ProductPage from '../pages/ProductPage';
 import StudioShell from '../components/StudioShell';
 import { Library, NewProject, ProjectList, ProjectView } from '../pages/StudioLists';
@@ -40,6 +41,7 @@ export default function App() {
         <Routes location={location}>
           <Route path="/" element={<HomePage />} />
           <Route path="/vision" element={<VisionPage />} />
+          <Route path="/papers" element={<PapersPage />} />
           <Route path="/product" element={<ProductPage key={productRefresh} />} />
           <Route path="/app" element={<StudioShell />}>
             <Route index element={<StudioWelcome />} />

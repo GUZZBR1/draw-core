@@ -65,6 +65,7 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
   const isHome = location.pathname === '/';
   const isVision = location.pathname === '/vision';
   const isProduct = location.pathname === '/product';
+  const isPapers = location.pathname === '/papers';
   const [isScrolled, setIsScrolled] = useState(!isHome);
   const [brandHovered, setBrandHovered] = useState(false);
   const [cardHovered, setCardHovered] = useState(false);
@@ -324,13 +325,22 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
           }}
           aria-label="Navegação principal"
         >
-          <Link
-            className={`nav-link vision-link font-mono text-[16px] tracking-[.025em] text-muted transition-colors duration-300 hover:text-ink${isVision ? ' is-active' : ''}`}
-            to="/vision"
-            aria-current={isVision ? 'page' : undefined}
-          >
-            vision
-          </Link>
+          <div className="nav-left flex items-center gap-3 sm:gap-6">
+            <Link
+              className={`nav-link vision-link font-mono text-[12px] tracking-[.025em] sm:text-[16px] text-muted transition-colors duration-300 hover:text-ink${isVision ? ' is-active' : ''}`}
+              to="/vision"
+              aria-current={isVision ? 'page' : undefined}
+            >
+              vision
+            </Link>
+            <Link
+              className={`nav-link vision-link font-mono text-[12px] tracking-[.025em] sm:text-[16px] text-muted transition-colors duration-300 hover:text-ink${isPapers ? ' is-active' : ''}`}
+              to="/papers"
+              aria-current={isPapers ? 'page' : undefined}
+            >
+              papers
+            </Link>
+          </div>
           <div className="nav-right flex items-center gap-3 sm:gap-5">
             <span
               className="location font-mono text-[10px] tracking-[.025em] text-muted sm:text-[16px]"
