@@ -221,15 +221,79 @@ class MotionGate:
         )
         return _texture(small), hidden == 0
 
-    def measure(self, warped, matrix, visible, anchor):
+    def _textured_blocks(self, texture, vis):
+        h, w = texture.shape
+        count = 0
+        for y in range(0, h - _BLOCK + 1, _BLOCK):
+            for x in range(0, w - _BLOCK + 1, _BLOCK):
+                part = np.s_[y : y + _BLOCK, x : x + _BLOCK]
+                if vis[part].mean() < _BLOCK_MIN_VISIBLE:
+                    continue
+                small_eig, big_eig = _structure(
+                    np.array(texture[part], dtype=np.float32, order="C")
+                )
+                if (
+                    small_eig >= _TEXTURE_MIN
+                    and small_eig >= _TEXTURE_MIN_RATIO * big_eig
+                ):
+                    count += 1
+        return count
+
+    def _align_to_confirmed(self, texture, vis, confirmed_ink, ink_prob):
+        """Alinha referencia tardia a tinta ja confirmada; None se nao der."""
+        h, w = texture.shape
+        ref_ink = cv2.resize(
+            confirmed_ink.astype(np.float32), (w, h), interpolation=cv2.INTER_AREA
+        )
+        cur_ink = cv2.resize(
+            ink_prob.astype(np.float32), (w, h), interpolation=cv2.INTER_AREA
+        )
+        ref_m = np.where(vis, ref_ink, 0.0).astype(np.float32)
+        cur_m = np.where(vis, cur_ink, 0.0).astype(np.float32)
+        if np.count_nonzero(ref_m > 0.1) < 10 or np.count_nonzero(cur_m > 0.1) < 10:
+            return None
+        (dx, dy), peak = cv2.phaseCorrelate(ref_m, cur_m)
+        shift_px = float(np.hypot(dx, dy)) / _SCALE
+        if peak < _PEAK_MIN or shift_px > 20.0:
+            return None
+        if float(np.hypot(dx, dy)) < 0.1:
+            return texture, vis, shift_px
+        shift_m = np.array([[1.0, 0.0, -dx], [0.0, 1.0, -dy]], dtype=np.float32)
+        aligned_tex = cv2.warpAffine(
+            texture, shift_m, (w, h), flags=cv2.INTER_LINEAR, borderValue=0.0
+        )
+        aligned_vis = (
+            cv2.warpAffine(
+                vis.astype(np.uint8),
+                shift_m,
+                (w, h),
+                flags=cv2.INTER_NEAREST,
+                borderValue=0,
+            )
+            > 0
+        )
+        return aligned_tex, aligned_vis, shift_px
+
+    def measure(
+        self,
+        warped,
+        matrix,
+        visible,
+        anchor,
+        *,
+        confirmed_ink=None,
+        ink_prob=None,
+    ):
         """Motion desta passada contra a referencia, ou None sem juizo.
 
         warped e a pagina retificada (BGR ou cinza, 0-255: o portao de
         textura e calibrado nessa escala); matrix leva o warp desta
         passada para a grade da ancora (None = sem registro); visible e
-        a visibilidade DESTE warp. A primeira
-        passada medida de uma ancora vira a referencia (registrada);
-        ancora diferente da guardada recomeca.
+        a visibilidade DESTE warp. A primeira passada com blocos de
+        textura bastantes de uma ancora vira a referencia (registrada);
+        ancora diferente da guardada recomeca. Se o canvas ja tiver
+        tinta confirmada quando a referencia tardia qualifica, a
+        referencia e alinhada a essa tinta antes de ser guardada.
         """
         anchor = None if anchor is None else np.asarray(anchor, dtype=np.float32)
         if (
@@ -240,8 +304,26 @@ class MotionGate:
             self.reset()
         texture, vis = self._prepare(warped, matrix, visible)
         if self._reference is None:
-            self._reference, self._reference_visible = texture, vis
+            if self._textured_blocks(texture, vis) < _MIN_BLOCKS:
+                return None
+            ref_tex, ref_vis, shift_px = texture, vis, 0.0
+            if (
+                confirmed_ink is not None
+                and ink_prob is not None
+                and np.any(confirmed_ink)
+            ):
+                aligned = self._align_to_confirmed(
+                    texture, vis, confirmed_ink, ink_prob
+                )
+                if aligned is None:
+                    return None
+                ref_tex, ref_vis, shift_px = aligned
+                if self._textured_blocks(ref_tex, ref_vis) < _MIN_BLOCKS:
+                    return None
+            self._reference, self._reference_visible = ref_tex, ref_vis
             self._reference_anchor = anchor
+            if shift_px > self.threshold_px:
+                return self._consensus(texture, vis)
             return None
         return self._consensus(texture, vis)
 

@@ -535,6 +535,12 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 self._still_passes = 0
             if present is not None and (moved or present != self._hand_state):
                 self._hand_motion_at = self._clock()
+                if (
+                    moved
+                    and self._config.pass_interval_s is not None
+                    and self._config.pass_interval_s > _PAGE_CLEAN_INTERVAL_SECONDS
+                ):
+                    self._quiet_passes = 0
             self._hand_state = present
             self._condition.notify_all()
 
@@ -586,6 +592,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             and self._still_passes >= _NO_HAND_REST_AFTER_STILL_PASSES
         ):
             return _IDLE_PROBE_SECONDS
+        if self._config.pass_interval_s is not None:
+            return self._config.pass_interval_s
         return _PAGE_CLEAN_INTERVAL_SECONDS
 
     def telemetry_snapshot(self):
@@ -1098,7 +1106,14 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 )
                 if registration._registration_is_identity(motion_matrix):
                     motion_matrix = None
-                measured = self._motion.measure(warped, motion_matrix, visible, anchor)
+                measured = self._motion.measure(
+                    warped,
+                    motion_matrix,
+                    visible,
+                    anchor,
+                    confirmed_ink=None if first_pass else anchor_ink,
+                    ink_prob=registered_prob,
+                )
                 unregistered = None
                 if motion_matrix is not None and not self._motion.aligned(measured):
                     # O registro supoe a folha parada; se ela andou e o
