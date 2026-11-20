@@ -102,7 +102,7 @@ export default function PapersPage() {
         className="papers-orbit product-emerge"
         style={{ '--emerge': 1500 } as CSSProperties}
         ref={ringRef}
-        onFocus={() => { focusRef.current = true; }}
+        onFocus={(e) => { focusRef.current = e.target instanceof HTMLElement && e.target.matches(':focus-visible'); }}
         onBlur={() => { focusRef.current = false; }}
         role="group"
         aria-label="Artigos"

@@ -1,6 +1,6 @@
-import { lazy, Suspense, useEffect, useState } from 'react';
+import { Component, lazy, Suspense, useEffect, useState, type ErrorInfo, type ReactNode } from 'react';
 import { motion } from 'motion/react';
-import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
+import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import ScrollbarControl from '../components/ScrollbarControl';
 import SiteHeader from '../components/SiteHeader';
 import HomePage from '../pages/HomePage';
@@ -45,7 +45,11 @@ export default function App() {
           <Route path="/" element={<HomePage />} />
           <Route path="/vision" element={<VisionPage />} />
           <Route path="/papers" element={<PapersPage />} />
-          <Route path="/papers/:n" element={<Suspense fallback={null}><ArticlePage /></Suspense>} />
+          <Route path="/papers/:n" element={
+            <ArticleLoadBoundary key={location.pathname}>
+              <Suspense fallback={<ArticleLoading />}><ArticlePage /></Suspense>
+            </ArticleLoadBoundary>
+          } />
           <Route path="/product" element={<ProductPage key={productRefresh} />} />
           <Route path="/app" element={<StudioShell />}>
             <Route index element={<StudioWelcome />} />
@@ -62,4 +66,36 @@ export default function App() {
       {!inStudio && <ScrollbarControl />}
     </>
   );
+}
+
+function ArticleLoading() {
+  return (
+    <main className="article" id="page-content" aria-live="polite">
+      <p>Carregando artigo…</p>
+    </main>
+  );
+}
+
+class ArticleLoadBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error('Failed to load article', error, info);
+  }
+
+  render() {
+    if (this.state.failed) {
+      return (
+        <main className="article" id="page-content">
+          <Link className="article-back" to="/papers">← papers</Link>
+          <p role="alert">Não foi possível carregar este artigo. Volte à lista ou tente novamente.</p>
+        </main>
+      );
+    }
+    return this.props.children;
+  }
 }
