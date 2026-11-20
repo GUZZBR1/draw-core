@@ -13,6 +13,7 @@ export default function ProductPage() {
   }, []);
 
   const enterStudio = (event: MouseEvent) => {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     event.preventDefault();
     if (document.body.classList.contains('is-falling')) return;
     if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {

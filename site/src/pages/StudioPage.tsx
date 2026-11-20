@@ -150,10 +150,11 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
   const renderRef = useRef<(() => void) | undefined>(undefined);
   const [cloudStatus, setCloudStatus] = useState<CloudStatus>('off');
   const [cloudDetail, setCloudDetail] = useState('');
+  const [cloudConsent, setCloudConsent] = useState(false);
 
   // Draw na nuvem: com a camera ligada (e VITE_DRAW_CLOUD_URL definida), manda ~4 quadros/s e mostra o que ele detecta.
   useEffect(() => {
-    if (!camId || !isCloudConfigured()) return;
+    if (!camId || !cloudConsent || !isCloudConfigured()) return;
     const video = videoRef.current;
     if (!video) return;
     const shot = document.createElement('canvas');
@@ -191,7 +192,7 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
       cloudRef.current = null;
       renderRef.current?.();
     };
-  }, [camId]);
+  }, [camId, cloudConsent]);
 
   const refreshCams = useCallback(async () => {
     const all = await navigator.mediaDevices.enumerateDevices();
@@ -231,6 +232,10 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
       setCamId(stream.getVideoTracks()[0]?.getSettings().deviceId ?? deviceId ?? null);
       await refreshCams(); // com permissao, os nomes das câmeras aparecem
     } catch (err) {
+      if (request !== camRequest.current) return;
+      streamRef.current = null;
+      if (videoRef.current) videoRef.current.srcObject = null;
+      setCamId(null);
       const name = err instanceof DOMException ? err.name : '';
       setCamError(name === 'NotAllowedError'
         ? tr('Permissão negada. Libere a câmera nas configurações do navegador.', 'Permission denied. Allow the camera in your browser settings.')
@@ -450,6 +455,7 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
           {camOpen && (
             <div className="studio-cam-card" id="studio-cam-card" role="dialog" aria-label={tr('Escolher câmera', 'Choose camera')}>
               <p className="studio-cam-title">{tr('Câmeras', 'Cameras')}</p>
+              {isCloudConfigured() && <label className="studio-cam-row"><input type="checkbox" checked={cloudConsent} onChange={(e) => setCloudConsent(e.target.checked)} /> {tr('Enviar imagens da câmera para o Draw na nuvem', 'Send camera images to Draw in the cloud')}</label>}
               {cams.length === 0 || cams.every((c) => !c.label) ? (
                 <button type="button" className="studio-cam-row" onClick={() => void startCam()}>{tr('Permitir e detectar câmeras', 'Allow and detect cameras')}</button>
               ) : (

@@ -6,6 +6,8 @@ export type Drawing = { id: string; projectId: string; name: string; createdAt: 
 // Tudo fica no armazenamento local do navegador: uma lista de projetos e, para cada projeto, uma lista de desenhos.
 const PROJECTS_KEY = 'draw-studio-projects';
 const drawingsKey = (projectId: string) => `draw-studio-drawings:${projectId}`;
+const recordPrefix = (projectId: string) => `draw-studio-record:${projectId}:`;
+const recordKey = (projectId: string, id: string) => recordPrefix(projectId) + id;
 const LEGACY_KEY = 'draw-studio-saves'; // salvamentos da barra lateral antiga (sem projetos)
 const LEGACY_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -142,12 +144,29 @@ export function renameProject(id: string, name: string): boolean {
 export function deleteProject(id: string) {
   if (isPendingProject(id)) return; // ainda nao gravado: nada a apagar (e o arquivo antigo segue intacto)
   write(PROJECTS_KEY, storedProjects().filter((p) => p.id !== id));
-  try { localStorage.removeItem(drawingsKey(id)); } catch { /* nada a fazer */ }
+  try {
+    localStorage.removeItem(drawingsKey(id));
+    for (const key of recordKeys(id)) localStorage.removeItem(key);
+  } catch { /* nada a fazer */ }
+}
+
+function recordKeys(projectId: string): string[] {
+  return Object.keys(localStorage).filter((key) => key.startsWith(recordPrefix(projectId)));
 }
 
 export function listDrawings(projectId: string): Drawing[] {
   if (legacyPending && isPendingProject(projectId)) return [...legacyPending.drawings].sort((a, b) => b.updatedAt - a.updatedAt);
-  return read(drawingsKey(projectId), isDrawing).sort((a, b) => b.updatedAt - a.updatedAt);
+  const drawings = new Map(read(drawingsKey(projectId), isDrawing).map((drawing) => [drawing.id, drawing]));
+  try {
+    for (const key of recordKeys(projectId)) {
+      const raw = localStorage.getItem(key);
+      if (raw === null) continue;
+      const value: unknown = JSON.parse(raw);
+      if (isDrawing(value)) drawings.set(value.id, value);
+      else if (value === null) drawings.delete(key.slice(recordPrefix(projectId).length));
+    }
+  } catch { /* O armazenamento pode estar indisponível. */ }
+  return [...drawings.values()].sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
 export const getDrawing = (projectId: string, id: string) => listDrawings(projectId).find((d) => d.id === id) ?? null;
@@ -169,7 +188,7 @@ export function createDrawing(projectId: string, names?: StudioNames): Drawing |
   const list = listDrawings(projectId);
   const now = Date.now();
   const drawing: Drawing = { id: newId(), projectId, name: namesOf(names).drawing(list.length + 1), createdAt: now, updatedAt: now, strokes: [] };
-  if (!write(drawingsKey(projectId), [...list, drawing])) return null;
+  if (!write(recordKey(projectId, drawing.id), drawing)) return null;
   touchProject(projectId, now);
   return drawing;
 }
@@ -183,7 +202,7 @@ export function saveDrawing(projectId: string, id: string, patch: { strokes?: St
   if (patch.strokes) found.strokes = patch.strokes.map((s) => ({ ink: s.ink, pts: s.pts.map(([x, y]) => [round(x), round(y)] as Pt) }));
   if (patch.name !== undefined) found.name = patch.name.trim() || namesOf(names).noTitle;
   found.updatedAt = Date.now();
-  const ok = write(drawingsKey(projectId), list);
+  const ok = write(recordKey(projectId, id), found);
   if (ok) touchProject(projectId, found.updatedAt);
   return ok;
 }
@@ -206,7 +225,7 @@ export function saveStrokes(projectId: string, id: string, strokes: Stroke[], ba
   found.strokes = snapshot(strokes);
   found.rev = current + 1;
   found.updatedAt = Date.now();
-  if (!write(drawingsKey(projectId), list)) return { status: 'failed', rev: baseRev };
+  if (!write(recordKey(projectId, id), found)) return { status: 'failed', rev: baseRev };
   touchProject(projectId, found.updatedAt);
   return { status: 'ok', rev: found.rev };
 }
@@ -214,17 +233,16 @@ export function saveStrokes(projectId: string, id: string, strokes: Stroke[], ba
 /** Guarda traços que não puderam sobrescrever o desenho original como um desenho novo do mesmo projeto. */
 export function saveStrokesAsCopy(projectId: string, name: string, strokes: Stroke[], names?: StudioNames): Drawing | null {
   if (isPendingProject(projectId)) return null;
-  const list = listDrawings(projectId);
   const now = Date.now();
   const copy: Drawing = { id: newId(), projectId, name: namesOf(names).copy(name), createdAt: now, updatedAt: now, strokes: snapshot(strokes), rev: 1 };
-  if (!write(drawingsKey(projectId), [...list, copy])) return null;
+  if (!write(recordKey(projectId, copy.id), copy)) return null;
   touchProject(projectId, now);
   return copy;
 }
 
 export function deleteDrawing(projectId: string, id: string) {
   if (isPendingProject(projectId)) return;
-  write(drawingsKey(projectId), listDrawings(projectId).filter((d) => d.id !== id));
+  write(recordKey(projectId, id), null);
 }
 
 function touchProject(id: string, at: number) {

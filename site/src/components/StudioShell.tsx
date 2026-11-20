@@ -21,6 +21,7 @@ export default function StudioShell() {
 
   // Saida = entrada ao contrario: o estudio estoura em branco, e o site volta de longe, encolhendo ate o tamanho normal.
   const leave = (event: React.MouseEvent) => {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     event.preventDefault();
     if (leaving) return;
     if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {

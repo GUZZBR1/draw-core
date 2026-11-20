@@ -25,6 +25,7 @@ const WIN_ANSI: Record<string, number> = {
 
 /** Texto em codigos de 1 byte (WinAnsi); o que nao cabe vira '?'. */
 function encode(text: string): string {
+  text = text.replace(/−/g, '-').replace(/≥/g, '>=').replace(/ᵢ/g, '_i').replace(/ᵣ/g, '_r').replace(/𝓰/g, '_g').replace(/ₒ/g, '_o');
   let out = '';
   for (const ch of text) {
     const code = ch.codePointAt(0) ?? 0;
