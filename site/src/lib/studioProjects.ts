@@ -1,6 +1,6 @@
 export type Pt = [number, number];
 export type Stroke = { pts: Pt[]; ink: string };
-export type Project = { id: string; name: string; createdAt: number; updatedAt: number };
+export type Project = { id: string; name: string; description?: string; createdAt: number; updatedAt: number };
 export type Drawing = { id: string; projectId: string; name: string; createdAt: number; updatedAt: number; strokes: Stroke[]; rev?: number };
 
 // Tudo fica no armazenamento local do navegador: uma lista de projetos e, para cada projeto, uma lista de desenhos.
@@ -8,6 +8,26 @@ const PROJECTS_KEY = 'draw-studio-projects';
 const drawingsKey = (projectId: string) => `draw-studio-drawings:${projectId}`;
 const LEGACY_KEY = 'draw-studio-saves'; // salvamentos da barra lateral antiga (sem projetos)
 const LEGACY_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Nomes padrão que este módulo cria. Quem chama passa a versão no idioma atual; sem o parâmetro, vale o português
+ * (o que já está gravado nunca muda).
+ */
+export type StudioNames = {
+  legacyProject?: string;
+  drawing?: (n: number) => string;
+  noName?: string;
+  noTitle?: string;
+  copy?: (name: string) => string;
+};
+const PT_NAMES: Required<StudioNames> = {
+  legacyProject: 'Salvamentos anteriores',
+  drawing: (n) => `Desenho ${n}`,
+  noName: 'Sem nome',
+  noTitle: 'Sem título',
+  copy: (name) => `${name} (cópia)`,
+};
+const namesOf = (names?: StudioNames): Required<StudioNames> => ({ ...PT_NAMES, ...names });
 
 const newId = () => crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const round = (n: number) => Math.round(n * 1000) / 1000;
@@ -51,7 +71,7 @@ function commitLegacy(project: Project, drawings: Drawing[]): boolean {
 }
 
 /** Traz os salvamentos da barra lateral antiga para um projeto, uma única vez. */
-function migrateLegacy() {
+function migrateLegacy(names: Required<StudioNames>) {
   if (legacyPending) {
     let sourceLeft = true;
     try { sourceLeft = localStorage.getItem(LEGACY_KEY) !== null; } catch { /* sem leitura: tenta como antes */ }
@@ -74,11 +94,11 @@ function migrateLegacy() {
   const now = Date.now();
   const old = raw.filter((e) => e && typeof e.id === 'string' && Array.isArray(e.strokes) && e.strokes.length && (e.permanent || now - e.updatedAt < LEGACY_TTL_MS));
   if (old.length) {
-    const project: Project = { id: newId(), name: 'Salvamentos anteriores', createdAt: now, updatedAt: now };
+    const project: Project = { id: newId(), name: names.legacyProject, createdAt: now, updatedAt: now };
     const drawings: Drawing[] = old.map((e, i) => ({
       id: newId(),
       projectId: project.id,
-      name: `Desenho ${old.length - i}`,
+      name: names.drawing(old.length - i),
       createdAt: e.updatedAt ?? now,
       updatedAt: e.updatedAt ?? now,
       strokes: e.strokes,
@@ -92,8 +112,8 @@ function migrateLegacy() {
 /** Só o que está gravado: todo caminho de escrita parte daqui (o projeto pendente só existe em memória). */
 const storedProjects = () => read(PROJECTS_KEY, isProject);
 
-export function listProjects(): Project[] {
-  migrateLegacy();
+export function listProjects(names?: StudioNames): Project[] {
+  migrateLegacy(namesOf(names));
   const list = storedProjects();
   if (legacyPending) list.push(legacyPending.project);
   return list.sort((a, b) => b.updatedAt - a.updatedAt);
@@ -102,11 +122,12 @@ export function listProjects(): Project[] {
 /** O projeto é a importação ainda não gravada: abre só para leitura (nada que se faça nele pode ser gravado). */
 export const isPendingImport = (projectId: string) => isPendingProject(projectId);
 
-export const getProject = (id: string) => listProjects().find((p) => p.id === id) ?? null;
+export const getProject = (id: string, names?: StudioNames) => listProjects(names).find((p) => p.id === id) ?? null;
 
-export function createProject(name: string): Project | null {
+export function createProject(name: string, description = '', names?: StudioNames): Project | null {
   const now = Date.now();
-  const project: Project = { id: newId(), name: name.trim() || 'Sem nome', createdAt: now, updatedAt: now };
+  const project: Project = { id: newId(), name: name.trim() || namesOf(names).noName, createdAt: now, updatedAt: now };
+  if (description.trim()) project.description = description.trim();
   return write(PROJECTS_KEY, [...storedProjects(), project]) ? project : null;
 }
 
@@ -132,35 +153,35 @@ export function listDrawings(projectId: string): Drawing[] {
 export const getDrawing = (projectId: string, id: string) => listDrawings(projectId).find((d) => d.id === id) ?? null;
 
 /** Quantos desenhos existem (inclusive os em branco): a mesma conta da Biblioteca. */
-export const drawingCount = () => listProjects().reduce((n, p) => n + listDrawings(p.id).length, 0);
+export const drawingCount = (names?: StudioNames) => listProjects(names).reduce((n, p) => n + listDrawings(p.id).length, 0);
 
 /** Os desenhos mais recentes de todos os projetos (só os que já têm traços). */
-export function recentDrawings(limit: number): Drawing[] {
-  return listProjects()
+export function recentDrawings(limit: number, names?: StudioNames): Drawing[] {
+  return listProjects(names)
     .flatMap((p) => listDrawings(p.id))
     .filter((d) => d.strokes.length)
     .sort((a, b) => b.updatedAt - a.updatedAt)
     .slice(0, limit);
 }
 
-export function createDrawing(projectId: string): Drawing | null {
+export function createDrawing(projectId: string, names?: StudioNames): Drawing | null {
   if (isPendingProject(projectId)) return null;
   const list = listDrawings(projectId);
   const now = Date.now();
-  const drawing: Drawing = { id: newId(), projectId, name: `Desenho ${list.length + 1}`, createdAt: now, updatedAt: now, strokes: [] };
+  const drawing: Drawing = { id: newId(), projectId, name: namesOf(names).drawing(list.length + 1), createdAt: now, updatedAt: now, strokes: [] };
   if (!write(drawingsKey(projectId), [...list, drawing])) return null;
   touchProject(projectId, now);
   return drawing;
 }
 
 /** Grava os traços e/ou o nome de um desenho. Devolve false se o navegador recusou a gravação. */
-export function saveDrawing(projectId: string, id: string, patch: { strokes?: Stroke[]; name?: string }): boolean {
+export function saveDrawing(projectId: string, id: string, patch: { strokes?: Stroke[]; name?: string }, names?: StudioNames): boolean {
   if (isPendingProject(projectId)) return false;
   const list = listDrawings(projectId);
   const found = list.find((d) => d.id === id);
   if (!found) return false;
   if (patch.strokes) found.strokes = patch.strokes.map((s) => ({ ink: s.ink, pts: s.pts.map(([x, y]) => [round(x), round(y)] as Pt) }));
-  if (patch.name !== undefined) found.name = patch.name.trim() || 'Sem título';
+  if (patch.name !== undefined) found.name = patch.name.trim() || namesOf(names).noTitle;
   found.updatedAt = Date.now();
   const ok = write(drawingsKey(projectId), list);
   if (ok) touchProject(projectId, found.updatedAt);
@@ -191,11 +212,11 @@ export function saveStrokes(projectId: string, id: string, strokes: Stroke[], ba
 }
 
 /** Guarda traços que não puderam sobrescrever o desenho original como um desenho novo do mesmo projeto. */
-export function saveStrokesAsCopy(projectId: string, name: string, strokes: Stroke[]): Drawing | null {
+export function saveStrokesAsCopy(projectId: string, name: string, strokes: Stroke[], names?: StudioNames): Drawing | null {
   if (isPendingProject(projectId)) return null;
   const list = listDrawings(projectId);
   const now = Date.now();
-  const copy: Drawing = { id: newId(), projectId, name: `${name} (cópia)`, createdAt: now, updatedAt: now, strokes: snapshot(strokes), rev: 1 };
+  const copy: Drawing = { id: newId(), projectId, name: namesOf(names).copy(name), createdAt: now, updatedAt: now, strokes: snapshot(strokes), rev: 1 };
   if (!write(drawingsKey(projectId), [...list, copy])) return null;
   touchProject(projectId, now);
   return copy;

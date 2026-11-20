@@ -11,6 +11,7 @@ import {
 } from 'motion/react';
 import { flushSync } from 'react-dom';
 import { Link, useLocation } from 'react-router-dom';
+import { useLang } from '../i18n';
 
 const MORPH_DISTANCE = 130;
 const HEADER_REVEAL = 36;
@@ -62,6 +63,7 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
   const { scrollY } = useScroll();
   const reduceMotion = useReducedMotion();
   const location = useLocation();
+  const { lang, setLang, tr } = useLang();
   const isHome = location.pathname === '/';
   const isVision = location.pathname === '/vision';
   const isProduct = location.pathname === '/product';
@@ -323,7 +325,7 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
             backdropFilter: navBlur,
             boxShadow: navShadow,
           }}
-          aria-label="Navegação principal"
+          aria-label={tr('Navegação principal', 'Main navigation')}
         >
           <div className="nav-left flex items-center gap-3 sm:gap-6">
             <Link
@@ -349,11 +351,12 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
               <span className="location-main">São Paulo, Brazil</span>
               <span className="location-more">São José dos Campos</span>
             </span>
+            <span className="lang-anchor">
             <motion.button
               className="theme-toggle min-h-[34px] min-w-[56px] rounded-full border border-ink/15 bg-paper/20 px-3 font-mono text-[10px] text-ink transition duration-300 hover:-translate-y-px hover:border-ink/40 hover:bg-ink/5 active:translate-y-0 active:scale-[.97] sm:min-h-[42px] sm:min-w-[78px] sm:px-4 sm:text-[13px]"
               style={{ scaleY: themeButtonScale, transformOrigin: 'center' }}
               type="button"
-              aria-label={`Ativar tema ${dark ? 'claro' : 'escuro'}`}
+              aria-label={dark ? tr('Ativar tema claro', 'Switch to light theme') : tr('Ativar tema escuro', 'Switch to dark theme')}
               onClick={() => {
                 const root = document.documentElement;
                 if (reduceMotion || !document.startViewTransition) {
@@ -379,6 +382,11 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
             >
               {dark ? 'light' : 'dark'}
             </motion.button>
+            <span className="lang-menu" role="group" aria-label={tr('Idioma', 'Language')}>
+              <button type="button" aria-pressed={lang === 'pt'} onClick={() => setLang('pt')}>PT</button>
+              <button type="button" aria-pressed={lang === 'en'} onClick={() => setLang('en')}>EN</button>
+            </span>
+          </span>
           </div>
         </motion.nav>
       </motion.header>
@@ -407,7 +415,7 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
           <Link
             className="wordmark relative z-[1] block font-sans font-extrabold leading-[.83] tracking-[-.035em] text-ink no-underline"
             to="/"
-            aria-label="Draw, início"
+            aria-label={tr('Draw, início', 'Draw, home')}
           >
             {Array.from('Draw').map((letter, index) => (
               <span className="wordmark-letter" aria-hidden="true" key={index}>{letter}</span>
@@ -434,11 +442,11 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
                 <motion.button
                   className="webcam-trigger"
                   type="button"
-                  aria-label="Sobre a webcam do Draw"
+                  aria-label={tr('Sobre a webcam do Draw', 'About the Draw webcam')}
                   aria-controls="webcam-info-card"
                   aria-expanded={showWebcamCard}
                   tabIndex={isScrolled ? -1 : 0}
-                  title="Sobre a webcam do Draw"
+                  title={tr('Sobre a webcam do Draw', 'About the Draw webcam')}
                   onFocus={() => {
                     cancelHoverClose();
                     setBrandFocused(false);
@@ -468,7 +476,7 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
               <motion.aside
                 id="webcam-info-card"
                 className="webcam-card-anchor definition-card"
-                aria-label="Sobre a webcam do Draw"
+                aria-label={tr('Sobre a webcam do Draw', 'About the Draw webcam')}
                 aria-hidden={!showWebcamCard}
                 initial={false}
                 animate={showWebcamCard ? 'visible' : 'hidden'}
@@ -488,11 +496,11 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
                 transition={{ type: 'spring', stiffness: 320, damping: 28 }}
               >
                 <h1>webcam</h1>
-                <p className="definition-kind"><em>instrumento</em> · captura</p>
+                <p className="definition-kind"><em>{tr('instrumento', 'instrument')}</em> · {tr('captura', 'capture')}</p>
                 <p className="definition-phrase">
-                  Acompanha o papel e transforma cada traço em tinta digital, em tempo real.
+                  {tr('Acompanha o papel e transforma cada traço em tinta digital, em tempo real.', 'Follows the paper and turns every stroke into digital ink, in real time.')}
                 </p>
-                <p className="definition-note">A primeira camada do Draw.</p>
+                <p className="definition-note">{tr('A primeira camada do Draw.', 'The first layer of Draw.')}</p>
               </motion.aside>
             </div>
           )}
@@ -530,7 +538,7 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
         <motion.div className="definition-card-anchor" style={{ x: '-50%', scale: inverseBrandScale }}>
           <motion.aside
             className="definition-card border border-white/70 bg-paper/65 p-5 text-ink shadow-[0_18px_54px_rgba(36,37,32,.1)] backdrop-blur-2xl"
-            aria-label="Definição de Draw"
+            aria-label={tr('Definição de Draw', 'Definition of Draw')}
             aria-hidden={!showDefinition}
             initial={false}
             animate={showDefinition ? 'visible' : 'hidden'}
@@ -546,12 +554,11 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
             transition={{ type: 'spring', stiffness: 320, damping: 28 }}
           >
             <h1>draw</h1>
-            <p className="definition-kind"><em>substantivo</em> · conceito</p>
+            <p className="definition-kind"><em>{tr('substantivo', 'noun')}</em> · {tr('conceito', 'concept')}</p>
             <p className="definition-phrase">
-              Traçar uma ideia no papel e transformá-la em algo que pode ser compreendido,
-              testado e levado ao mundo.
+              {tr('Traçar uma ideia no papel e transformá-la em algo que pode ser compreendido, testado e levado ao mundo.', 'To trace an idea on paper and turn it into something that can be understood, tested and taken into the world.')}
             </p>
-            <p className="definition-note">Do papel à vida.</p>
+            <p className="definition-note">{tr('Do papel à vida.', 'From paper to life.')}</p>
           </motion.aside>
         </motion.div>
       </motion.div>

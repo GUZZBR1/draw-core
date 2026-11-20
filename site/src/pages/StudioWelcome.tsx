@@ -1,12 +1,16 @@
 import { useEffect, useMemo, useRef } from 'react';
+import { studioNames } from './StudioPage';
 import { Link } from 'react-router-dom';
 import StrokeThumb from '../components/StrokeThumb';
+import { useLang } from '../i18n';
 import { drawingCount as countDrawings, listProjects, recentDrawings } from '../lib/studioProjects';
 
 /** Tela de entrada: o bonequinho da webcam pergunta o que construir; os desenhos mais recentes giram em volta. */
 export default function StudioWelcome() {
-  const recents = useMemo(() => recentDrawings(12), []);
-  const projects = useMemo(() => listProjects(), []);
+  const { tr } = useLang();
+  const names = useMemo(() => studioNames(tr), [tr]);
+  const recents = useMemo(() => recentDrawings(12, names), [names]);
+  const projects = useMemo(() => listProjects(names), [names]);
   const drawingCount = useMemo(() => countDrawings(), []);
   const ringRef = useRef<HTMLDivElement>(null);
 
@@ -74,9 +78,9 @@ export default function StudioWelcome() {
 
   return (
     <section className="hub">
-      <div className="hub-orbit" ref={ringRef} aria-label="Desenhos recentes">
+      <div className="hub-orbit" ref={ringRef} aria-label={tr('Desenhos recentes', 'Recent drawings')}>
         {recents.map((d) => (
-          <Link key={d.id} className="hub-orbit-card" to={`/app/p/${d.projectId}/d/${d.id}`} aria-label={`Abrir ${d.name}`}>
+          <Link key={d.id} className="hub-orbit-card" to={`/app/p/${d.projectId}/d/${d.id}`} aria-label={tr(`Abrir ${d.name}`, `Open ${d.name}`)}>
             <StrokeThumb strokes={d.strokes} />
             <span>{d.name}</span>
           </Link>
@@ -85,7 +89,7 @@ export default function StudioWelcome() {
 
       <div className="hub-welcome">
         <div className="hub-mascot">
-          <p className="hub-bubble">O que vamos construir hoje?</p>
+          <p className="hub-bubble">{tr('O que vamos construir hoje?', 'What are we building today?')}</p>
           <svg className="webcam-icon hub-mascot-art" viewBox="0 0 64 56" aria-hidden="true">
             <rect x="5" y="4" width="54" height="26" rx="9" />
             <circle className="webcam-lens" cx="32" cy="17" r="8" />
@@ -98,10 +102,10 @@ export default function StudioWelcome() {
           </svg>
         </div>
 
-        <nav className="hub-menu" aria-label="Começar">
-          <Link className="hub-item" to="/app/new"><span aria-hidden="true">＋</span>Iniciar novo projeto</Link>
-          <Link className="hub-item" to="/app/projects" state={{ intro: true }}><span aria-hidden="true">▤</span>Carregar projeto<em>{projects.length || ''}</em></Link>
-          <Link className="hub-item" to="/app/library"><span aria-hidden="true">◫</span>Biblioteca<em>{drawingCount || ''}</em></Link>
+        <nav className="hub-menu" aria-label={tr('Começar', 'Get started')}>
+          <Link className="hub-item" to="/app/new"><span aria-hidden="true">＋</span>{tr('Iniciar novo projeto', 'Start a new project')}</Link>
+          <Link className="hub-item" to="/app/projects" state={{ intro: true }}><span aria-hidden="true">▤</span>{tr('Carregar projeto', 'Open a project')}<em>{projects.length || ''}</em></Link>
+          <Link className="hub-item" to="/app/library"><span aria-hidden="true">◫</span>{tr('Biblioteca', 'Library')}<em>{drawingCount || ''}</em></Link>
         </nav>
       </div>
     </section>

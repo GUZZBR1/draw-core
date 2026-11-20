@@ -11,6 +11,7 @@ import { Library, NewProject, ProjectList, ProjectView } from '../pages/StudioLi
 import StudioPage from '../pages/StudioPage';
 import StudioWelcome from '../pages/StudioWelcome';
 import VisionPage from '../pages/VisionPage';
+import { useLang } from '../i18n';
 
 export default function App() {
   const location = useLocation();
@@ -71,9 +72,21 @@ export default function App() {
 }
 
 function ArticleLoading() {
+  const { tr } = useLang();
   return (
     <main className="article" id="page-content" aria-live="polite">
-      <p>Carregando artigo…</p>
+      <p>{tr('Carregando artigo…', 'Loading article…')}</p>
+    </main>
+  );
+}
+
+function ArticleFailed({ onRetry }: { onRetry: () => void }) {
+  const { tr } = useLang();
+  return (
+    <main className="article" id="page-content">
+      <Link className="article-back" to="/papers">← papers</Link>
+      <p role="alert">{tr('Não foi possível carregar este artigo.', 'This article could not be loaded.')}</p>
+      <button className="article-retry" type="button" onClick={onRetry}>{tr('Tentar novamente', 'Try again')}</button>
     </main>
   );
 }
@@ -91,13 +104,7 @@ class ArticleLoadBoundary extends Component<{ children: ReactNode; onRetry: () =
 
   render() {
     if (this.state.failed) {
-      return (
-        <main className="article" id="page-content">
-          <Link className="article-back" to="/papers">← papers</Link>
-          <p role="alert">Não foi possível carregar este artigo.</p>
-          <button className="article-retry" type="button" onClick={this.props.onRetry}>Tentar novamente</button>
-        </main>
-      );
+      return <ArticleFailed onRetry={this.props.onRetry} />;
     }
     return this.props.children;
   }

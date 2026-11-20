@@ -2,18 +2,26 @@ import { Link } from 'react-router-dom';
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import ProductAsciiArt from '../components/ProductAsciiArt';
 import { paperLines, papers, type Paper } from '../data/papers';
+import { useLang } from '../i18n';
 
 const LINE_MS = 4800;
 const reduceMotionInitial = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 /** Os artigos (propostas de pesquisa) giram numa elipse em volta do título; clicar abre o resumo e a figura. */
 export default function PapersPage() {
+  const { lang, tr } = useLang();
+  // Texto do artigo no idioma atual (PT nos campos base, EN em p.en).
+  const copyOf = (p: Paper) => ({ short: tr(p.short, p.en.short), title: tr(p.title, p.en.title), blurb: tr(p.blurb, p.en.blurb) });
   const ringRef = useRef<HTMLDivElement>(null);
   const moreRef = useRef<HTMLElement>(null);
   const [moreSeen, setMoreSeen] = useState(reduceMotionInitial());
+  const rotateRef = useRef<((index: number, done: () => void) => void) | null>(null); // gira o anel ate um cartao ficar na frente
+  const busy = useRef(false); // enquanto o anel gira, novos cliques esperam
   const openRef = useRef(false); // com um resumo aberto o carrossel desacelera ate parar, sem corte seco
   const focusRef = useRef(false); // idem enquanto o foco do teclado esta num cartao (o alvo nao pode fugir)
   const [open, setOpen] = useState<Paper | null>(null);
+  const [shown, setShown] = useState<Paper | null>(null); // mantem o painel montado enquanto ele recolhe
+  useEffect(() => { if (open) setShown(open); }, [open]);
   const [line, setLine] = useState(0);
   const reduce = useRef(window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
@@ -50,6 +58,22 @@ export default function PapersPage() {
     let speed = 0.09; // rad/s
     let last = performance.now();
     let raf = 0;
+    let tween: { from: number; to: number; t0: number; dur: number; done: () => void } | null = null;
+    const TAU = Math.PI * 2;
+    // Gira no sentido do movimento ate o cartao i chegar na frente (parte de baixo da elipse), depois chama done.
+    const rotateTo = (i: number, done: () => void) => {
+      if (reduce.current) {
+        angle = Math.PI / 2 - (i / cards.length) * TAU;
+        place();
+        done();
+        return;
+      }
+      const base = Math.PI / 2 - (i / cards.length) * TAU;
+      const delta = (((base - angle) % TAU) + TAU) % TAU;
+      if (delta < 0.02 || delta > TAU - 0.02) { done(); return; }
+      tween = { from: angle, to: angle + delta, t0: performance.now(), dur: Math.min(2400, 900 + delta * 350), done };
+    };
+    rotateRef.current = rotateTo;
     const place = () => {
       cards.forEach((el, i) => {
         const a = angle + (i / cards.length) * Math.PI * 2;
@@ -64,9 +88,24 @@ export default function PapersPage() {
     const tick = (now: number) => {
       const dt = Math.min((now - last) / 1000, 0.05); // aba em segundo plano nao da salto
       last = now;
-      const target = openRef.current || focusRef.current ? 0 : 0.09;
-      speed += (target - speed) * Math.min(1, dt * 4);
-      angle += speed * dt;
+      if (tween) {
+        const t = tween;
+        const p = Math.min(1, (now - t.t0) / t.dur);
+        const e = p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2; // ease in-out cubico
+        angle = t.from + (t.to - t.from) * e;
+        if (p >= 1) {
+          tween = null;
+          speed = 0;
+          place();
+          t.done();
+          raf = requestAnimationFrame(tick);
+          return;
+        }
+      } else {
+        const target = openRef.current || focusRef.current ? 0 : 0.09;
+        speed += (target - speed) * Math.min(1, dt * 4);
+        angle += speed * dt;
+      }
       place();
       raf = requestAnimationFrame(tick);
     };
@@ -78,6 +117,7 @@ export default function PapersPage() {
     return () => {
       cancelAnimationFrame(raf);
       ro.disconnect();
+      rotateRef.current = null;
     };
   }, []);
 
@@ -97,10 +137,21 @@ export default function PapersPage() {
     return () => document.removeEventListener('keydown', onKey);
   }, [open]);
 
+  // Clicar em outro artigo: fecha o atual, gira o anel ate ele e so depois o abre.
+  const pick = (p: Paper) => {
+    if (open?.n === p.n) { setOpen(null); return; }
+    if (busy.current) return;
+    busy.current = true;
+    setOpen(null);
+    const finish = () => { busy.current = false; setOpen(p); };
+    if (rotateRef.current) rotateRef.current(papers.indexOf(p), finish);
+    else finish();
+  };
+
   return (
     <>
-      <ProductAsciiArt src="/images/papers/macaco-cientista.png" className="papers-ascii-bg" decorative richLight />
     <main className={`papers${open ? ' has-open' : ''}`} id="page-content">
+      <ProductAsciiArt src="/images/papers/macaco-cientista.png" className="papers-ascii-bg" decorative richLight />
       <div
         className="papers-orbit product-emerge"
         style={{ '--emerge': 1500 } as CSSProperties}
@@ -109,49 +160,61 @@ export default function PapersPage() {
         onPointerDown={() => { focusRef.current = false; }}
         onBlur={() => { focusRef.current = false; }}
         role="group"
-        aria-label="Artigos"
+        aria-label={tr('Artigos', 'Papers')}
       >
-        {papers.map((p) => (
-          <button
-            key={p.n}
-            type="button"
-            className={`papers-card${open?.n === p.n ? ' is-open' : ''}`}
-            aria-label={`Artigo ${p.n}: ${p.short}`}
-            aria-expanded={open?.n === p.n}
-            onClick={() => setOpen(open?.n === p.n ? null : p)}
-          >
-            <span className="papers-card-n">{p.n}</span>
-            <span className="papers-card-name">{p.short}</span>
-          </button>
-        ))}
+        {papers.map((p) => {
+          const c = copyOf(p);
+          return (
+            <button
+              key={p.n}
+              type="button"
+              className={`papers-card${open?.n === p.n ? ' is-open' : ''}`}
+              aria-label={tr(`Artigo ${p.n}: ${c.short}`, `Paper ${p.n}: ${c.short}`)}
+              aria-expanded={open?.n === p.n}
+              onClick={() => pick(p)}
+            >
+              <span className="papers-card-n">{p.n}</span>
+              <span className="papers-card-name">{c.short}</span>
+            </button>
+          );
+        })}
       </div>
 
       <div className="papers-center">
         <h1 className="papers-title product-emerge" style={{ '--emerge': 300 } as CSSProperties}>papers</h1>
-        {open ? (
-          <article className="papers-detail" aria-live="polite">
-            <p className="papers-detail-kicker">proposta {open.n} de {papers.length} · ainda sem resultados</p>
-            <h2 className="papers-detail-title">{open.title}</h2>
-            <p className="papers-detail-blurb">{open.blurb}</p>
-            <div className="papers-detail-actions">
-              <Link className="papers-open" to={`/papers/${open.n}`}>abrir artigo</Link>
-              <button type="button" className="papers-close" onClick={() => setOpen(null)}>fechar</button>
-            </div>
-          </article>
-        ) : (
-          <div className="product-emerge" style={{ '--emerge': 900 } as CSSProperties}>
-            <p className="papers-line" key={line} aria-live="off">{paperLines[line]}</p>
+        <div className={`papers-swap${open ? ' is-open' : ''}`}>
+          <div className="papers-swap-inner">
+            {shown && (
+              <article className="papers-detail" aria-live="polite" aria-hidden={!open}>
+                <p className="papers-detail-kicker">{tr(`proposta ${shown.n} de ${papers.length} · ainda sem resultados`, `proposal ${shown.n} of ${papers.length} · no results yet`)}</p>
+                <h2 className="papers-detail-title">{copyOf(shown).title}</h2>
+                <p className="papers-detail-blurb">{copyOf(shown).blurb}</p>
+                <div className="papers-detail-actions">
+                  <Link className="papers-open" to={`/papers/${shown.n}`}>{tr('abrir artigo', 'open article')}</Link>
+                  <button type="button" className="papers-close" onClick={() => setOpen(null)}>{tr('fechar', 'close')}</button>
+                </div>
+              </article>
+            )}
           </div>
-        )}
+        </div>
+        <div className={`papers-swap${open ? '' : ' is-open'}`}>
+          <div className="papers-swap-inner">
+            <div>
+              <p className="papers-line" key={`${line}-${lang}`} aria-live="off">{tr(paperLines[line].pt, paperLines[line].en)}</p>
+            </div>
+          </div>
+        </div>
       </div>
     </main>
 
     <section className={`papers-more${moreSeen ? ' is-in' : ''}`} ref={moreRef} aria-labelledby="papers-more-title">
-      <p className="papers-more-kicker">além dos papers</p>
-      <h2 className="papers-more-title" id="papers-more-title">Subprojetos</h2>
+      <p className="papers-more-kicker">{tr('além dos papers', 'beyond the papers')}</p>
+      <h2 className="papers-more-title" id="papers-more-title">{tr('Subprojetos', 'Subprojects')}</h2>
       <p className="papers-more-lead">
-        Pesquisar o Draw pediu mais do que o próprio Draw: algumas peças ficaram grandes ou
-        independentes o bastante para virar projetos separados. Aqui ficam os que nasceram disso.
+        {tr(
+          'Pesquisar o Draw pediu mais do que o próprio Draw: algumas peças ficaram grandes ou independentes o bastante para virar projetos separados. Aqui ficam os que nasceram disso.',
+          'Researching Draw asked for more than Draw itself: some pieces grew large or independent enough to become separate projects. These are the ones that came out of it.',
+        )}
       </p>
       <a className="papers-sub" href="https://github.com/santleme/hvcam" target="_blank" rel="noreferrer">
         <span className="papers-sub-name">
@@ -164,8 +227,10 @@ export default function PapersPage() {
           </svg>
         </span>
         <span className="papers-sub-text">
-          Leva a webcam do Windows para dentro do WSL2, sem kernel customizado, sem usbipd e sem
-          administrador. Foi a ponte de captura do Draw.
+          {tr(
+            'Leva a webcam do Windows para dentro do WSL2, sem kernel customizado, sem usbipd e sem administrador. Foi a ponte de captura do Draw.',
+            'Brings the Windows webcam into WSL2, without a custom kernel, without usbipd and without administrator rights. It was the capture bridge for Draw.',
+          )}
         </span>
         <span className="papers-sub-link">github.com/santleme/hvcam ↗</span>
       </a>

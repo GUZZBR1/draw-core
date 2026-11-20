@@ -6,6 +6,7 @@ exemplos do padrao: copie a forma, troque rotulos.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -285,6 +286,283 @@ def fig_03_3() -> str:
     )
 
 
+def fig_07_1() -> str:
+    """Par esquematico entre cena real e cena simulada."""
+    parts = [
+        k.text(40, 44, "Par de condições para comparação", 20, k.INK, True),
+        k.box(70, 105, 470, 180, "Captura real", k.TEAL, "exemplo esquemático"),
+        k.box(660, 105, 470, 180, "Cena simulada", k.CLAY, "exemplo esquemático"),
+        k.text(
+            600,
+            345,
+            "Comparar a mesma pergunta, documentando diferenças da cena",
+            15,
+            k.MUTED,
+            False,
+            "middle",
+        ),
+    ]
+    for x, color in [(150, k.TEAL), (740, k.CLAY)]:
+        parts.extend(
+            [
+                f'<rect x="{x}" y="155" width="300" height="82" rx="4" fill="#FFFFFF" stroke="{color}" stroke-width="2"/>',
+                f'<path d="M{x + 35} 210 L{x + 90} 185 L{x + 160} 218 L{x + 252} 175" fill="none" stroke="{k.MUTED}" stroke-width="3"/>',
+            ]
+        )
+    return k.svg(
+        1200,
+        390,
+        "Par conceitual real e simulado",
+        "Duas cenas esquemáticas para ilustrar comparação por condição, sem dados observados.",
+        *parts,
+    )
+
+
+def fig_07_2() -> str:
+    """Fluxo externo de validacao e delimitacao da evidencia sintetica."""
+    parts = [
+        k.text(40, 44, "Comparação e delimitação da evidência", 20, k.INK, True),
+        k.row(
+            45,
+            125,
+            [
+                "Condição definida",
+                "Pares por condição",
+                "Concordância",
+                "Limites relatados",
+            ],
+            w=245,
+            h=85,
+            gap=40,
+        ),
+        k.text(
+            600,
+            290,
+            "A comparação avalia evidência, não o processo de geração",
+            15,
+            k.MUTED,
+            False,
+            "middle",
+        ),
+    ]
+    return k.svg(
+        1200,
+        350,
+        "Fluxo de validação por pares",
+        "Condições correspondentes são comparadas e o escopo das conclusões é documentado.",
+        *parts,
+    )
+
+
+def fig_07_3() -> str:
+    """Forma ilustrativa de concordancia entre dificuldade sim-real."""
+    parts = [
+        k.text(40, 44, "Concordância da dificuldade por condição", 20, k.INK, True),
+        k.curve_placeholder(
+            135,
+            80,
+            900,
+            220,
+            "dificuldade simulada (qualitativa)",
+            "dificuldade observada em dados reais",
+            falling=False,
+        ),
+    ]
+    return k.svg(
+        1200,
+        390,
+        "Concordância simulada e real, ilustrativa",
+        "Forma conceitual ascendente sem observações, pontos ou valores numéricos.",
+        *parts,
+    )
+
+
+def fig_09_1() -> str:
+    """Visao externa da pagina de papel ao uso do arquivo."""
+    parts = [
+        k.text(40, 44, "Do papel ao uso posterior", 20, k.INK, True),
+        k.row(
+            45,
+            115,
+            [
+                "Página em papel",
+                "Sistema de desenho assistido por câmera",
+                "Artefato e uso posterior",
+            ],
+            w=330,
+            h=92,
+            gap=55,
+        ),
+        k.text(
+            600,
+            285,
+            "Comparação externa entre referência e artefato",
+            15,
+            k.MUTED,
+            False,
+            "middle",
+        ),
+    ]
+    return k.svg(
+        1200,
+        350,
+        "Visão conceitual de exportação",
+        "Página em papel, sistema como caixa-preta e artefato para uso posterior.",
+        *parts,
+    )
+
+
+def fig_09_2() -> str:
+    """Sobreposicao esquematica de referencia e exportacao."""
+    parts = [
+        k.text(40, 44, "Referência e artefato exportado", 20, k.INK, True),
+        '<rect x="60" y="92" width="500" height="280" rx="12" fill="#FFFFFF" stroke="%s" stroke-width="2"/>'
+        % k.LINE,
+        '<rect x="640" y="92" width="500" height="280" rx="12" fill="#FFFFFF" stroke="%s" stroke-width="2"/>'
+        % k.LINE,
+        k.text(310, 125, "Desenho de referência", 16, k.INK, True, "middle"),
+        k.text(890, 125, "Artefato exportado (esquema)", 16, k.INK, True, "middle"),
+        '<path d="M125 285 C205 165 280 330 350 215 S470 180 500 275" fill="none" stroke="%s" stroke-width="5"/>'
+        % k.MUTED,
+        '<path d="M705 285 C785 165 860 330 930 215 S1050 180 1080 275" fill="none" stroke="%s" stroke-width="5" stroke-dasharray="9 6"/>'
+        % k.CLAY,
+        k.text(
+            600,
+            420,
+            "Formas apenas ilustrativas; não codificam um erro medido",
+            14,
+            k.MUTED,
+            False,
+            "middle",
+        ),
+    ]
+    return k.svg(
+        1200,
+        460,
+        "Comparação esquemática de desenho",
+        "Traços ilustrativos em painéis separados, sem valores ou resultados.",
+        *parts,
+    )
+
+
+def fig_09_3() -> str:
+    """Matriz vazia de compatibilidade entre destinos e usos."""
+    parts = [
+        k.text(40, 44, "Categorias de destino e usos", 20, k.INK, True),
+        k.matrix(
+            345,
+            135,
+            ["edição", "documentação", "impressão", "integração"],
+            ["raster", "vetorial", "troca", "arquivo"],
+            cell=95,
+        ),
+        k.text(
+            620,
+            575,
+            "Células vazias até que compatibilidade seja verificada",
+            14,
+            k.MUTED,
+            False,
+            "middle",
+        ),
+    ]
+    return k.svg(
+        1200,
+        620,
+        "Matriz conceitual de compatibilidade",
+        "Matriz vazia entre categorias de arquivo e usos, sem resultados declarados.",
+        *parts,
+    )
+
+
+def fig_11_1() -> str:
+    """Mapa de categorias de barreiras de acessibilidade."""
+    labels = [
+        (45, 110, "Motora", "alcance e controle"),
+        (430, 110, "Visual", "percepção e contraste"),
+        (815, 110, "Cognitiva", "compreensão e memória"),
+        (45, 265, "Equipamento", "disponibilidade e ajuste"),
+        (430, 265, "Espaço", "superfície e mobilidade"),
+        (815, 265, "Conectividade", "acesso e continuidade"),
+    ]
+    parts = [k.text(40, 44, "Dimensões de barreiras a investigar", 20, k.INK, True)]
+    for x, y, title, detail in labels:
+        parts.append(k.box(x, y, 340, 100, title, k.TEAL, detail))
+    return k.svg(
+        1200,
+        420,
+        "Mapa conceitual de barreiras",
+        "Seis dimensões de acessibilidade organizadas para avaliação contextual.",
+        *parts,
+    )
+
+
+def fig_11_2() -> str:
+    """Fluxo externo do estudo com participantes."""
+    parts = [
+        k.text(40, 44, "Estudo de interação com participantes", 20, k.INK, True),
+        k.row(
+            50,
+            125,
+            [
+                "Avaliação ética",
+                "Recrutamento e consentimento",
+                "Sessão de uso",
+                "Instrumentos e análise",
+            ],
+            w=240,
+            h=85,
+            gap=50,
+        ),
+        k.text(
+            600,
+            300,
+            "Etapas do estudo, sem representar processamento do sistema",
+            15,
+            k.MUTED,
+            False,
+            "middle",
+        ),
+    ]
+    return k.svg(
+        1200,
+        360,
+        "Fluxo do estudo com pessoas",
+        "Etapas éticas e de coleta descritas em nível externo.",
+        *parts,
+    )
+
+
+def fig_11_3() -> str:
+    """Perfil de amostra planejado, vazio e sem contagens."""
+    parts = [
+        k.text(40, 44, "Perfil planejado: campos a preencher", 20, k.INK, True),
+        k.matrix(
+            385,
+            105,
+            ["motora", "visual", "cognitiva", "equipamento", "espaço", "conectividade"],
+            ["perfil a descrever"],
+            cell=78,
+        ),
+        k.text(
+            780,
+            375,
+            "Nenhum perfil ou número de participante está preenchido",
+            14,
+            k.MUTED,
+            False,
+            "middle",
+        ),
+    ]
+    return k.svg(
+        1200,
+        610,
+        "Perfil de amostra planejado",
+        "Matriz vazia para descrição futura da amostra, sem contagens ou resultados.",
+        *parts,
+    )
+
+
 def fig_10_1() -> str:
     """Rastreabilidade conceitual entre planejamento, evidencias e relato."""
     parts = [
@@ -402,9 +680,9 @@ def fig_02_1() -> str:
     ]
     return k.svg(
         1200,
-        310,
-        "Fatores esquemáticos de cena",
-        "Três categorias de cena sem fotografias ou resultados do sistema.",
+        620,
+        "Matriz conceitual de compatibilidade",
+        "Matriz vazia entre categorias de arquivo e usos, sem resultados declarados.",
         *parts,
     )
 
@@ -747,6 +1025,98 @@ def fig_05_3() -> str:
     )
 
 
+def fig_12_1() -> str:
+    """Relação conceitual entre medida observável e percepção relatada."""
+    parts = [
+        k.text(40, 44, "Medida externa e percepção relatada", 20, k.INK, True),
+        k.row(
+            45,
+            115,
+            ["Comportamento observável", "Medida técnica", "Percepção relatada"],
+            w=315,
+            h=86,
+            gap=55,
+        ),
+        k.text(
+            600,
+            285,
+            "Associação investigada, sem afirmar causalidade",
+            16,
+            k.MUTED,
+            False,
+            "middle",
+        ),
+    ]
+    return k.svg(
+        1200,
+        350,
+        "Modelo conceitual de medida e percepção",
+        "Observação externa e relato subjetivo são relacionados para análise sem indicar mecanismo interno ou causalidade.",
+        *parts,
+    )
+
+
+def fig_12_2() -> str:
+    """Sessao externa de estudo que combina tarefa, observacao e relatos."""
+    parts = [
+        k.text(40, 44, "Sessão de avaliação da experiência", 20, k.INK, True),
+        k.row(
+            40,
+            118,
+            ["Tarefa de desenho", "Registro externo", "Questionários", "Entrevista"],
+            w=240,
+            h=88,
+            gap=40,
+        ),
+        k.text(
+            600,
+            295,
+            "Fontes alinhadas na mesma sessão; interpretação posterior",
+            16,
+            k.MUTED,
+            False,
+            "middle",
+        ),
+    ]
+    return k.svg(
+        1200,
+        360,
+        "Desenho externo da avaliação",
+        "Atividade, medida externa, questionários e entrevista sem representação de processamento interno.",
+        *parts,
+    )
+
+
+def fig_12_3() -> str:
+    """Forma esperada da associacao tecnica e percebida, sem dados."""
+    parts = [
+        k.text(
+            40,
+            44,
+            "Associação entre observação e percepção: forma ilustrativa",
+            20,
+            k.INK,
+            True,
+        ),
+        k.curve_placeholder(
+            135,
+            80,
+            900,
+            220,
+            "medida técnica (qualitativa)",
+            "avaliação percebida (qualitativa)",
+            falling=False,
+        ),
+    ]
+    return k.svg(
+        1200,
+        390,
+        "Associação técnica e percebida, ilustrativa",
+        "Forma conceitual qualitativa sem eixos numéricos, observações ou resultado medido.",
+        *parts,
+    )
+
+
 FIGURES = {
     "08-latencia-cadeia.svg": fig_08_1,
     "08-distribuicao-latencia.svg": fig_08_2,
@@ -769,10 +1139,27 @@ FIGURES = {
     "03-timeline-identidade.svg": fig_03_1,
     "03-decisoes-identidade.svg": fig_03_2,
     "03-erro-ausencia.svg": fig_03_3,
+    "07-par-real-simulado.svg": fig_07_1,
+    "07-fluxo-validacao.svg": fig_07_2,
+    "07-concordancia-sim-real.svg": fig_07_3,
+    "09-papel-arquivo.svg": fig_09_1,
+    "09-sobreposicao-original-exportado.svg": fig_09_2,
+    "09-matriz-compatibilidade.svg": fig_09_3,
+    "11-mapa-barreiras.svg": fig_11_1,
+    "11-fluxo-estudo.svg": fig_11_2,
+    "11-perfil-amostra.svg": fig_11_3,
+    "12-medida-percepcao.svg": fig_12_1,
+    "12-desenho-estudo.svg": fig_12_2,
+    "12-associacao-tecnica-percebida.svg": fig_12_3,
     "10-rastreabilidade.svg": fig_10_1,
     "10-niveis-reprodutibilidade.svg": fig_10_2,
     "10-variacao-repeticoes.svg": fig_10_3,
 }
+
+
+_PT_HINT = re.compile(
+    r"[áàâãéêíóôõúçÁÉÍÓÚÇ]|\b(de|da|do|das|dos|para|com|que|em|uma?|sem|entre|ao|os|as)\b"
+)
 
 
 def main() -> None:
@@ -780,6 +1167,31 @@ def main() -> None:
     for name, fn in FIGURES.items():
         (out / name).write_text(fn(), encoding="utf-8")
         print("ok", name)
+
+    from figures_en import EN
+
+    k.LANG = "en"
+    k.TRANSLATIONS = EN
+    missing: list[str] = []
+    orig_tr = k.tr
+
+    def checked(s: str) -> str:
+        r = orig_tr(s)
+        if r == s and _PT_HINT.search(s):
+            missing.append(s)
+        return r
+
+    k.tr = checked
+    en_dir = out / "en"
+    en_dir.mkdir(exist_ok=True)
+    for name, fn in FIGURES.items():
+        (en_dir / name).write_text(fn(), encoding="utf-8")
+    k.tr = orig_tr
+    k.LANG = "pt"
+    if missing:
+        print("UNTRANSLATED:", *sorted(set(missing)), sep="\n  ")
+        raise SystemExit(1)
+    print("ok en", len(FIGURES))
 
 
 if __name__ == "__main__":

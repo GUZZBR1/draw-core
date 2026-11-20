@@ -17,12 +17,20 @@ CLAY = "#A76C4E"
 VIOLET = "#7869A6"
 FONT = "Arial,sans-serif"
 
+LANG = "pt"
+TRANSLATIONS: dict[str, str] = {}
+
+
+def tr(s: str) -> str:
+    """Traduz `s` quando LANG == "en"; caso contrario devolve igual."""
+    return TRANSLATIONS.get(s, s) if LANG == "en" else s
+
 
 def svg(width: int, height: int, title: str, desc: str, *parts: str) -> str:
     head = (
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
         f'viewBox="0 0 {width} {height}" role="img" aria-labelledby="t d">'
-        f'<title id="t">{escape(title)}</title><desc id="d">{escape(desc)}</desc>'
+        f'<title id="t">{escape(tr(title))}</title><desc id="d">{escape(tr(desc))}</desc>'
         f'<rect width="{width}" height="{height}" rx="20" fill="{BG}"/>'
         '<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" '
         f'markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="{MUTED}"/>'
@@ -43,7 +51,7 @@ def text(
     weight = "700" if bold else "400"
     return (
         f'<text x="{x}" y="{y}" font-family="{FONT}" font-size="{size}" '
-        f'font-weight="{weight}" fill="{color}" text-anchor="{anchor}">{escape(s)}</text>'
+        f'font-weight="{weight}" fill="{color}" text-anchor="{anchor}">{escape(tr(s))}</text>'
     )
 
 

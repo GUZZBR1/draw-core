@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import { motion, useMotionValueEvent, useScroll, useTransform } from 'motion/react';
+import { useLang } from '../i18n';
 
 export default function ScrollbarControl() {
+  const { tr } = useLang();
   const { scrollYProgress } = useScroll();
   const [scrollPercent, setScrollPercent] = useState(0);
   const thumbPosition = useTransform(scrollYProgress, [0, 1], [0, 48]);
@@ -40,7 +42,7 @@ export default function ScrollbarControl() {
     <div
       className="scrollbar-control fixed right-2 top-1/2 z-[45] flex h-[128px] w-8 -translate-y-1/2 touch-none items-center justify-center rounded-full outline-none focus-visible:ring-2 focus-visible:ring-accent"
       role="scrollbar"
-      aria-label="Barra de rolagem da página"
+      aria-label={tr('Barra de rolagem da página', 'Page scrollbar')}
       aria-controls="page-content"
       aria-orientation="vertical"
       aria-valuemin={0}

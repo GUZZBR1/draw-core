@@ -1,11 +1,13 @@
 import { flushSync } from 'react-dom';
 import { useEffect, useRef, useState } from 'react';
 import { Link, Outlet, useNavigate } from 'react-router-dom';
+import { useLang } from '../i18n';
 
 export type StudioContext = { slot: HTMLElement | null };
 
 /** Moldura do estúdio: fundo, barra superior, tema e saída. Fica montada enquanto se navega entre as telas. */
 export default function StudioShell() {
+  const { tr } = useLang();
   const navigate = useNavigate();
   const [slot, setSlot] = useState<HTMLElement | null>(null);
   const [leaving, setLeaving] = useState(false);
@@ -90,10 +92,10 @@ export default function StudioShell() {
       <div className="studio-flash" aria-hidden="true" />
       {leaving && <div className="studio-leave" aria-hidden="true" />}
       <header className="studio-bar">
-        <Link className="studio-mark" to="/app" aria-label="Draw studio: início">Draw<i>studio</i></Link>
+        <Link className="studio-mark" to="/app" aria-label={tr('Draw studio: início', 'Draw studio: home')}>Draw<i>studio</i></Link>
         <div className="studio-slot" ref={setSlot} />
-        <button type="button" className="studio-exit" aria-label={`Ativar tema ${dark ? 'claro' : 'escuro'}`} onClick={toggleTheme}>{dark ? 'light' : 'dark'}</button>
-        <Link className="studio-exit" to="/product" onClick={leave}>sair ↗</Link>
+        <button type="button" className="studio-exit" aria-label={tr(`Ativar tema ${dark ? 'claro' : 'escuro'}`, `Switch to ${dark ? 'light' : 'dark'} theme`)} onClick={toggleTheme}>{dark ? 'light' : 'dark'}</button>
+        <Link className="studio-exit" to="/product" onClick={leave}>{tr('sair ↗', 'exit ↗')}</Link>
       </header>
       <Outlet context={context} />
     </main>

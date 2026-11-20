@@ -1,11 +1,23 @@
 import { createPortal } from 'react-dom';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, Navigate, useOutletContext, useParams } from 'react-router-dom';
 import type { StudioContext } from '../components/StudioShell';
+import { useLang } from '../i18n';
 import { DrawCloud, isCloudConfigured, type CloudResult, type CloudStatus } from '../lib/drawCloud';
-import { getDrawing, getProject, isPendingImport, saveDrawing, saveStrokes, saveStrokesAsCopy, type Drawing, type Pt } from '../lib/studioProjects';
+import { getDrawing, getProject, isPendingImport, saveDrawing, saveStrokes, saveStrokesAsCopy, type Drawing, type Pt, type StudioNames } from '../lib/studioProjects';
 
 const INKS = ['#22231f', '#3b5ba5', '#b5483a'];
+
+/** Nomes padrão criados pelo estúdio, no idioma atual (o que já foi gravado não muda). */
+export function studioNames(tr: ReturnType<typeof useLang>['tr']): Required<StudioNames> {
+  return {
+    legacyProject: tr('Salvamentos anteriores', 'Earlier saves'),
+    drawing: (n) => tr(`Desenho ${n}`, `Drawing ${n}`),
+    noName: tr('Sem nome', 'Untitled'),
+    noTitle: tr('Sem título', 'Untitled'),
+    copy: (name) => tr(`${name} (cópia)`, `${name} (copy)`),
+  };
+}
 
 function drawSmooth(ctx: CanvasRenderingContext2D, pts: Pt[], w: number, h: number) {
   if (pts.length === 1) { // toque sem arrasto: um ponto da cor e da espessura do traço
@@ -31,7 +43,9 @@ function drawSmooth(ctx: CanvasRenderingContext2D, pts: Pt[], w: number, h: numb
 /** Carrega o desenho da URL; se ele não existir mais, volta para o projeto. */
 export default function StudioPage() {
   const { projectId = '', drawingId = '' } = useParams();
-  const project = getProject(projectId);
+  const { tr } = useLang();
+  const names = useMemo(() => studioNames(tr), [tr]);
+  const project = getProject(projectId, names);
   const drawing = project ? getDrawing(projectId, drawingId) : null;
   if (!project || !drawing) return <Navigate to={project ? `/app/p/${projectId}` : '/app/projects'} replace />;
   return <StudioEditor key={drawing.id} projectName={project.name} drawing={drawing} />;
@@ -39,6 +53,8 @@ export default function StudioPage() {
 
 function StudioEditor({ projectName, drawing }: { projectName: string; drawing: Drawing }) {
   const { slot } = useOutletContext<StudioContext>();
+  const { tr } = useLang();
+  const names = useMemo(() => studioNames(tr), [tr]);
   const paperRef = useRef<HTMLCanvasElement>(null);
   const digitalRef = useRef<HTMLCanvasElement>(null);
   const countRef = useRef<HTMLSpanElement>(null);
@@ -70,7 +86,7 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
     let result = saveStrokes(drawing.projectId, target.current.id, strokes.current, target.current.rev);
     if (result.status === 'stale') {
       // outra aba gravou este desenho depois que ele foi aberto aqui: nao sobrescreve, guarda uma copia
-      const copy = saveStrokesAsCopy(drawing.projectId, drawing.name, strokes.current);
+      const copy = saveStrokesAsCopy(drawing.projectId, drawing.name, strokes.current, names);
       if (copy) {
         target.current = { id: copy.id, rev: copy.rev ?? 0 };
         // a copia e a nova referencia gravada; um titulo que o usuario ja estava editando fica no campo e e salvo ao sair dele
@@ -90,7 +106,7 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
     const ok = result.status === 'ok';
     if (!ok) pendingSave.current = true;
     setStrokeError(!ok);
-  }, [drawing.projectId, drawing.name]);
+  }, [drawing.projectId, drawing.name, names]);
 
   const scheduleAutosave = useCallback(() => {
     pendingSave.current = true;
@@ -113,11 +129,11 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
   }, [flushAutosave]);
 
   const rename = () => {
-    const name = title.trim() || 'Sem título';
+    const name = title.trim() || names.noTitle;
     setTitle(name);
     titleRef.current = name;
     if (name === savedName.current) return;
-    const ok = saveDrawing(drawing.projectId, target.current.id, { name });
+    const ok = saveDrawing(drawing.projectId, target.current.id, { name }, names);
     if (ok) savedName.current = name;
     setNameError(!ok);
   };
@@ -193,7 +209,7 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
   const startCam = useCallback(async (deviceId?: string) => {
     setCamError('');
     if (!navigator.mediaDevices?.getUserMedia) {
-      setCamError('Este navegador não expõe câmeras (use https ou localhost).');
+      setCamError(tr('Este navegador não expõe câmeras (use https ou localhost).', 'This browser does not expose cameras (use https or localhost).'));
       return;
     }
     const request = ++camRequest.current;
@@ -216,9 +232,11 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
       await refreshCams(); // com permissao, os nomes das câmeras aparecem
     } catch (err) {
       const name = err instanceof DOMException ? err.name : '';
-      setCamError(name === 'NotAllowedError' ? 'Permissão negada. Libere a câmera nas configurações do navegador.' : name === 'NotFoundError' ? 'Nenhuma câmera encontrada.' : 'Não foi possível abrir essa câmera.');
+      setCamError(name === 'NotAllowedError'
+        ? tr('Permissão negada. Libere a câmera nas configurações do navegador.', 'Permission denied. Allow the camera in your browser settings.')
+        : name === 'NotFoundError' ? tr('Nenhuma câmera encontrada.', 'No camera found.') : tr('Não foi possível abrir essa câmera.', 'Could not open this camera.'));
     }
-  }, [refreshCams]);
+  }, [refreshCams, tr]);
 
   useEffect(() => {
     if (!navigator.mediaDevices) return;
@@ -246,7 +264,7 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
   }, [camOpen]);
 
   const activeCam = cams.find((c) => c.deviceId === camId);
-  const cloudLabel = !isCloudConfigured() ? '' : cloudStatus === 'ready' ? ' · draw ativo' : cloudStatus === 'connecting' ? ' · conectando ao draw…' : cloudStatus === 'error' ? ` · draw indisponível${cloudDetail ? ` (${cloudDetail})` : ''}` : '';
+  const cloudLabel = !isCloudConfigured() ? '' : cloudStatus === 'ready' ? tr(' · draw ativo', ' · draw active') : cloudStatus === 'connecting' ? tr(' · conectando ao draw…', ' · connecting to draw…') : cloudStatus === 'error' ? tr(` · draw indisponível${cloudDetail ? ` (${cloudDetail})` : ''}`, ` · draw unavailable${cloudDetail ? ` (${cloudDetail})` : ''}`) : '';
 
   useEffect(() => {
     const paper = paperRef.current!;
@@ -383,66 +401,66 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
     <>
       {slot && createPortal(
         <>
-          <Link className="studio-crumb" to={`/app/p/${drawing.projectId}`} title="Voltar ao projeto" aria-label={`Voltar ao projeto ${projectName}`}><span aria-hidden="true">‹</span><span className="studio-crumb-name"> {projectName}</span></Link>
+          <Link className="studio-crumb" to={`/app/p/${drawing.projectId}`} title={tr('Voltar ao projeto', 'Back to project')} aria-label={tr(`Voltar ao projeto ${projectName}`, `Back to project ${projectName}`)}><span aria-hidden="true">‹</span><span className="studio-crumb-name"> {projectName}</span></Link>
           <input
             className="studio-title"
             value={title}
             maxLength={60}
-            aria-label="Nome do desenho"
+            aria-label={tr('Nome do desenho', 'Drawing name')}
             readOnly={readOnly}
             onChange={(e) => { titleRef.current = e.target.value; setTitle(e.target.value); }}
             onBlur={rename}
             onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
           />
-          <span className="studio-pill"><span className={`status-dot${camId ? ' is-live' : ''}`} /> {camId ? `câmera · ${activeCam?.label || 'ativa'}${cloudLabel}` : 'câmera desligada'}</span>
+          <span className="studio-pill"><span className={`status-dot${camId ? ' is-live' : ''}`} /> {camId ? `${tr('câmera', 'camera')} · ${activeCam?.label || tr('ativa', 'active')}${cloudLabel}` : tr('câmera desligada', 'camera off')}</span>
         </>,
         slot,
       )}
       <div className="studio-notices">
         <div className="studio-notices-list">
-          {saveError && <span className="studio-save-error" role="alert">sem espaço para salvar — o desenho continua só nesta tela</span>}
-          {readOnly && <span className="studio-save-error" role="status">importação pendente: sem espaço para gravar — somente leitura</span>}
-          {forked && <span className="studio-save-error" role="status">outra aba alterou este desenho; suas mudanças foram salvas em “{forked}”</span>}
+          {saveError && <span className="studio-save-error" role="alert">{tr('sem espaço para salvar — o desenho continua só nesta tela', 'no space to save — the drawing stays only on this screen')}</span>}
+          {readOnly && <span className="studio-save-error" role="status">{tr('importação pendente: sem espaço para gravar — somente leitura', 'import pending: no space to save — read-only')}</span>}
+          {forked && <span className="studio-save-error" role="status">{tr(`outra aba alterou este desenho; suas mudanças foram salvas em “${forked}”`, `another tab changed this drawing; your changes were saved as “${forked}”`)}</span>}
         </div>
       </div>
 
       <section className="studio-stage">
         <figure className="studio-pane">
-          <figcaption>papel</figcaption>
+          <figcaption>{tr('papel', 'paper')}</figcaption>
           <video ref={videoRef} className="studio-video" muted playsInline aria-hidden="true" />
-          <canvas ref={paperRef} className={`studio-canvas${camId ? ' is-cam' : ''}`} aria-label="Folha de papel: desenhe aqui" />
+          <canvas ref={paperRef} className={`studio-canvas${camId ? ' is-cam' : ''}`} aria-label={tr('Folha de papel: desenhe aqui', 'Paper sheet: draw here')} />
         </figure>
         <figure className="studio-pane is-digital">
-          <figcaption>digital · <span ref={countRef}>00</span> traços</figcaption>
-          <canvas ref={digitalRef} className="studio-canvas" role="img" aria-label="Versão digital do desenho" />
+          <figcaption>{tr('digital', 'digital')} · <span ref={countRef}>00</span> {tr('traços', 'strokes')}</figcaption>
+          <canvas ref={digitalRef} className="studio-canvas" role="img" aria-label={tr('Versão digital do desenho', 'Digital version of the drawing')} />
         </figure>
       </section>
 
       <footer className="studio-dock">
-        {!camId && !readOnly && <div className="studio-swatches" role="group" aria-label="Tinta">
+        {!camId && !readOnly && <div className="studio-swatches" role="group" aria-label={tr('Tinta', 'Ink')}>
           {INKS.map((c, i) => (
-            <button key={c} type="button" aria-label={`Tinta ${i + 1}`} aria-pressed={i === inkIdx} style={{ background: i === 0 ? 'var(--ink)' : c }} onClick={() => pick(i)} />
+            <button key={c} type="button" aria-label={tr(`Tinta ${i + 1}`, `Ink ${i + 1}`)} aria-pressed={i === inkIdx} style={{ background: i === 0 ? 'var(--ink)' : c }} onClick={() => pick(i)} />
           ))}
         </div>}
-        {!camId && !readOnly && <button type="button" className="studio-clear" onClick={() => clearRef.current?.()}>limpar</button>}
+        {!camId && !readOnly && <button type="button" className="studio-clear" onClick={() => clearRef.current?.()}>{tr('limpar', 'clear')}</button>}
         <div className="studio-cam" ref={camBoxRef}>
           <button type="button" className="studio-clear" aria-expanded={camOpen} aria-controls="studio-cam-card" onClick={() => setCamOpen((o) => !o)}>
-            <span className={`studio-rec${camId ? ' is-on' : ''}`} aria-hidden="true" /> câmera
+            <span className={`studio-rec${camId ? ' is-on' : ''}`} aria-hidden="true" /> {tr('câmera', 'camera')}
           </button>
           {camOpen && (
-            <div className="studio-cam-card" id="studio-cam-card" role="dialog" aria-label="Escolher câmera">
-              <p className="studio-cam-title">Câmeras</p>
+            <div className="studio-cam-card" id="studio-cam-card" role="dialog" aria-label={tr('Escolher câmera', 'Choose camera')}>
+              <p className="studio-cam-title">{tr('Câmeras', 'Cameras')}</p>
               {cams.length === 0 || cams.every((c) => !c.label) ? (
-                <button type="button" className="studio-cam-row" onClick={() => void startCam()}>Permitir e detectar câmeras</button>
+                <button type="button" className="studio-cam-row" onClick={() => void startCam()}>{tr('Permitir e detectar câmeras', 'Allow and detect cameras')}</button>
               ) : (
                 cams.map((c, i) => (
                   <button key={c.deviceId || i} type="button" className="studio-cam-row" aria-pressed={c.deviceId === camId} onClick={() => { void startCam(c.deviceId); setCamOpen(false); }}>
                     <span className="studio-rec is-on" aria-hidden="true" style={{ opacity: c.deviceId === camId ? 1 : 0 }} />
-                    {c.label || `Câmera ${i + 1}`}
+                    {c.label || tr(`Câmera ${i + 1}`, `Camera ${i + 1}`)}
                   </button>
                 ))
               )}
-              {camId && <button type="button" className="studio-cam-row is-off" onClick={stopCam}>Desligar câmera</button>}
+              {camId && <button type="button" className="studio-cam-row is-off" onClick={stopCam}>{tr('Desligar câmera', 'Turn off camera')}</button>}
               {camError && <p className="studio-cam-error" role="alert">{camError}</p>}
             </div>
           )}
