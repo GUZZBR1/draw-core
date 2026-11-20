@@ -5,7 +5,10 @@ import ScrollbarControl from '../components/ScrollbarControl';
 import SiteHeader from '../components/SiteHeader';
 import HomePage from '../pages/HomePage';
 import ProductPage from '../pages/ProductPage';
+import StudioShell from '../components/StudioShell';
+import { Library, NewProject, ProjectList, ProjectView } from '../pages/StudioLists';
 import StudioPage from '../pages/StudioPage';
+import StudioWelcome from '../pages/StudioWelcome';
 import VisionPage from '../pages/VisionPage';
 
 export default function App() {
@@ -17,7 +20,7 @@ export default function App() {
     document.body.classList.toggle('home-scroll', location.pathname === '/');
   }, [location.pathname]);
 
-  const inStudio = location.pathname.replace(/\/+$/, '') === '/app'; // '/app/' tambem e o estudio
+  const inStudio = /^\/app(\/|$)/.test(location.pathname); // o estudio e '/app' e tudo abaixo dele
 
   return (
     <>
@@ -29,7 +32,7 @@ export default function App() {
       />}
       <motion.div
         className="route-transition"
-        key={location.pathname}
+        key={inStudio ? '/app' : location.pathname} // dentro do estudio a moldura continua montada entre as telas
         initial={false}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.28, ease: 'easeOut' }}
@@ -38,7 +41,15 @@ export default function App() {
           <Route path="/" element={<HomePage />} />
           <Route path="/vision" element={<VisionPage />} />
           <Route path="/product" element={<ProductPage key={productRefresh} />} />
-          <Route path="/app" element={<StudioPage />} />
+          <Route path="/app" element={<StudioShell />}>
+            <Route index element={<StudioWelcome />} />
+            <Route path="new" element={<NewProject />} />
+            <Route path="projects" element={<ProjectList />} />
+            <Route path="library" element={<Library />} />
+            <Route path="p/:projectId" element={<ProjectView />} />
+            <Route path="p/:projectId/d/:drawingId" element={<StudioPage />} />
+            <Route path="*" element={<Navigate to="/app" replace />} />
+          </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </motion.div>
