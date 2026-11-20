@@ -15,6 +15,7 @@ handshake de token do PROTOCOL.md.
 
 import os
 import select
+import selectors
 import socket
 import struct
 import threading
@@ -254,10 +255,22 @@ class _Sink:
 def _socket_alive(conn):
     """False se o consumidor fechou (leitura devolve b"" sem bloquear)."""
     try:
-        readable, _, _ = select.select([conn], [], [], 0)
-        if not readable:
-            return True
-        return conn.recv(1, socket.MSG_PEEK) != b""
+        if hasattr(select, "poll"):
+            poller = select.poll()
+            poller.register(conn, select.POLLIN)
+            events = poller.poll(0)
+            if not events:
+                return True
+            if events[0][1] & select.POLLNVAL:
+                return False
+        else:
+            readable, _, _ = select.select([conn], [], [], 0)
+            if not readable:
+                return True
+        flags = socket.MSG_PEEK | getattr(socket, "MSG_DONTWAIT", 0)
+        return conn.recv(1, flags) != b""
+    except BlockingIOError:
+        return True
     except (OSError, ValueError):
         return False
 
@@ -316,14 +329,18 @@ class InkStreamPublisher:
         self._last_anchor = None
         self._server = None
         self.port = None
+        self._wake_r = self._wake_w = None
+        self._wake_lock = threading.Lock()
+        self._wake_closed = False
         threads = []
         try:
             if port is not None:
                 self._server = socket.create_server((host, port))
                 self.port = self._server.getsockname()[1]
-                # accept() com prazo: fechar o socket de outra thread nao o
-                # destrava.
-                self._server.settimeout(0.2)
+                self._server.setblocking(False)
+                self._wake_r, self._wake_w = socket.socketpair()
+                self._wake_w.setblocking(False)
+                self._wake_r.setblocking(False)
                 threads.append(
                     threading.Thread(
                         target=self._accept_loop, name="ink-stream-accept", daemon=True
@@ -332,8 +349,12 @@ class InkStreamPublisher:
             if record_path is not None:
                 self._sinks.append(self._open_record(record_path))
         except BaseException:
-            if self._server is not None:
-                self._server.close()
+            for sock in (self._wake_w, self._wake_r, self._server):
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
             raise
         threads.append(
             threading.Thread(
@@ -435,13 +456,23 @@ class InkStreamPublisher:
         with self._cond:
             self._closed = True
             self._cond.notify()
-        if self._server is not None:
-            try:
-                self._server.close()
-            except OSError:
-                pass
+        with self._wake_lock:
+            if not self._wake_closed and self._wake_w is not None:
+                try:
+                    self._wake_w.send(b"\x00")
+                except OSError:
+                    pass
         for thread in self._threads:
             thread.join(timeout=SEND_TIMEOUT_S + 1)
+        with self._wake_lock:
+            self._wake_closed = True
+            for sock in (self._wake_w, self._wake_r, self._server):
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+            self._wake_w = self._wake_r = self._server = None
         with self._sinks_lock:
             sinks, self._sinks = self._sinks, []
         for sink in sinks:
@@ -449,19 +480,42 @@ class InkStreamPublisher:
             _safe_close(sink, self._log)
 
     def _accept_loop(self):
-        while not self._closed:
+        with selectors.DefaultSelector() as sel:
             try:
-                conn, _addr = self._server.accept()
-            except TimeoutError:
-                continue
-            except OSError:
+                sel.register(self._server, selectors.EVENT_READ)
+                sel.register(self._wake_r, selectors.EVENT_READ)
+            except (OSError, ValueError) as exc:
+                if not self._closed:
+                    self._log(f"ink-stream accept encerrado: {exc}")
                 return
-            if not self._handshakes.acquire(blocking=False):
-                conn.close()  # handshakes demais em aberto: recusa sem thread
-                continue
-            threading.Thread(
-                target=self._adopt, args=(conn,), name="ink-stream-hello", daemon=True
-            ).start()
+            while not self._closed:
+                try:
+                    events = sel.select(timeout=0.5)
+                except (OSError, ValueError) as exc:
+                    if not self._closed:
+                        self._log(f"ink-stream accept encerrado: {exc}")
+                    return
+                ready = {key.fileobj for key, _ in events}
+                if self._closed or self._wake_r in ready:
+                    return
+                if self._server not in ready:
+                    continue
+                try:
+                    conn, _addr = self._server.accept()
+                except BlockingIOError:
+                    continue
+                except OSError:
+                    return
+                conn.setblocking(True)
+                if not self._handshakes.acquire(blocking=False):
+                    conn.close()  # handshakes demais em aberto: recusa sem thread
+                    continue
+                threading.Thread(
+                    target=self._adopt,
+                    args=(conn,),
+                    name="ink-stream-hello",
+                    daemon=True,
+                ).start()
 
     def _adopt(self, conn):
         # Handshake em thread própria: cliente lento não trava o accept.

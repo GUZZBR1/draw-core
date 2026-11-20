@@ -1,8 +1,10 @@
 """Stream de tinta (draw.stream, bridge/STREAM.md)."""
 
 import io
+import os
 import socket
 import struct
+import sys
 import threading
 import time
 
@@ -769,3 +771,67 @@ def test_full_discontinuity_does_not_inherit_the_old_anchor():
         assert canvas.anchor_corners is None and canvas.captured_at_us is None
     finally:
         pub.close()
+
+
+def test_close_wakes_accept_loop_immediately(monkeypatch):
+    entered = threading.Event()
+    real_selector = stream.selectors.DefaultSelector
+
+    class _WatchingSelector(real_selector):
+        def select(self, timeout=None):
+            entered.set()
+            return super().select(timeout=timeout)
+
+    monkeypatch.setattr(stream.selectors, "DefaultSelector", _WatchingSelector)
+    pub = stream.InkStreamPublisher(port=0, token=TOKEN, log=lambda *_: None)
+    try:
+        assert entered.wait(timeout=1.0)
+        time.sleep(0.01)
+        started = time.monotonic()
+        pub.close()
+        elapsed = time.monotonic() - started
+        assert elapsed < 0.15
+        assert not any(t.is_alive() for t in pub._threads)
+        pub.close()  # segunda chamada e no-op seguro
+    finally:
+        pub.close()
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux", reason="limite de 1024 FD do select.select e do Linux"
+)
+def test_accept_loop_handles_high_fd_on_linux():
+    import resource
+
+    soft, _hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft < 1100:
+        pytest.skip("RLIMIT_NOFILE < 1100")
+    dummy_fds = []
+    pub = sock = None
+    try:
+        while True:
+            fd = os.dup(0)
+            dummy_fds.append(fd)
+            if fd >= 1024:
+                break
+        pub = stream.InkStreamPublisher(port=0, token=TOKEN, log=lambda *_: None)
+        assert pub._wake_r.fileno() >= 1024
+        a = _mask()
+        a[1:3, 1:3] = 255
+        _pub(pub, 1, 1, a)
+        time.sleep(0.05)
+        sock = _connect(pub.port)
+        assert sock.fileno() >= 1024
+        canvas = stream.InkCanvas()
+        _read_until(sock, canvas, 1)
+        assert np.array_equal(canvas.mask, a)
+    finally:
+        if sock is not None:
+            sock.close()
+        if pub is not None:
+            pub.close()
+        for fd in dummy_fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
