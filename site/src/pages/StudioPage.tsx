@@ -352,6 +352,9 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
     paper.addEventListener('pointerup', up);
     paper.addEventListener('pointercancel', up);
     window.addEventListener('resize', render);
+    // os avisos mudam a altura das folhas sem disparar 'resize': mantem o tamanho dos canvases sincronizado
+    const sizeWatch = new ResizeObserver(render);
+    sizeWatch.observe(paper);
     const clear = () => {
       strokes.current = [];
       scheduleAutosave(); // a folha vazia tambem e gravada
@@ -366,6 +369,7 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
       paper.removeEventListener('pointerup', up);
       paper.removeEventListener('pointercancel', up);
       window.removeEventListener('resize', render);
+      sizeWatch.disconnect();
       clearRef.current = undefined;
     };
   }, [scheduleAutosave, flushAutosave]);

@@ -959,7 +959,9 @@ body.is-arriving::before { position: fixed; inset: 0; z-index: 90; pointer-event
 }
 body.dark .sketch-section { background: #252622; box-shadow: inset 0 30px 32px -22px rgba(0, 0, 0, .7); }
 body.dark .sketch-section::before { box-shadow: inset 0 22px 22px -18px rgba(0, 0, 0, .55); }
-.studio-notices { position: fixed; z-index: 6; top: 68px; left: 50%; display: flex; flex-direction: column; align-items: center; gap: 6px; max-width: calc(100vw - 24px); transform: translateX(-50%); text-align: center; pointer-events: none; } /* avisos em linha propria: nao disputam a largura do cabecalho (320 px) */
+.studio-notices { display: flex; flex: none; flex-wrap: wrap; justify-content: center; gap: 6px; padding: 0 12px 8px; text-align: center; } /* avisos em fluxo normal, entre o cabecalho e as folhas: nao disputam a largura do cabecalho nem cobrem tracos */
+.hub-notice { margin: 12px 0 0; font: 400 12px/1.5 'DM Mono', monospace; color: #8f2f24; }
+body.dark .hub-notice { color: #f0a498; }
 .studio-save-error { padding: 3px 9px; border-radius: 999px; background: var(--paper); font: 400 11px 'DM Mono', monospace; color: #8f2f24; } /* fundo proprio: o pontilhado do estudio nao reduz o contraste */
 body.dark .studio-save-error { color: #f0a498; }
 .hub-page.has-intro { animation: none; }

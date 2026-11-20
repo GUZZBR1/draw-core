@@ -205,8 +205,8 @@ export function ProjectView() {
           <DrawingCard key={d.id} drawing={d} onDelete={pending ? undefined : () => { deleteDrawing(project.id, d.id); setDrawings(listDrawings(project.id)); }} />
         ))}
       </ul>
-      {pending && <p className="studio-cam-error" role="status">Importação pendente: sem espaço no navegador para gravar. Apague desenhos para liberar espaço e abra de novo; por enquanto estes só podem ser vistos.</p>}
-      {error && <p className="studio-cam-error" role="alert">Sem espaço no navegador para criar o desenho.</p>}
+      {pending && <p className="hub-notice" role="status">Importação pendente: sem espaço no navegador para gravar. Apague desenhos para liberar espaço e abra de novo; por enquanto estes só podem ser vistos.</p>}
+      {error && <p className="hub-notice" role="alert">Sem espaço no navegador para criar o desenho.</p>}
     </Page>
   );
 }
