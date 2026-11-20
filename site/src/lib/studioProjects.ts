@@ -1,6 +1,6 @@
 export type Pt = [number, number];
 export type Stroke = { pts: Pt[]; ink: string };
-export type Project = { id: string; name: string; description?: string; createdAt: number; updatedAt: number };
+export type Project = { id: string; name: string; createdAt: number; updatedAt: number };
 export type Drawing = { id: string; projectId: string; name: string; createdAt: number; updatedAt: number; strokes: Stroke[]; rev?: number };
 
 // Tudo fica no armazenamento local do navegador: uma lista de projetos e, para cada projeto, uma lista de desenhos.
@@ -104,10 +104,9 @@ export const isPendingImport = (projectId: string) => isPendingProject(projectId
 
 export const getProject = (id: string) => listProjects().find((p) => p.id === id) ?? null;
 
-export function createProject(name: string, description = ''): Project | null {
+export function createProject(name: string): Project | null {
   const now = Date.now();
   const project: Project = { id: newId(), name: name.trim() || 'Sem nome', createdAt: now, updatedAt: now };
-  if (description.trim()) project.description = description.trim();
   return write(PROJECTS_KEY, [...storedProjects(), project]) ? project : null;
 }
 

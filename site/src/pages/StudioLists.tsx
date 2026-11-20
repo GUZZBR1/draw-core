@@ -12,7 +12,7 @@ const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one :
 const INTRO_DELAY_MS = 450;
 const INTRO_MS = 1100;
 
-function Page({ title, sub, desc, back, center, hero, intro, children }: { title: string; sub?: string; desc?: string; hero?: boolean; back: { to: string; label: string }; center?: boolean; intro?: boolean; children: ReactNode }) {
+function Page({ title, sub, back, center, intro, children }: { title: string; sub?: string; back: { to: string; label: string }; center?: boolean; intro?: boolean; children: ReactNode }) {
   const titleRef = useRef<HTMLHeadingElement>(null);
   // Entrada: o titulo nasce grande no meio da tela e sobe ate o lugar dele; so depois o resto aparece.
   useLayoutEffect(() => {
@@ -30,12 +30,11 @@ function Page({ title, sub, desc, back, center, hero, intro, children }: { title
   }, [intro]);
 
   return (
-    <section className={`hub-page${center ? ' is-centered' : ''}${hero ? ' is-hero' : ''}${intro ? ' has-intro' : ''}`}>
+    <section className={`hub-page${center ? ' is-centered' : ''}${intro ? ' has-intro' : ''}`}>
       <Link className="studio-exit" to={back.to}>← {back.label}</Link>
       <div className="hub-head">
         <h1 className="hub-title" ref={titleRef}>{title}</h1>
         {sub && <p className="hub-sub">{sub}</p>}
-        {desc && <p className="hub-desc">{desc}</p>}
       </div>
       {children}
     </section>
@@ -61,11 +60,10 @@ function DeleteButton({ label, onConfirm }: { label: string; onConfirm: () => vo
 export function NewProject() {
   const navigate = useNavigate();
   const [name, setName] = useState('');
-  const [description, setDescription] = useState('');
   const [error, setError] = useState(false);
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    const project = createProject(name, description);
+    const project = createProject(name);
     if (!project) {
       setError(true);
       return;
@@ -77,8 +75,6 @@ export function NewProject() {
       <form className="hub-form" onSubmit={submit}>
         <label htmlFor="project-name">Nome do projeto</label>
         <input id="project-name" value={name} onChange={(e) => setName(e.target.value)} maxLength={60} placeholder="Ex.: Suporte para fone" autoFocus autoComplete="off" />
-        <label htmlFor="project-desc">Descrição <span>(opcional)</span></label>
-        <textarea id="project-desc" value={description} onChange={(e) => setDescription(e.target.value)} maxLength={280} rows={3} placeholder="Do que se trata este projeto?" />
         <button type="submit" className="hub-primary">criar projeto</button>
         {error && <p className="studio-cam-error" role="alert">Sem espaço no navegador para salvar o projeto.</p>}
       </form>
@@ -202,7 +198,7 @@ export function ProjectView() {
   };
 
   return (
-    <Page title={project.name} sub={plural(drawings.length, 'desenho', 'desenhos')} desc={project.description} hero back={{ to: '/app/projects', label: 'projetos' }}>
+    <Page title={project.name} sub={plural(drawings.length, 'desenho', 'desenhos')} back={{ to: '/app/projects', label: 'projetos' }}>
       <ul className="hub-grid">
         {!pending && <li><button type="button" className="hub-card is-new" onClick={add}><span aria-hidden="true">＋</span>Novo</button></li>}
         {drawings.map((d) => (
