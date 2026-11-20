@@ -49,6 +49,7 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
   const clearRef = useRef<(() => void) | undefined>(undefined);
   const [title, setTitle] = useState(drawing.name);
   const readOnly = isPendingImport(drawing.projectId); // importacao ainda nao gravada: nao aceita edicoes
+  const titleRef = useRef(drawing.name); // o que esta no campo agora (a copia so o substitui se nao foi editado)
   const savedName = useRef(drawing.name); // o ultimo nome gravado (drawing.name e o do momento em que abriu)
 
   const saveTimer = useRef(0);
@@ -72,8 +73,12 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
       const copy = saveStrokesAsCopy(drawing.projectId, drawing.name, strokes.current);
       if (copy) {
         target.current = { id: copy.id, rev: copy.rev ?? 0 };
-        savedName.current = copy.name; // o titulo passa a ser o da copia
-        setTitle(copy.name);
+        // a copia e a nova referencia gravada; um titulo que o usuario ja estava editando fica no campo e e salvo ao sair dele
+        if (titleRef.current === savedName.current) {
+          setTitle(copy.name);
+          titleRef.current = copy.name;
+        }
+        savedName.current = copy.name;
         setForked(copy.name);
         result = { status: 'ok', rev: target.current.rev };
       } else {
@@ -110,6 +115,7 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
   const rename = () => {
     const name = title.trim() || 'Sem título';
     setTitle(name);
+    titleRef.current = name;
     if (name === savedName.current) return;
     const ok = saveDrawing(drawing.projectId, target.current.id, { name });
     if (ok) savedName.current = name;
@@ -380,16 +386,20 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
             maxLength={60}
             aria-label="Nome do desenho"
             readOnly={readOnly}
-            onChange={(e) => setTitle(e.target.value)}
+            onChange={(e) => { titleRef.current = e.target.value; setTitle(e.target.value); }}
             onBlur={rename}
             onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
           />
           <span className="studio-pill"><span className={`status-dot${camId ? ' is-live' : ''}`} /> {camId ? `câmera · ${activeCam?.label || 'ativa'}${cloudLabel}` : 'câmera desligada'}</span>
+        </>,
+        slot,
+      )}
+      {(saveError || readOnly || forked) && (
+        <div className="studio-notices">
           {saveError && <span className="studio-save-error" role="alert">sem espaço para salvar — o desenho continua só nesta tela</span>}
           {readOnly && <span className="studio-save-error" role="status">importação pendente: sem espaço para gravar — somente leitura</span>}
           {forked && <span className="studio-save-error" role="status">outra aba alterou este desenho; suas mudanças foram salvas em “{forked}”</span>}
-        </>,
-        slot,
+        </div>
       )}
 
       <section className="studio-stage">

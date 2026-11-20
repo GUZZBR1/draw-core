@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type FormEvent, type Reac
 import { Link, Navigate, useLocation, useNavigate, useParams } from 'react-router-dom';
 import StrokeThumb from '../components/StrokeThumb';
 import {
-  createDrawing, createProject, deleteDrawing, deleteProject, getProject, listDrawings, listProjects, renameProject,
+  createDrawing, createProject, deleteDrawing, deleteProject, getProject, isPendingImport, listDrawings, listProjects, renameProject,
   type Drawing, type Project,
 } from '../lib/studioProjects';
 
@@ -87,6 +87,7 @@ function ProjectCard({ project, onRename, onDelete }: { project: Project; onRena
   const preview = drawings.find((d) => d.strokes.length);
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(project.name);
+  const locked = isPendingImport(project.id); // importacao ainda nao gravada: sem renomear nem excluir
   const cancelled = useRef(false);
   const thumb = preview ? <StrokeThumb strokes={preview.strokes} /> : <span className="studio-thumb is-empty" aria-hidden="true" />;
   const meta = <span className="hub-card-meta">{plural(drawings.length, 'desenho', 'desenhos')} · {fmt(project.updatedAt)}</span>;
@@ -131,12 +132,12 @@ function ProjectCard({ project, onRename, onDelete }: { project: Project; onRena
             <span className="hub-card-name">{project.name}</span>
             {meta}
           </Link>
-          <button type="button" className="hub-edit" aria-label={`Renomear projeto ${project.name}`} onClick={() => { cancelled.current = false; setEditing(true); }}>
+          {!locked && <button type="button" className="hub-edit" aria-label={`Renomear projeto ${project.name}`} onClick={() => { cancelled.current = false; setEditing(true); }}>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20l1-4L16.5 4.5a2 2 0 0 1 3 3L8 19l-4 1zM14.5 6.5l3 3" /></svg>
-          </button>
+          </button>}
         </>
       )}
-      <DeleteButton label={`projeto ${project.name}`} onConfirm={onDelete} />
+      {!locked && <DeleteButton label={`projeto ${project.name}`} onConfirm={onDelete} />}
     </li>
   );
 }
@@ -185,6 +186,7 @@ export function ProjectView() {
   // O editor que acabou de fechar grava na limpeza, depois deste primeiro render: le de novo ao montar.
   useEffect(() => setDrawings(listDrawings(projectId)), [projectId]);
   if (!project) return <Navigate to="/app/projects" replace />;
+  const pending = isPendingImport(project.id); // importacao ainda nao gravada: so leitura
 
   const add = () => {
     const drawing = createDrawing(project.id);
@@ -198,11 +200,12 @@ export function ProjectView() {
   return (
     <Page title={project.name} sub={plural(drawings.length, 'desenho', 'desenhos')} back={{ to: '/app/projects', label: 'projetos' }}>
       <ul className="hub-grid">
-        <li><button type="button" className="hub-card is-new" onClick={add}><span aria-hidden="true">＋</span>Novo</button></li>
+        {!pending && <li><button type="button" className="hub-card is-new" onClick={add}><span aria-hidden="true">＋</span>Novo</button></li>}
         {drawings.map((d) => (
-          <DrawingCard key={d.id} drawing={d} onDelete={() => { deleteDrawing(project.id, d.id); setDrawings(listDrawings(project.id)); }} />
+          <DrawingCard key={d.id} drawing={d} onDelete={pending ? undefined : () => { deleteDrawing(project.id, d.id); setDrawings(listDrawings(project.id)); }} />
         ))}
       </ul>
+      {pending && <p className="studio-cam-error" role="status">Importação pendente: sem espaço no navegador para gravar. Apague desenhos para liberar espaço e abra de novo; por enquanto estes só podem ser vistos.</p>}
       {error && <p className="studio-cam-error" role="alert">Sem espaço no navegador para criar o desenho.</p>}
     </Page>
   );
