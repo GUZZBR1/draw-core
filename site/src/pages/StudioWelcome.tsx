@@ -95,7 +95,7 @@ export default function StudioWelcome() {
 
         <nav className="hub-menu" aria-label="Começar">
           <Link className="hub-item" to="/app/new"><span aria-hidden="true">＋</span>Iniciar novo projeto</Link>
-          <Link className="hub-item" to="/app/projects"><span aria-hidden="true">▤</span>Carregar projeto<em>{projects.length || ''}</em></Link>
+          <Link className="hub-item" to="/app/projects" state={{ intro: true }}><span aria-hidden="true">▤</span>Carregar projeto<em>{projects.length || ''}</em></Link>
           <Link className="hub-item" to="/app/library"><span aria-hidden="true">◫</span>Biblioteca<em>{drawingCount || ''}</em></Link>
         </nav>
       </div>

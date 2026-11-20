@@ -75,6 +75,14 @@ export function createProject(name: string): Project | null {
   return write(PROJECTS_KEY, [...listProjects(), project]) ? project : null;
 }
 
+export function renameProject(id: string, name: string): boolean {
+  const list = listProjects();
+  const project = list.find((p) => p.id === id);
+  if (!project) return false;
+  project.name = name.trim() || project.name;
+  return write(PROJECTS_KEY, list);
+}
+
 export function deleteProject(id: string) {
   write(PROJECTS_KEY, listProjects().filter((p) => p.id !== id));
   try { localStorage.removeItem(drawingsKey(id)); } catch { /* nada a fazer */ }
