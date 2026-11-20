@@ -417,8 +417,10 @@ export default function StudioPage() {
       render();
     };
     loadRef.current = (entry) => {
-      flushAutosave();
-      pendingSave.current = false; // idem: sem isso a saida regravaria o desenho aberto, sem edicao, como copia
+      const saved = flushAutosave();
+      // reabrir o proprio rascunho cuja gravacao falhou: ele ja esta na folha; mantem tracos, sessao e pendente
+      if (!saved && entry.id === sessionRef.current) return;
+      pendingSave.current = false; // outro desenho: o pendente do anterior e descartado (senao a saida o regravaria como copia)
       strokes.current = entry.strokes.map((st) => ({ ink: st.ink, pts: st.pts.map(([x, y]) => [x, y] as Pt) }));
       sessionRef.current = null; // continuar desenhando cria um novo automatico; o original nao e alterado
       render();
