@@ -462,7 +462,9 @@ def _check_models():
     Sem manifesto (o caso de um clone novo), imprime o aviso e
     devolve True: nada a verificar nao e falha. Um .onnx/.task em
     models/ sem entrada no manifesto e FAIL no modo estrito (padrao)
-    e AVISO com DRAW_MODEL_STRICT=0.
+    e AVISO com DRAW_MODEL_STRICT=0. Se algum modelo registrado estiver
+    ausente em models/, tenta baixa-lo da Release oficial antes de
+    conferir.
     """
     manifest_path, models = manifest_module.load_manifest()
     ok = True
@@ -482,6 +484,19 @@ def _check_models():
         return ok
     for name in sorted(models):
         path = manifest_module.DEFAULT_MODELS_DIR / name
+        if not path.exists():
+            try:
+                manifest_module.ensure_models(
+                    [name],
+                    models_dir=manifest_module.DEFAULT_MODELS_DIR,
+                    manifest_path=manifest_path,
+                )
+            except RuntimeError as error:
+                print(
+                    f"AVISO: {name} esta no manifesto e nao esta em models/ "
+                    f"({error}). Baixe os modelos oficiais pela Release do repositorio."
+                )
+                continue
         if not path.exists():
             print(
                 f"AVISO: {name} esta no manifesto e nao esta em models/. "
@@ -1101,6 +1116,37 @@ def _ignore_ink(_publication):
     pass
 
 
+def _is_official_model_target(requested, official_name):
+    """True quando `requested` e None ou aponta para models/<official_name>."""
+    if requested is None:
+        return True
+    official = manifest_module.DEFAULT_MODELS_DIR / official_name
+    req_path = Path(requested)
+    try:
+        return os.path.abspath(req_path) == os.path.abspath(official)
+    except OSError:
+        return False
+
+
+def _provision_official_models(neural_model, page_clean_model, hand_model):
+    """Baixa individualmente cada modelo oficial ausente pedido pela sessao.
+
+    Falha no download de um modelo opcional (ex.: folha ou mao) nao aborta
+    a tentativa de baixar o modelo obrigatorio de tinta (`page_clean_unet.onnx`).
+    """
+    for requested, official_name in (
+        (page_clean_model, "page_clean_unet.onnx"),
+        (neural_model, "draw_seg_v3_dyn.onnx"),
+        (hand_model, "hand_landmarker.task"),
+    ):
+        if not _is_official_model_target(requested, official_name):
+            continue
+        try:
+            manifest_module.ensure_models([official_name])
+        except RuntimeError as error:
+            print(f"Aviso: download automatico de {official_name} falhou ({error}).")
+
+
 def run(
     source=0,
     save_dir="captures",
@@ -1134,6 +1180,8 @@ def run(
     session_report = None
     ink_stream = None
     try:
+        if not markers_mode:
+            _provision_official_models(neural_model, page_clean_model, hand_model)
         neural_detector = None
         if neural_model is None and not markers_mode and _DEFAULT_SHEET_MODEL.exists():
             neural_model = str(_DEFAULT_SHEET_MODEL)

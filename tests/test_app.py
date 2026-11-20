@@ -144,10 +144,72 @@ def test_check_models_avisa_modelo_ausente(monkeypatch, tmp_path, capsys):
         manifest_module, "load_manifest", lambda path=None: (Path("m.json"), fake)
     )
     monkeypatch.setattr(manifest_module, "DEFAULT_MODELS_DIR", tmp_path)
+    monkeypatch.setattr(
+        manifest_module,
+        "ensure_models",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("offline")),
+    )
     assert app_module._check_models() is True
     out = capsys.readouterr().out
     assert "modelo_ausente_xyz.onnx" in out
     assert "Release" in out
+
+
+def test_check_models_baixa_modelo_ausente_e_valida(monkeypatch, tmp_path, capsys):
+    payload = b"binario"
+    sha = manifest_module.hashlib.sha256(payload).hexdigest()
+    fake = {
+        "page_clean_unet.onnx": {
+            "sha256": sha,
+            "bytes": len(payload),
+            "approved_by": "teste",
+        }
+    }
+    manifest_file = tmp_path / "manifest.json"
+    import json
+
+    manifest_file.write_text(json.dumps({"schema": 1, "models": fake}))
+    models_dir = tmp_path / "models"
+    monkeypatch.setattr(
+        manifest_module,
+        "load_manifest",
+        lambda path=None: (manifest_file, fake),
+    )
+    monkeypatch.setattr(manifest_module, "DEFAULT_MODELS_DIR", models_dir)
+
+    def fake_ensure(names=None, **kw):
+        models_dir.mkdir(parents=True, exist_ok=True)
+        target = models_dir / "page_clean_unet.onnx"
+        target.write_bytes(payload)
+        return [target]
+
+    monkeypatch.setattr(manifest_module, "ensure_models", fake_ensure)
+    assert app_module._check_models() is True
+    out = capsys.readouterr().out
+    assert "PASS: page_clean_unet.onnx confere com o manifesto" in out
+
+
+def test_provision_official_models_isolates_failures_and_handles_explicit_official_paths(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(manifest_module, "DEFAULT_MODELS_DIR", tmp_path)
+    requested = []
+
+    def fake_ensure(names):
+        requested.extend(names)
+        if names == ["page_clean_unet.onnx"]:
+            raise RuntimeError("falha no primeiro download")
+        return []
+
+    monkeypatch.setattr(manifest_module, "ensure_models", fake_ensure)
+    explicit_official_ink = str(tmp_path / "page_clean_unet.onnx")
+    custom_hand = str(tmp_path / "outro_dir" / "hand_landmarker.task")
+    app_module._provision_official_models(
+        neural_model=None,
+        page_clean_model=explicit_official_ink,
+        hand_model=custom_hand,
+    )
+    assert requested == ["page_clean_unet.onnx", "draw_seg_v3_dyn.onnx"]
 
 
 def test_check_models_falha_em_limiar_invalido(monkeypatch, tmp_path, capsys):

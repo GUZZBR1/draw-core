@@ -274,3 +274,235 @@ def test_relaxed_mismatch_drops_calibration(tmp_path, capsys):
         assert key not in got
     # A entrada do manifesto em si não é mutada.
     assert manifest.load_manifest(path)[1]["m.onnx"]["runtime_threshold"] == 0.79
+
+
+class _FakeHttpResponse:
+    def __init__(self, payload: bytes):
+        self._payload = payload
+        self._offset = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self, size=-1):
+        if self._offset >= len(self._payload):
+            return b""
+        if size is None or size < 0:
+            chunk = self._payload[self._offset :]
+            self._offset = len(self._payload)
+            return chunk
+        chunk = self._payload[self._offset : self._offset + size]
+        self._offset += len(chunk)
+        return chunk
+
+
+def test_download_model_verifies_sha256_and_size_and_writes_atomically(tmp_path):
+    payload = b"pesos-oficiais-v3"
+    entry = {
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "bytes": len(payload),
+    }
+    seen_urls = []
+
+    def fake_urlopen(request, timeout=None):
+        seen_urls.append((request.full_url, timeout))
+        return _FakeHttpResponse(payload)
+
+    target = manifest.download_model(
+        "page_clean_unet.onnx",
+        entry,
+        models_dir=tmp_path,
+        release_url="https://example.com/releases/download/models-v3",
+        urlopen=fake_urlopen,
+    )
+    assert target == (tmp_path / "page_clean_unet.onnx").resolve()
+    assert target.read_bytes() == payload
+    assert seen_urls == [
+        (
+            "https://example.com/releases/download/models-v3/page_clean_unet.onnx",
+            manifest._DOWNLOAD_TIMEOUT_S,
+        )
+    ]
+
+
+def test_download_model_rejects_hash_mismatch_and_leaves_no_file(tmp_path):
+    payload = b"pesos-corrompidos"
+    entry = {
+        "sha256": "0" * 64,
+        "bytes": len(payload),
+    }
+    with pytest.raises(RuntimeError, match="sha256 divergente"):
+        manifest.download_model(
+            "page_clean_unet.onnx",
+            entry,
+            models_dir=tmp_path,
+            urlopen=lambda req, timeout=None: _FakeHttpResponse(payload),
+        )
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_download_model_rejects_oversized_stream_and_cleans_up(tmp_path):
+    payload = b"x" * 32
+    entry = {
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "bytes": 10,
+    }
+    with pytest.raises(RuntimeError, match="excedeu 10 bytes"):
+        manifest.download_model(
+            "page_clean_unet.onnx",
+            entry,
+            models_dir=tmp_path,
+            urlopen=lambda req, timeout=None: _FakeHttpResponse(payload),
+        )
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_download_model_rejects_path_traversal_and_non_https(tmp_path):
+    entry = {"sha256": "0" * 64, "bytes": 4}
+    with pytest.raises(RuntimeError, match="inválido"):
+        manifest.download_model("../escape.onnx", entry, models_dir=tmp_path)
+    with pytest.raises(RuntimeError, match="https://"):
+        manifest.download_model(
+            "m.onnx",
+            entry,
+            models_dir=tmp_path,
+            release_url="http://example.com/models",
+        )
+
+
+def test_ensure_models_downloads_only_missing_files(tmp_path):
+    existing = _model(tmp_path / "models", "ok.onnx", b"ja-existe")
+    missing_payload = b"novo-modelo"
+    manifest_path = _write_manifest(
+        tmp_path,
+        {
+            "ok.onnx": _entry(existing),
+            "novo.onnx": {
+                "sha256": hashlib.sha256(missing_payload).hexdigest(),
+                "bytes": len(missing_payload),
+            },
+        },
+    )
+    calls = []
+
+    def fake_urlopen(request, timeout=None):
+        calls.append(request.full_url)
+        return _FakeHttpResponse(missing_payload)
+
+    downloaded = manifest.ensure_models(
+        models_dir=tmp_path / "models",
+        manifest_path=manifest_path,
+        urlopen=fake_urlopen,
+    )
+    assert [p.name for p in downloaded] == ["novo.onnx"]
+    assert len(calls) == 1
+    assert (tmp_path / "models" / "novo.onnx").read_bytes() == missing_payload
+    assert existing.read_bytes() == b"ja-existe"
+
+
+def test_ensure_models_accepts_existing_external_symlink_without_rejecting(tmp_path):
+    cache_dir = tmp_path / "external_cache"
+    external_sheet = _model(cache_dir, "draw_seg_v3_dyn.onnx", b"sheet-weights")
+    models_dir = tmp_path / "models"
+    models_dir.mkdir(parents=True, exist_ok=True)
+    (models_dir / "draw_seg_v3_dyn.onnx").symlink_to(external_sheet)
+
+    ink_payload = b"ink-weights"
+    manifest_path = _write_manifest(
+        tmp_path,
+        {
+            "draw_seg_v3_dyn.onnx": _entry(external_sheet),
+            "page_clean_unet.onnx": {
+                "sha256": hashlib.sha256(ink_payload).hexdigest(),
+                "bytes": len(ink_payload),
+            },
+        },
+    )
+
+    downloaded = manifest.ensure_models(
+        models_dir=models_dir,
+        manifest_path=manifest_path,
+        urlopen=lambda req, timeout=None: _FakeHttpResponse(ink_payload),
+    )
+    assert [p.name for p in downloaded] == ["page_clean_unet.onnx"]
+    assert (models_dir / "page_clean_unet.onnx").read_bytes() == ink_payload
+
+
+def test_ensure_models_does_not_overwrite_existing_resolved_target_of_broken_symlink(
+    tmp_path,
+):
+    models_dir = tmp_path / "models"
+    existing_weights = _model(
+        models_dir, "checkpoints/ink.onnx", b"pesos-locais-intactos"
+    )
+    # Symlink atravessa pasta intermediaria inexistente ("scratch/.."),
+    # entao lexical_target.exists() e False no SO, mas Path.resolve()
+    # colapsa "scratch/.." para models/checkpoints/ink.onnx que ja existe.
+    (models_dir / "page_clean_unet.onnx").symlink_to("scratch/../checkpoints/ink.onnx")
+
+    release_payload = b"pesos-da-release"
+    manifest_path = _write_manifest(
+        tmp_path,
+        {
+            "page_clean_unet.onnx": {
+                "sha256": hashlib.sha256(release_payload).hexdigest(),
+                "bytes": len(release_payload),
+            },
+        },
+    )
+    calls = []
+
+    def fake_urlopen(request, timeout=None):
+        calls.append(request.full_url)
+        return _FakeHttpResponse(release_payload)
+
+    downloaded = manifest.ensure_models(
+        models_dir=models_dir,
+        manifest_path=manifest_path,
+        urlopen=fake_urlopen,
+    )
+    assert downloaded == []
+    assert calls == []
+    assert existing_weights.read_bytes() == b"pesos-locais-intactos"
+
+
+def test_download_model_translates_mkstemp_and_replace_oserror_to_runtime_error(
+    tmp_path, monkeypatch
+):
+    payload = b"pesos"
+    entry = {
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "bytes": len(payload),
+    }
+
+    def boom_mkstemp(*a, **kw):
+        raise PermissionError("read-only filesystem")
+
+    monkeypatch.setattr(manifest.tempfile, "mkstemp", boom_mkstemp)
+    with pytest.raises(RuntimeError, match="read-only filesystem") as exc_info:
+        manifest.download_model(
+            "hand_landmarker.task",
+            entry,
+            models_dir=tmp_path,
+            urlopen=lambda req, timeout=None: _FakeHttpResponse(payload),
+        )
+    assert isinstance(exc_info.value.__cause__, PermissionError)
+
+    monkeypatch.undo()
+
+    def boom_replace(src, dst):
+        raise PermissionError("cannot replace target")
+
+    monkeypatch.setattr(manifest.os, "replace", boom_replace)
+    with pytest.raises(RuntimeError, match="cannot replace target") as exc_info2:
+        manifest.download_model(
+            "hand_landmarker.task",
+            entry,
+            models_dir=tmp_path,
+            urlopen=lambda req, timeout=None: _FakeHttpResponse(payload),
+        )
+    assert isinstance(exc_info2.value.__cause__, PermissionError)
+    assert list(tmp_path.iterdir()) == []
