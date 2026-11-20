@@ -1,27 +1,48 @@
 import { useEffect, useRef } from 'react';
 import VisionAsciiPortrait from '../components/VisionAsciiPortrait';
+import { useLang } from '../i18n';
+import type { Bilingual } from '../i18n';
 
-const paragraphs = [
-  'A gente pensa primeiro no papel. Antes de abrir menus, escolher ferramentas ou ajustar camadas, vem um gesto simples: desenhar para descobrir.',
-  'Draw transforma esse gesto em uma ponte em tempo real. Uma câmera acompanha os traços; visão computacional os converte em modelos que podem chegar ao CAD, à robótica e a simuladores — sem interromper o pensamento.',
-  'A visão é que o desenho não termine na captura. Uma linha pode se tornar uma peça, uma parede ou o caminho de um robô. A simulação devolve respostas enquanto a pessoa ainda desenha, para que ideia e modelo evoluam juntos.',
-  'Começamos pela fundação: capturar cada traço com fidelidade, inclusive ao apagar e corrigir. O destino é mais ambicioso: pensar no papel e criar diretamente nos sistemas que projetam, testam e dão forma ao mundo.',
+const TITLE_ONE: Bilingual = { pt: 'O papel é só', en: 'Paper is just' };
+const TITLE_TWO: Bilingual = { pt: 'o início.', en: 'the beginning.' };
+const SIGNOFF: Bilingual = { pt: 'do papel à vida, sem perder o gesto.', en: 'from paper to life, without losing the gesture.' };
+
+const PARAGRAPHS: Bilingual[] = [
+  {
+    pt: 'A gente pensa primeiro no papel. Antes de abrir menus, escolher ferramentas ou ajustar camadas, vem um gesto simples: desenhar para descobrir.',
+    en: 'We think on paper first. Before opening menus, choosing tools or adjusting layers, there is a simple gesture: drawing to discover.',
+  },
+  {
+    pt: 'Draw transforma esse gesto em uma ponte em tempo real. Uma câmera acompanha os traços; visão computacional os converte em modelos que podem chegar ao CAD, à robótica e a simuladores — sem interromper o pensamento.',
+    en: 'Draw turns that gesture into a real-time bridge. A camera follows the strokes; computer vision converts them into models that can reach CAD, robotics and simulators — without interrupting the thought.',
+  },
+  {
+    pt: 'A visão é que o desenho não termine na captura. Uma linha pode se tornar uma peça, uma parede ou o caminho de um robô. A simulação devolve respostas enquanto a pessoa ainda desenha, para que ideia e modelo evoluam juntos.',
+    en: 'The vision is that the drawing does not end at capture. A line can become a part, a wall or the path of a robot. The simulation returns answers while the person is still drawing, so that idea and model evolve together.',
+  },
+  {
+    pt: 'Começamos pela fundação: capturar cada traço com fidelidade, inclusive ao apagar e corrigir. O destino é mais ambicioso: pensar no papel e criar diretamente nos sistemas que projetam, testam e dão forma ao mundo.',
+    en: 'We start with the foundation: capturing every stroke faithfully, including when erasing and correcting. The destination is more ambitious: thinking on paper and creating directly in the systems that design, test and shape the world.',
+  },
 ];
 
 export default function VisionPage() {
+  const { tr } = useLang();
   const titleLineOne = useRef<HTMLSpanElement>(null);
   const titleLineTwo = useRef<HTMLSpanElement>(null);
   const paragraphRefs = useRef<Array<HTMLParagraphElement | null>>([]);
   const signoff = useRef<HTMLSpanElement>(null);
   useEffect(() => {
     const segments: Array<{ element: HTMLElement; text: string; pace: number }> = [];
-    if (titleLineOne.current) segments.push({ element: titleLineOne.current, text: 'O papel é só', pace: 62 });
-    if (titleLineTwo.current) segments.push({ element: titleLineTwo.current, text: 'o início.', pace: 62 });
-    paragraphs.forEach((text, index) => {
+    if (titleLineOne.current) segments.push({ element: titleLineOne.current, text: tr(TITLE_ONE.pt, TITLE_ONE.en), pace: 62 });
+    if (titleLineTwo.current) segments.push({ element: titleLineTwo.current, text: tr(TITLE_TWO.pt, TITLE_TWO.en), pace: 62 });
+    PARAGRAPHS.forEach((paragraph, index) => {
       const element = paragraphRefs.current[index];
-      if (element) segments.push({ element, text, pace: 32 });
+      if (element) segments.push({ element, text: tr(paragraph.pt, paragraph.en), pace: 32 });
     });
-    if (signoff.current) segments.push({ element: signoff.current, text: 'do papel à vida, sem perder o gesto.', pace: 34 });
+    if (signoff.current) segments.push({ element: signoff.current, text: tr(SIGNOFF.pt, SIGNOFF.en), pace: 34 });
+    // Idioma trocado: apaga o que já foi escrito (inclusive a névoa da revelação) antes de digitar de novo.
+    segments.forEach(({ element }) => { element.textContent = ''; });
 
     const motionPreference = window.matchMedia('(prefers-reduced-motion: reduce)');
     const reducedMotion = motionPreference.matches;
@@ -121,25 +142,31 @@ export default function VisionPage() {
 
     timer = window.setTimeout(writeNext, 1200);
     return () => { window.clearTimeout(timer); removeIntent(); };
-  }, [paragraphs]);
+  }, [tr]);
+
+  const titleText = `${tr(TITLE_ONE.pt, TITLE_ONE.en)} ${tr(TITLE_TWO.pt, TITLE_TWO.en)}`;
+  const signoffText = tr(SIGNOFF.pt, SIGNOFF.en);
 
   return (
     <main className="vision-page" id="page-content">
       <VisionAsciiPortrait />
       <header className="vision-intro">
-        <h1 className="vision-headline" aria-label="O papel é só o início.">
+        <h1 className="vision-headline" aria-label={titleText}>
           <span className="vision-title-line" aria-hidden="true" ref={titleLineOne} />
           <span className="vision-title-line" aria-hidden="true" ref={titleLineTwo} />
         </h1>
       </header>
 
       <div className="vision-copy">
-        {paragraphs.map((paragraph, index) => (
-          <p aria-label={paragraph} key={paragraph} ref={(element) => { paragraphRefs.current[index] = element; }} />
-        ))}
+        {PARAGRAPHS.map((paragraph, index) => {
+          const text = tr(paragraph.pt, paragraph.en);
+          return (
+            <p aria-label={text} key={text} ref={(element) => { paragraphRefs.current[index] = element; }} />
+          );
+        })}
       </div>
 
-      <p className="vision-signoff" aria-label="do papel à vida, sem perder o gesto.">
+      <p className="vision-signoff" aria-label={signoffText}>
         <span aria-hidden="true" ref={signoff} />
       </p>
     </main>

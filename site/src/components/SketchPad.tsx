@@ -1,22 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useLang, type Bilingual } from '../i18n';
 
 type Point = { x: number; y: number; pressure: number };
 type Tool = 'pen' | 'eraser';
 type Stroke = { color: string; width: number; tool: Tool; points: Point[] };
 
-const COLORS: { name: string; value: string; display?: string }[] = [
-  { name: 'Grafite', value: 'graphite', display: 'var(--ink)' },
-  { name: 'Terracota', value: '#c65d45' },
-  { name: 'Azul', value: '#527c91' },
-  { name: 'Verde', value: '#78885a' },
-  { name: 'Ocre', value: '#c49a3a' },
-  { name: 'Violeta', value: '#8c719a' },
+const COLORS: { name: Bilingual; value: string; display?: string }[] = [
+  { name: { pt: 'Grafite', en: 'Graphite' }, value: 'graphite', display: 'var(--ink)' },
+  { name: { pt: 'Terracota', en: 'Terracotta' }, value: '#c65d45' },
+  { name: { pt: 'Azul', en: 'Blue' }, value: '#527c91' },
+  { name: { pt: 'Verde', en: 'Green' }, value: '#78885a' },
+  { name: { pt: 'Ocre', en: 'Ochre' }, value: '#c49a3a' },
+  { name: { pt: 'Violeta', en: 'Violet' }, value: '#8c719a' },
 ];
 const SIZES = [
-  { name: 'Fino', value: 2, icon: 4 },
-  { name: 'Médio', value: 4, icon: 7 },
-  { name: 'Grosso', value: 8, icon: 11 },
-  { name: 'Enorme', value: 36, icon: 19 },
+  { name: { pt: 'Fino', en: 'Thin' }, value: 2, icon: 4 },
+  { name: { pt: 'Médio', en: 'Medium' }, value: 4, icon: 7 },
+  { name: { pt: 'Grosso', en: 'Thick' }, value: 8, icon: 11 },
+  { name: { pt: 'Enorme', en: 'Huge' }, value: 36, icon: 19 },
 ];
 const POINT_LIMIT = 5000;
 
@@ -52,6 +53,7 @@ function TrashIcon() {
 }
 
 export default function SketchPad() {
+  const { tr } = useLang();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const strokesRef = useRef<Stroke[]>([]);
   const activeStrokeRef = useRef<Stroke | null>(null);
@@ -270,17 +272,17 @@ export default function SketchPad() {
   }
 
   return (
-    <section className="sketch-section" aria-label="Folha para desenhar">
-      <div className="sketch-toolbar" aria-label="Ferramentas de desenho">
-        <div className="sketch-tool-switch" role="group" aria-label="Ferramenta">
+    <section className="sketch-section" aria-label={tr('Folha para desenhar', 'Sheet to draw on')}>
+      <div className="sketch-toolbar" aria-label={tr('Ferramentas de desenho', 'Drawing tools')}>
+        <div className="sketch-tool-switch" role="group" aria-label={tr('Ferramenta', 'Tool')}>
           {(['pen', 'eraser'] as const).map((option) => (
             <button
               className={`sketch-tool-button${tool === option ? ' is-selected' : ''}`}
               key={option}
               type="button"
-              aria-label={option === 'pen' ? 'Caneta' : 'Borracha'}
+              aria-label={option === 'pen' ? tr('Caneta', 'Pen') : tr('Borracha', 'Eraser')}
               aria-pressed={tool === option}
-              title={option === 'pen' ? 'Caneta' : 'Borracha'}
+              title={option === 'pen' ? tr('Caneta', 'Pen') : tr('Borracha', 'Eraser')}
               onClick={() => setTool(option)}
             >
               <ToolIcon tool={option} />
@@ -288,16 +290,19 @@ export default function SketchPad() {
           ))}
         </div>
         <span className="sketch-toolbar-divider" aria-hidden="true" />
-        <div className="sketch-palette" role="group" aria-label="Cor do traço">
+        <div className="sketch-palette" role="group" aria-label={tr('Cor do traço', 'Stroke color')}>
           {COLORS.map((swatch) => (
             <button
               className={`sketch-swatch${color === swatch.value ? ' is-selected' : ''}`}
               key={swatch.value}
               type="button"
               style={{ '--swatch': swatch.display ?? swatch.value } as React.CSSProperties}
-              aria-label={`${swatch.name}${color === swatch.value ? ', selecionada' : ''}`}
+              aria-label={tr(
+                `${swatch.name.pt}${color === swatch.value ? ', selecionada' : ''}`,
+                `${swatch.name.en}${color === swatch.value ? ', selected' : ''}`,
+              )}
               aria-pressed={color === swatch.value}
-              title={swatch.name}
+              title={tr(swatch.name.pt, swatch.name.en)}
               onClick={() => {
                 setColor(swatch.value);
                 setTool('pen');
@@ -306,15 +311,15 @@ export default function SketchPad() {
           ))}
         </div>
         <span className="sketch-toolbar-divider sketch-size-divider" aria-hidden="true" />
-        <div className="sketch-size-options" role="group" aria-label="Espessura do traço">
+        <div className="sketch-size-options" role="group" aria-label={tr('Espessura do traço', 'Stroke width')}>
           {SIZES.map((size) => (
             <button
               className={`sketch-size${brushSize === size.value ? ' is-selected' : ''}`}
               key={size.value}
               type="button"
-              aria-label={`Traço ${size.name.toLowerCase()}`}
+              aria-label={tr(`Traço ${size.name.pt.toLowerCase()}`, `${size.name.en} stroke`)}
               aria-pressed={brushSize === size.value}
-              title={`Traço ${size.name.toLowerCase()}`}
+              title={tr(`Traço ${size.name.pt.toLowerCase()}`, `${size.name.en} stroke`)}
               onClick={() => setBrushSize(size.value)}
             >
               <span style={{ width: size.icon, height: size.icon }} />
@@ -325,8 +330,8 @@ export default function SketchPad() {
         <button
           className="sketch-tool-button sketch-clear-button"
           type="button"
-          aria-label="Apagar tudo"
-          title="Apagar tudo"
+          aria-label={tr('Apagar tudo', 'Clear all')}
+          title={tr('Apagar tudo', 'Clear all')}
           onClick={clearAll}
         >
           <TrashIcon />
@@ -345,9 +350,9 @@ export default function SketchPad() {
           }
         }}
       >
-        Mostrar menu
+        {tr('Mostrar menu', 'Show menu')}
       </button>
-      <p className="sketch-hint" aria-hidden="true">Toque e arraste, solte quando terminar</p>
+      <p className="sketch-hint" aria-hidden="true">{tr('Toque e arraste, solte quando terminar', 'Touch and drag, release when done')}</p>
       <span
         ref={previewRef}
         className="sketch-brush-preview"
@@ -357,7 +362,7 @@ export default function SketchPad() {
       <canvas
         ref={canvasRef}
         className="sketch-canvas"
-        aria-label="Folha de desenho em branco. Use mouse, toque ou caneta para desenhar."
+        aria-label={tr('Folha de desenho em branco. Use mouse, toque ou caneta para desenhar.', 'Blank drawing sheet. Use mouse, touch or pen to draw.')}
         tabIndex={0}
         onPointerDown={beginStroke}
         onPointerMove={(event) => { trackPointer(event); continueStroke(event); }}
@@ -368,7 +373,7 @@ export default function SketchPad() {
         onLostPointerCapture={finishStroke}
         onContextMenu={(event) => event.preventDefault()}
       >
-        Canvas indisponível neste navegador.
+        {tr('Canvas indisponível neste navegador.', 'Canvas unavailable in this browser.')}
       </canvas>
     </section>
   );

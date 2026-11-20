@@ -22,3 +22,6 @@ logs/
 .DS_Store
 .idea/
 .vscode/
+
+site/.env.local
+site/.env*.local
