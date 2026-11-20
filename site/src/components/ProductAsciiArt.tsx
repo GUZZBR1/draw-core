@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { cellNoise, chooseGlyph, cssColor, luminance, parseRgb, rankGlyphs } from '../lib/ascii';
+import { cellNoise, chooseGlyph, cssColor, inkOnLight, luminance, parseRgb, rankGlyphs } from '../lib/ascii';
 
 const SAMPLE_SIZE = 3;
 const REVEAL_DURATION = 4.6;
@@ -8,17 +8,20 @@ const ALT = 'Um macaco de capacete conversa com um australopiteco sobre uma plan
 
 // Cor da tinta no tema claro: tons naturais (marrons e pele nao viram preto)
 // e branco trocado por um cinza suave.
-function lightInk(red: number, green: number, blue: number, ink: string, muted: string) {
+function lightInk(red: number, green: number, blue: number, ink: string, muted: string, deep = false) {
   if (Math.max(red, green, blue) < 45) return ink;
-  if (luminance([red, green, blue]) > 0.72) return muted;
+  if (luminance([red, green, blue]) > 0.72) return deep ? 'rgb(122, 104, 84)' : muted;
+  if (deep) return inkOnLight(red, green, blue, 0.07, 1.4);
   // Mesma paleta do tema escuro, so um pouco mais profunda para ler no papel.
-  const tone = (value: number) => Math.round(Math.max(0, Math.min(255, (value * 1.3 + 30) * 0.8)));
+  const tone = (value: number) => Math.round(Math.max(0, Math.min(255, (value * 1.3 + 30) * (deep ? 0.55 : 0.8))));
   return `rgb(${tone(red)}, ${tone(green)}, ${tone(blue)})`;
 }
 
 type Cell = { character: string; fill: string; appearAt: number; x: number; y: number };
 
-export default function ProductAsciiArt() {
+type Props = { src?: string; alt?: string; className?: string; decorative?: boolean; richLight?: boolean };
+
+export default function ProductAsciiArt({ src = '/images/product-construction-diorama.png', alt = ALT, className = 'construction-ascii', decorative = false, richLight = false }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -29,7 +32,7 @@ export default function ProductAsciiArt() {
 
     const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
     const image = new Image();
-    image.src = '/images/product-construction-diorama.png';
+    image.src = src;
     const source = document.createElement('canvas');
     const sourceContext = source.getContext('2d', { willReadFrequently: true });
     if (!sourceContext) return;
@@ -162,13 +165,13 @@ export default function ProductAsciiArt() {
           const stretched = Math.max(0, Math.min(1, (tones[index] - low) / Math.max(0.01, high - low)));
           const detail = tones[index] - (counts[index] ? sums[index] / counts[index] : 0);
           const base = light ? 1 - stretched : 0.18 + 0.82 * stretched;
-          const density = Math.max(light ? 0.22 : 0.08, Math.min(1, base + (light ? -4 : 4) * detail)) * Math.min(1, coverage[index] * 1.4);
+          const density = Math.max(light ? (richLight ? 0.75 : 0.22) : 0.08, Math.min(1, base + (light ? -4 : 4) * detail)) * Math.min(1, coverage[index] * 1.4);
           const glyph = chooseGlyph(glyphs, density * maxDarkness);
           if (glyph.darkness < (light ? 0.004 : 0.012)) continue;
           next.push({
             character: glyph.character,
             fill: light
-              ? lightInk(rgb[index * 3], rgb[index * 3 + 1], rgb[index * 3 + 2], ink, muted)
+              ? lightInk(rgb[index * 3], rgb[index * 3 + 1], rgb[index * 3 + 2], ink, muted, richLight)
               : `rgb(${channel(rgb[index * 3])}, ${channel(rgb[index * 3 + 1])}, ${channel(rgb[index * 3 + 2])})`,
             appearAt: (row / rows) * 0.55 + cellNoise(col, row) * 0.4,
             x: col * cellW,
@@ -237,10 +240,10 @@ export default function ProductAsciiArt() {
       resizeObserver.disconnect();
       themeObserver.disconnect();
     };
-  }, []);
+  }, [src]);
 
   return (
-    <div className="construction-ascii" role="img" aria-label={ALT}>
+    <div className={className} {...(decorative ? { 'aria-hidden': true } : { role: 'img', 'aria-label': alt })}>
       <canvas aria-hidden="true" className="construction-ascii-canvas" ref={canvasRef} />
     </div>
   );

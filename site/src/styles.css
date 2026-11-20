@@ -624,7 +624,7 @@ body:not(.dark) .scrollbar-control:focus-visible .scrollbar-thumb { background-c
 }
 .vision-portrait-canvas { display: block; width: min(100%, 440px); height: auto; }
 .vision-headline {
-  @apply mb-0 mt-6 font-sans text-[clamp(36px,7.4vw,92px)] font-medium leading-[1.04] tracking-[-.045em] text-ink; word-spacing: .1em;
+  @apply mb-0 mt-6 font-sans text-[clamp(36px,7.4vw,92px)] font-extrabold leading-[1.04] tracking-[-.035em] text-ink; word-spacing: .1em;
 }
 .vision-title-line {
   display: block;
@@ -967,24 +967,65 @@ body.dark .studio-save-error { color: #f0a498; }
 .hub-page.has-intro { animation: none; }
 
 /* Papers: as propostas de artigo giram numa elipse em volta do titulo. */
+.papers-ascii-bg { position: fixed; left: 50%; top: 50%; z-index: 0; width: min(78vw, 78svh); transform: translate(-50%, -50%); opacity: .5; pointer-events: none; user-select: none; }
+.papers-ascii-bg .construction-ascii-canvas { aspect-ratio: 1; }
+.papers-more { position: relative; z-index: 1; }
 .papers { position: relative; display: grid; min-height: 100svh; place-items: center; padding: 96px 16px 56px; overflow: hidden; }
 .papers-orbit { position: absolute; inset: 84px 12px 28px; }
-.papers-card { position: absolute; left: 50%; top: 50%; display: grid; gap: 6px; width: clamp(104px, 15vw, 168px); padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--ink) 14%, transparent); border-radius: 18px; background: color-mix(in srgb, var(--paper) 72%, transparent); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); box-shadow: 0 10px 30px rgba(34, 35, 31, .08); color: var(--ink); text-align: left; cursor: pointer; will-change: transform; transition: border-color .2s, background-color .2s; }
+.papers-card { position: absolute; left: 50%; top: 50%; display: grid; gap: 6px; width: clamp(104px, 15vw, 168px); padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--ink) 14%, transparent); border-radius: 18px; background: color-mix(in srgb, var(--paper) 92%, transparent); box-shadow: 0 10px 30px rgba(34, 35, 31, .08); color: var(--ink); text-align: left; cursor: pointer; will-change: transform, opacity; backface-visibility: hidden; transition: border-color .2s, background-color .2s; }
 .papers-card:hover, .papers-card:focus-visible, .papers-card.is-open { border-color: color-mix(in srgb, var(--ink) 38%, transparent); background: color-mix(in srgb, var(--accent) 38%, var(--paper)); outline: 0; }
 .papers-card-n { font: 400 11px 'DM Mono', monospace; letter-spacing: .08em; color: var(--muted); }
 .papers-card-name { font: 500 clamp(13px, 1.5vw, 16px)/1.15 Manrope, system-ui, sans-serif; letter-spacing: -.02em; }
 .papers.has-open .papers-card { z-index: 5 !important; } /* com um artigo aberto, o painel fica por cima de todos os cartoes */
 .papers-center { position: relative; z-index: 10; display: grid; justify-items: center; gap: 14px; width: min(560px, 100%); text-align: center; pointer-events: none; }
 .papers-center > * { pointer-events: auto; }
-.papers-title { margin: 0; font: 500 clamp(52px, 11vw, 132px)/1 Manrope, system-ui, sans-serif; letter-spacing: -.05em; color: var(--ink); }
-.papers-line { margin: 0; max-width: 28ch; font: 400 clamp(13px, 1.5vw, 16px)/1.6 'DM Mono', monospace; color: var(--muted); animation: papers-line 4.8s ease both; }
-@keyframes papers-line { 0% { opacity: 0; filter: blur(8px); } 14%, 84% { opacity: 1; filter: none; } 100% { opacity: 0; filter: blur(6px); } }
+.papers-title { margin: 0; font: 800 clamp(52px, 11vw, 132px)/.83 Manrope, system-ui, sans-serif; letter-spacing: -.035em; /* mesma voz do wordmark Draw */ padding-bottom: .2em; /* folga p/ as hastes de p e s nao tocarem o texto */ color: var(--ink); text-shadow: 0 0 .12em var(--paper), 0 0 .3em var(--paper), 0 0 .6em color-mix(in srgb, var(--paper) 80%, transparent), 0 .04em .08em color-mix(in srgb, var(--ink) 35%, transparent); }
+.papers-line { margin: 0; max-width: 36ch; text-wrap: balance; font: 400 clamp(13px, 1.5vw, 16px)/1.6 'DM Mono', monospace; color: var(--muted); animation: papers-line 4.8s ease both; }
+@keyframes papers-line { 0% { opacity: 0; transform: translateY(6px); } 14%, 84% { opacity: 1; transform: none; } 100% { opacity: 0; transform: translateY(-4px); } }
 .papers-detail { display: grid; gap: 10px; justify-items: center; padding: 18px; border: 1px solid color-mix(in srgb, var(--ink) 14%, transparent); border-radius: 22px; background: color-mix(in srgb, var(--paper) 86%, transparent); backdrop-filter: blur(22px); -webkit-backdrop-filter: blur(22px); box-shadow: 0 18px 54px rgba(36, 37, 32, .12); }
 .papers-detail-kicker { margin: 0; font: 400 10px 'DM Mono', monospace; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
 .papers-detail-title { margin: 0; font: 500 clamp(16px, 2.2vw, 21px)/1.25 Manrope, system-ui, sans-serif; letter-spacing: -.03em; }
 .papers-detail-blurb { margin: 0; font: 400 14px/1.6 Manrope, system-ui, sans-serif; color: var(--muted); }
-.papers-detail-figure { width: 100%; height: auto; border-radius: 14px; }
+.papers-detail-actions { display: flex; align-items: center; gap: 18px; }
+.papers-open { padding: 8px 18px; border: 1px solid var(--ink); border-radius: 999px; background: var(--ink); color: var(--paper); font: 400 12px 'DM Mono', monospace; letter-spacing: .06em; text-decoration: none; transition: opacity .2s; }
+.papers-open:hover, .papers-open:focus-visible { opacity: .82; outline: 0; }
 .papers-close { padding: 2px 0; border: 0; border-bottom: 1px solid color-mix(in srgb, var(--ink) 25%, transparent); background: none; color: var(--ink); font: 400 12px 'DM Mono', monospace; cursor: pointer; }
 body:not(.dark) .papers-card-n, body:not(.dark) .papers-line, body:not(.dark) .papers-detail-kicker, body:not(.dark) .papers-detail-blurb { color: #4a4b45; }
 @media (max-width: 640px) { .papers-orbit { inset: 80px 6px 20px; } .papers-card { width: 96px; padding: 9px 10px; border-radius: 14px; } }
 @media (prefers-reduced-motion: reduce) { .papers-line { animation: none; } .papers-card { transition: none; } }
+
+/* Leitura de um artigo (/papers/:n). */
+.article { max-width: 680px; margin: 0 auto; padding: 112px 20px 96px; color: var(--ink); }
+.article-back { display: inline-block; margin-bottom: 28px; font: 400 12px 'DM Mono', monospace; letter-spacing: .06em; color: var(--muted); text-decoration: none; border-bottom: 1px solid color-mix(in srgb, var(--ink) 22%, transparent); }
+.article-back:hover { color: var(--ink); }
+.article h1 { margin: 0 0 18px; font: 600 clamp(26px, 4.4vw, 38px)/1.18 Manrope, system-ui, sans-serif; letter-spacing: -.035em; text-wrap: balance; }
+.article-meta { margin: 0 0 28px; padding: 14px 0; border-block: 1px solid color-mix(in srgb, var(--ink) 14%, transparent); font: 400 12px/1.8 'DM Mono', monospace; color: var(--muted); }
+.article h2 { margin: 40px 0 10px; font: 600 13px 'DM Mono', monospace; letter-spacing: .1em; text-transform: uppercase; color: var(--ink); }
+.article p { margin: 0 0 14px; font: 400 17px/1.75 Georgia, 'Times New Roman', serif; }
+.article-nav { display: flex; justify-content: space-between; gap: 16px; margin-top: 56px; padding-top: 18px; border-top: 1px solid color-mix(in srgb, var(--ink) 14%, transparent); font: 400 12px 'DM Mono', monospace; }
+.article-nav a { color: var(--ink); text-decoration: none; }
+body:not(.dark) .article-meta { color: #4a4b45; }
+
+/* Papers: subprojetos, logo abaixo do carrossel. */
+.papers-more { max-width: 680px; margin: 0 auto; padding: 160px 20px 120px; color: var(--ink); }
+.papers-more-kicker { margin: 0 0 8px; font: 400 11px 'DM Mono', monospace; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+.papers-more-title { margin: 0 0 14px; font: 800 clamp(30px, 5vw, 44px)/1 Manrope, system-ui, sans-serif; letter-spacing: -.035em; }
+.papers-more-lead { margin: 0 0 28px; font: 400 16px/1.7 Manrope, system-ui, sans-serif; color: var(--muted); }
+.papers-sub { display: grid; gap: 10px; padding: 22px; border: 1px solid color-mix(in srgb, var(--ink) 14%, transparent); border-radius: 22px; background: color-mix(in srgb, var(--paper) 86%, transparent); color: var(--ink); text-decoration: none; transition: border-color .2s, transform .2s; }
+.papers-sub:hover, .papers-sub:focus-visible { border-color: color-mix(in srgb, var(--ink) 38%, transparent); transform: translateY(-2px); outline: 0; }
+.papers-sub-name { font: 800 28px/1 Manrope, system-ui, sans-serif; letter-spacing: -.035em; }
+.papers-sub-name { display: inline-flex; align-items: center; gap: 10px; }
+.papers-sub-gh { width: 24px; height: 24px; flex: none; }
+.papers-sub-text { font: 400 15px/1.7 Manrope, system-ui, sans-serif; color: var(--muted); }
+.papers-sub-link { font: 400 12px 'DM Mono', monospace; letter-spacing: .04em; }
+body:not(.dark) .papers-more-kicker, body:not(.dark) .papers-more-lead, body:not(.dark) .papers-sub-text { color: #4a4b45; }
+
+/* Subprojetos: cada bloco emerge da neblina (desfoque + opacidade) quando a secao entra na tela. */
+.papers-more > * { opacity: 0; filter: blur(14px); transform: translateY(18px); transition: opacity 1100ms cubic-bezier(.22,.61,.36,1), filter 1100ms cubic-bezier(.22,.61,.36,1), transform 1100ms cubic-bezier(.22,.61,.36,1); }
+.papers-more.is-in > * { opacity: 1; filter: none; transform: none; }
+.papers-more.is-in > :nth-child(2) { transition-delay: 150ms; }
+.papers-more.is-in > :nth-child(3) { transition-delay: 300ms; }
+.papers-more.is-in > :nth-child(4) { transition-delay: 500ms; }
+@media (prefers-reduced-motion: reduce) { .papers-more > * { opacity: 1; filter: none; transform: none; transition: none; } }
+.papers-more.is-in > .papers-sub { transition: border-color .2s, transform .2s, opacity 1100ms, filter 1100ms; }
+.papers-more.is-in > .papers-sub:hover, .papers-more.is-in > .papers-sub:focus-visible { transform: translateY(-2px); }
