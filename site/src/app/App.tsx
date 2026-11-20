@@ -5,6 +5,7 @@ import ScrollbarControl from '../components/ScrollbarControl';
 import SiteHeader from '../components/SiteHeader';
 import HomePage from '../pages/HomePage';
 import ProductPage from '../pages/ProductPage';
+import StudioPage from '../pages/StudioPage';
 import VisionPage from '../pages/VisionPage';
 
 export default function App() {
@@ -16,14 +17,16 @@ export default function App() {
     document.body.classList.toggle('home-scroll', location.pathname === '/');
   }, [location.pathname]);
 
+  const inStudio = location.pathname === '/app';
+
   return (
     <>
-      <SiteHeader
+      {!inStudio && <SiteHeader
         onRepeatProduct={() => {
           setProductRefresh((revision) => revision + 1);
           window.scrollTo({ top: 0, behavior: 'instant' });
         }}
-      />
+      />}
       <motion.div
         className="route-transition"
         key={location.pathname}
@@ -35,10 +38,11 @@ export default function App() {
           <Route path="/" element={<HomePage />} />
           <Route path="/vision" element={<VisionPage />} />
           <Route path="/product" element={<ProductPage key={productRefresh} />} />
+          <Route path="/app" element={<StudioPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </motion.div>
-      <ScrollbarControl />
+      {!inStudio && <ScrollbarControl />}
     </>
   );
 }
