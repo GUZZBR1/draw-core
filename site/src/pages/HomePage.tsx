@@ -1,13 +1,43 @@
+import { useEffect, useState } from 'react';
 import { historicDrawings } from '../data/historic-drawings';
 import SketchPad from '../components/SketchPad';
 
+// Tempo que cada cartao fica em destaque (igual ao hover) antes de passar ao proximo.
+const HIGHLIGHT_MS = 7000;
+
 export default function HomePage() {
+  const [active, setActive] = useState(0);
+  useEffect(() => {
+    // Com "reduzir movimento" nao ha destaque automatico (nenhum cartao fica
+    // marcado); so o hover reage. Acompanha mudancas da preferencia ao vivo.
+    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)');
+    let timer = 0;
+    const sync = () => {
+      window.clearInterval(timer);
+      if (reduce.matches) {
+        setActive(-1);
+        return;
+      }
+      setActive(0);
+      timer = window.setInterval(
+        () => setActive((current) => (current + 1) % historicDrawings.length),
+        HIGHLIGHT_MS,
+      );
+    };
+    sync();
+    reduce.addEventListener('change', sync);
+    return () => {
+      window.clearInterval(timer);
+      reduce.removeEventListener('change', sync);
+    };
+  }, []);
+
   return (
     <main className="home-stage" id="page-content" aria-label="Draw, início">
       <section className="archive-gallery" aria-label="Desenhos que abriram caminhos">
         {historicDrawings.map((drawing, index) => (
           <a
-            className="archive-card"
+            className={`archive-card${index === active ? ' is-active' : ''}`}
             href={drawing.source}
             key={drawing.title}
             target="_blank"

@@ -156,7 +156,14 @@ export default function SketchPad() {
   }, [repaint]);
 
   useEffect(() => {
-    const themeObserver = new MutationObserver(repaint);
+    let wasDark = document.body.classList.contains('dark');
+    const themeObserver = new MutationObserver(() => {
+      // So repinta quando o tema muda; outras classes (is-sketching) nao importam.
+      const isDark = document.body.classList.contains('dark');
+      if (isDark === wasDark) return;
+      wasDark = isDark;
+      repaint();
+    });
     themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
     return () => themeObserver.disconnect();
   }, [repaint]);
@@ -174,6 +181,31 @@ export default function SketchPad() {
     };
   }, [resizeCanvas]);
 
+  // Com o primeiro risco o header sobe e libera a folha; volta quando o
+  // ponteiro encosta no topo da janela ou a pagina rola.
+  useEffect(() => {
+    const body = document.body;
+    const reveal = () => body.classList.remove('is-sketching');
+    const onMove = (event: PointerEvent) => {
+      if (event.clientY <= 48 && activePointerRef.current === null) reveal();
+    };
+    let lastY = window.scrollY;
+    const onScroll = () => {
+      if (!body.classList.contains('is-sketching')) {
+        lastY = window.scrollY;
+        return;
+      }
+      if (Math.abs(window.scrollY - lastY) > 24) reveal();
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('scroll', onScroll);
+      reveal();
+    };
+  }, []);
+
   function makePoint(clientX: number, clientY: number, pressure: number, bounds: DOMRect): Point {
     return {
       x: Math.max(0, Math.min(1, (clientX - bounds.left) / bounds.width)),
@@ -190,6 +222,9 @@ export default function SketchPad() {
     activeBoundsRef.current = bounds;
     const point = makePoint(event.clientX, event.clientY, event.pressure, bounds);
     activePointerRef.current = event.pointerId;
+    if (!document.body.classList.contains('is-sketching')) {
+      document.body.classList.add('is-sketching');
+    }
     activeStrokeRef.current = { color, width: brushSize, tool, points: [point] };
     paintStroke(event.currentTarget.getContext('2d')!, activeStrokeRef.current, event.currentTarget.clientWidth, event.currentTarget.clientHeight);
   }
@@ -297,6 +332,21 @@ export default function SketchPad() {
           <TrashIcon />
         </button>
       </div>
+      <button
+        className="sketch-show-nav"
+        type="button"
+        onClick={(event) => {
+          document.body.classList.remove('is-sketching');
+          // Acionado pelo teclado (detail 0): leva o foco ao menu que voltou.
+          if (event.detail === 0) {
+            requestAnimationFrame(() =>
+              document.querySelector<HTMLElement>('.site-header a[href], .site-header button')?.focus(),
+            );
+          }
+        }}
+      >
+        Mostrar menu
+      </button>
       <p className="sketch-hint" aria-hidden="true">Toque e arraste, solte quando terminar</p>
       <span
         ref={previewRef}
