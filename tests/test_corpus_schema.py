@@ -115,6 +115,78 @@ def test_v2_full_clip_loads_and_validate_catches_bad_fields(tmp_path):
         load_clip(clip_dir)
 
 
+def test_validate_clip_rejects_bad_region_boxes(tmp_path):
+    """Caixas de regions.json: mesma régua que o replay usa ao fatiar."""
+    clip_dir = tmp_path / "regioes"
+    _write_frames(clip_dir, count=2)
+    init_clip(clip_dir, fps=8.0)
+
+    # Coordenada faltante: antes passava no check e abortava no replay.
+    _write_json(clip_dir / "regions.json", {"writing": [[10, 20, 40]]})
+    assert any("writing[0]" in p for p in validate_clip(clip_dir))
+
+    # Invertida: antes voltava fatia vazia e contagem zero enganosa.
+    _write_json(clip_dir / "regions.json", {"writing": [[40, 20, 10, 50]]})
+    assert any("limites" in p for p in validate_clip(clip_dir))
+
+    # Fora do canvas (retrato a4 = 850x1200) e chave desconhecida.
+    _write_json(clip_dir / "regions.json", {"writing": [[0, 0, 2000, 2000]]})
+    assert any("canvas" in p for p in validate_clip(clip_dir))
+    _write_json(clip_dir / "regions.json", {"writting": [[0, 0, 10, 10]]})
+    assert any("desconhecida" in p for p in validate_clip(clip_dir))
+
+    _write_json(
+        clip_dir / "regions.json",
+        {"writing": [[0, 0, 100, 100]], "ruling_only": [[10, 10, 800, 1100]]},
+    )
+    assert validate_clip(clip_dir) == []
+
+
+def test_validate_clip_checks_expected_scopes(tmp_path):
+    """frames/region das regras sao validados contra clipe e canvas."""
+    clip_dir = tmp_path / "escopo"
+    _write_frames(clip_dir, count=2)
+    _write_json(
+        clip_dir / "clip.json",
+        {
+            "version": 2,
+            "scene_fps": 8.0,
+            "frames": 2,
+            "desc": "escopo",
+            "expected": [
+                {"rule": "ink_present", "min_px": 10, "frames": [0, 5]},
+                {"rule": "no_ink", "region": [50, 50, 10, 10]},
+                {"rule": "canvas_stable", "region": [0, 0, 3000, 10]},
+                {"rule": "no_ink", "frames": [-2, 1]},
+            ],
+        },
+    )
+    joined = "\n".join(validate_clip(clip_dir))
+    assert "fora do clipe" in joined  # frames [0,5] num clipe de 2 quadros
+    assert "limites" in joined  # region invertida
+    assert "canvas" in joined  # region fora da grade 850x1200
+    assert "0 <= a <= b" in joined  # frames negativo
+
+    _write_json(
+        clip_dir / "clip.json",
+        {
+            "version": 2,
+            "scene_fps": 8.0,
+            "frames": 2,
+            "desc": "escopo",
+            "expected": [
+                {
+                    "rule": "ink_present",
+                    "min_px": 10,
+                    "frames": [0, 1],
+                    "region": [0, 0, 100, 100],
+                }
+            ],
+        },
+    )
+    assert validate_clip(clip_dir) == []
+
+
 def test_count_frames_ignores_non_frame_pngs(tmp_path):
     clip_dir = tmp_path / "c_extra"
     _write_frames(clip_dir, count=2)

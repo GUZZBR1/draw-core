@@ -487,7 +487,15 @@ def _region_px(mask, boxes):
 
 
 def run_clip(
-    clip_dir, flags, *, detector=None, page_clean=None, verify=None, frame_files=None
+    clip_dir,
+    flags,
+    *,
+    detector=None,
+    page_clean=None,
+    verify=None,
+    frame_files=None,
+    trace=False,
+    scopes=None,
 ):
     """Roda um clipe pelo laço real do app e devolve as medidas.
 
@@ -497,6 +505,9 @@ def run_clip(
     ``frame_files`` é um inventário de quadros explícito e ordenado (o
     corpus passa os ``f*.png`` registrados); ``None`` deixa o replay
     descobrir os frames genericamente (``raw/`` ou o próprio dir).
+    Com ``trace``, ``_trace`` traz (quadro, px confirmado, geração) por
+    frame; cada reta (x0, y0, x1, y1) de ``scopes`` ganha sua série de px
+    confirmado por quadro em ``_scope_px`` (mesma ordem de ``_trace``).
     """
     import lab.replay_lab as rl
     from draw import config
@@ -505,8 +516,20 @@ def run_clip(
     clip_dir = Path(clip_dir)
     meta = json.loads((clip_dir / "clip.json").read_text())
     config.apply_format("a4", meta.get("orientation", "retrato"))
+    regions = None
+    regions_path = clip_dir / "regions.json"
+    if regions_path.exists():
+        # Mesma régua do `corpus check`: caixa inválida falha ANTES do
+        # replay (coordenada faltante abortava no fim; invertida zerava).
+        from lab.corpus.clip import parse_regions
+
+        regions = parse_regions(
+            json.loads(regions_path.read_text()),
+            size=(config.PAPER_W, config.PAPER_H),
+        )
     series = []
     retracted = {"carry": 0, "last": 0}
+    scope_px = {tuple(rect): [] for rect in scopes or ()}
 
     def _track_retractions(stats):
         # O acumulador zera quando a folha muda: o que já foi retratado antes
@@ -523,13 +546,34 @@ def run_clip(
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             holder["loop"] = self
+            self._scope_open = False
 
         def step(self, packet):
+            # Quadro novo: a última amostra de collect_ink do passo é a
+            # do quadro — mesma posição que o registro do run_replay.
+            self._scope_open = True
             result = super().step(packet)
             stats = self.ink_worker.stats()
             series.append(stats.get("provisional_px") or 0)
             _track_retractions(stats)
             return result
+
+        def collect_ink(self):
+            out = super().collect_ink()
+            if scope_px:
+                if self._scope_open:
+                    for counts in scope_px.values():
+                        counts.append(0)
+                    self._scope_open = False
+                mask = self.clean_mask
+                for (x0, y0, x1, y1), counts in scope_px.items():
+                    if counts:
+                        counts[-1] = (
+                            0
+                            if mask is None
+                            else int(np.count_nonzero(mask[y0:y1, x0:x1]))
+                        )
+            return out
 
     pipeline_module.Pipeline = Spy
     wall0, cpu0 = time.perf_counter(), time.process_time()
@@ -573,13 +617,18 @@ def run_clip(
         "wall_s": wall,
     }
     out["retracted_over_canvas"] = _frac(out["retracted_px_total"], out["canvas_px"])
-    regions = clip_dir / "regions.json"
-    if regions.exists():
-        spec = json.loads(regions.read_text())
-        out["writing_px"] = _region_px(mask, spec.get("writing", []))
-        out["ruling_px"] = _region_px(mask, spec.get("ruling_only", []))
+    if regions is not None:
+        out["writing_px"] = _region_px(mask, regions.get("writing", []))
+        out["ruling_px"] = _region_px(mask, regions.get("ruling_only", []))
         out["ruling_over_writing"] = _frac(out["ruling_px"], out["writing_px"])
     out["_canvas"] = mask
+    if trace:
+        out["_trace"] = [
+            {"frame": r["frame"], "px": r["canvas_px"], "gen": r["generation"]}
+            for r in records
+        ]
+    if scope_px:
+        out["_scope_px"] = scope_px
     return out
 
 

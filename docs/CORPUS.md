@@ -27,7 +27,9 @@ Um diretório por clipe, nome em kebab-case que diz a condição
 `regions.json` é `{"writing": [[x0,y0,x1,y1], ...], "ruling_only":
 [[x0,y0,x1,y1], ...]}` em coordenadas do canvas retificado final; o
 `bench_ink.run_clip` conta pixels de escrita × pauta pura dentro
-delas.
+delas. O `corpus check` exige retas inteiras, não negativas,
+estritamente ordenadas (`x0 < x1`, `y0 < y1`) e dentro do canvas —
+a mesma régua que o replay usa antes de contar.
 
 ## `clip.json` — schema v2
 
@@ -63,7 +65,17 @@ delas.
 - `expected` — regras de expectativa avaliadas no `run`:
   `no_ink` (canvas ~vazio), `ink_present` (canvas ≥ `min_px`),
   `canvas_stable` (canvas não colapsa nem zera no meio). `min_px` é
-  opcional onde fizer sentido.
+  opcional onde fizer sentido. Escopo opcional por regra:
+  `frames: [a, b]` restringe a janela de quadros (índice do arquivo
+  `fNNNN`, inclusivo) e `region: [x0,y0,x1,y1]` restringe ao
+  retângulo do canvas — tinta fora da janela ou do retângulo não
+  satisfaz a regra. Sem `frames`, `no_ink`/`ink_present` leem o
+  estado final do canvas; com `frames`, o pico de px confirmado
+  dentro da janela (`no_ink` exige pico 0, `ink_present` pico
+  ≥ `min_px`). `canvas_stable` lê a série inteira (ou a janela) e
+  falha se, depois da primeira tinta confirmada, o canvas confirmado
+  zera ou a sessão de tinta reabre (troca de geração) — retração de
+  provisório não derruba a regra.
 - `issues` — números das issues do GitHub que o clipe reproduz.
 
 A v1 é o que existe hoje nos clipes antigos: sem chave `version`,
