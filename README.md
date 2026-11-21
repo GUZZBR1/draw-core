@@ -7,20 +7,34 @@ See [`docs/MIGRATION_SPEC.md`](docs/MIGRATION_SPEC.md) for structure and plan.
 
 ## Run the live app
 
-On first run (`draw` or `draw --check`), any missing official model binary in
-`models/` (`draw_seg_v3_dyn.onnx`, `page_clean_unet.onnx`,
-`hand_landmarker.task`) is automatically downloaded from the `models-v3` GitHub
-Release and verified against [`assets/manifest.json`](assets/manifest.json)
-(byte size + SHA-256) before loading. Because the base runtime depends on
-`opencv-contrib-python-headless`, replace it with the GUI wheel in your
-virtualenv before opening the live window:
+One command sets up the environment, downloads any missing official model
+binaries from the `models-v3` GitHub Release (verified against
+[`assets/manifest.json`](assets/manifest.json)), starts `hvcam-host.exe`
+automatically on WSL2 (downloading the verified Windows binary if needed),
+picks an available webcam, and opens Draw:
 
 ```sh
-uv sync --extra gui --extra hand
-uv pip uninstall opencv-python opencv-python-headless opencv-contrib-python opencv-contrib-python-headless && uv pip install --reinstall --no-cache "opencv-contrib-python>=4.8,<5.1"
-uv run --no-sync draw --check
-uv run --no-sync draw
+./run.sh
 ```
+
+Any CLI flags pass straight through (`./run.sh --check`, `./run.sh --fullscreen`,
+`./run.sh --source 1`). `./run.sh` is the portable entry point that selects
+the correct environment across Linux, WSL, and Windows, including a separate
+environment for hand tracking if the launcher set one up.
+
+For a direct launch with `uv run --no-sync draw`, set
+`UV_PROJECT_ENVIRONMENT` to the prepared environment you want to use.
+For example, in a shared checkout with a Windows `.venv`, WSL uses
+`.venv-linux` for the base installation. If a later MediaPipe retry succeeded
+in `.venv-linux-hand`, launch with hand tracking using:
+
+```sh
+UV_PROJECT_ENVIRONMENT=.venv-linux-hand uv run --no-sync draw
+```
+
+The same `-hand` suffix applies to the other base directories (`.venv` and
+`.venv-win`). If MediaPipe is already installed in the base environment, use
+that directory directly.
 
 No flags selects the production preset (`InkConfig.production()` plus
 `PipelineConfig()` defaults): digital gain, strict vote `0.85`, ruling

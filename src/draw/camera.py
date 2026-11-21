@@ -22,6 +22,7 @@ from pathlib import Path
 
 import cv2
 
+from . import hvcam as hvcam_module
 from .contracts import FramePacket
 from .hvcam import HvcamCapture, is_hvcam_source
 from .protocol import HelperCapture, is_helper_source
@@ -384,15 +385,20 @@ _EXPOSURE_MAX_ATTEMPTS = 3
 # de sessao: sem ele, uma corrida que nasce morta nao deixa dito
 # nem como a camera abriu. None = fonte sem supervisor (URL).
 _LAST_OPEN_PROBE = None
+_LAST_OPEN_DELIVERED = False
+_LAST_PROBE_DELIVERED = False
 
 
-def _record_open_probe(mean, attempts, outcome):
-    global _LAST_OPEN_PROBE
+def _record_open_probe(mean, attempts, outcome, delivered=None):
+    global _LAST_OPEN_PROBE, _LAST_OPEN_DELIVERED
     _LAST_OPEN_PROBE = {
         "brilho_medio": None if mean is None else round(float(mean), 1),
         "tentativas": attempts,
         "desfecho": outcome,
     }
+    _LAST_OPEN_DELIVERED = (
+        bool(mean is not None) if delivered is None else bool(delivered)
+    )
 
 
 def _probe_exposure(capture, seconds=_EXPOSURE_PROBE_SECONDS, now=time.monotonic):
@@ -403,12 +409,15 @@ def _probe_exposure(capture, seconds=_EXPOSURE_PROBE_SECONDS, now=time.monotonic
     leitura falhar: quem chama trata como "sem evidencia de estouro"
     e o caminho existente de fonte morta cuida do resto.
     """
+    global _LAST_PROBE_DELIVERED
+    _LAST_PROBE_DELIVERED = False
     deadline = now() + seconds
     recent = []
     while now() < deadline:
         ok, frame = capture.read()
         if not ok or frame is None:
             return None
+        _LAST_PROBE_DELIVERED = True
         recent.append(float(frame.mean()))
         del recent[:-3]
         if len(recent) == 3 and sum(recent) / 3 < _EXPOSURE_SETTLED_MEAN:
@@ -424,16 +433,22 @@ def _supervise_local_open(source, capture, capture_factory):
     Devolve a captura a usar: a original assentada, uma reaberta
     assentada, ou a ultima tentativa (com aviso) se todas estourarem.
     """
+    global _LAST_PROBE_DELIVERED
     attempt = 1
     while True:
+        _LAST_PROBE_DELIVERED = False
         mean = _probe_exposure(capture)
+        delivered = _LAST_PROBE_DELIVERED or (mean is not None)
         if mean is None or mean < _EXPOSURE_BLOWN_MEAN:
             if mean is not None and attempt > 1:
                 print(
                     f"Camera reaberta: exposicao assentada (brilho medio {mean:.0f})."
                 )
             _record_open_probe(
-                mean, attempt, "sem_evidencia" if mean is None else "assentada"
+                mean,
+                attempt,
+                "sem_evidencia" if mean is None else "assentada",
+                delivered=delivered,
             )
             return capture
         if attempt >= _EXPOSURE_MAX_ATTEMPTS:
@@ -442,7 +457,7 @@ def _supervise_local_open(source, capture, capture_factory):
                 f"{mean:.0f}) apos {attempt} aberturas; o reconhecimento "
                 "de folha pode falhar ate a exposicao assentar."
             )
-            _record_open_probe(mean, attempt, "estourada_seguiu")
+            _record_open_probe(mean, attempt, "estourada_seguiu", delivered=delivered)
             return capture
         print(
             "Camera abriu com exposicao alta (brilho medio "
@@ -453,7 +468,7 @@ def _supervise_local_open(source, capture, capture_factory):
         attempt += 1
         capture = capture_factory(source)
         if not capture.isOpened():
-            _record_open_probe(mean, attempt, "reabertura_falhou")
+            _record_open_probe(mean, attempt, "reabertura_falhou", delivered=False)
             return capture
         _configure_local_capture(capture)
 
@@ -497,36 +512,138 @@ _WSL_HVCAM_CANDIDATES = ("hvcam://", "hvcam+reverse://")
 
 
 def open_wsl_hvcam_fallback(source, *, timeout_ms=None, connect_timeout_ms=None):
-    """Tenta abrir a camera do Windows via hvcam quando WSL nao tem /dev/video0.
+    """Tenta abrir a camera do Windows via hvcam quando WSL nao tem /dev/video*.
 
     Compartilhado entre `open_capture` e `run_check` para que `draw --check`
     valide exatamente o mesmo fallback que `draw` usa na abertura ao vivo.
+    Se nenhum hvcam-host.exe estiver rodando no Windows, provisiona e sobe
+    `hvcam-host.exe --reverse` automaticamente via interop do WSL, escolhendo
+    a primeira webcam disponivel quando `source == 0`.
     Devolve `(source_url, HvcamCapture)` ou `(None, None)`.
     """
-    if source != 0 or not sys.platform.startswith("linux") or not is_wsl():
+    if (
+        not isinstance(source, int)
+        or source < 0
+        or not sys.platform.startswith("linux")
+        or not is_wsl()
+    ):
         return None, None
     if os.path.exists("/dev/video0") or _video_nodes():
         return None, None
-    print(
-        "WSL sem /dev/video0: tentando camera do Windows via hvcam "
-        "(hvcam:// e hvcam+reverse:// na porta 8765)..."
-    )
-    for candidate in _WSL_HVCAM_CANDIDATES:
-        if candidate == "hvcam+reverse://":
-            print(
-                "Aguardando hvcam-host.exe --reverse conectar no Windows (ate 35 s)..."
-            )
-        kwargs = {}
-        if timeout_ms is not None:
-            kwargs["timeout_ms"] = timeout_ms
-        if connect_timeout_ms is not None:
-            kwargs["connect_timeout_ms"] = connect_timeout_ms
-        hv_cap = HvcamCapture(candidate, **kwargs)
+    print("WSL sem /dev/video*: conectando na camera do Windows via hvcam...")
+    kwargs = {}
+    if timeout_ms is not None:
+        kwargs["timeout_ms"] = timeout_ms
+    if connect_timeout_ms is not None:
+        kwargs["connect_timeout_ms"] = connect_timeout_ms
+
+    # 1. Tenta hvcam:// primeiro (instantaneo se o usuario ja registrou o servico).
+    if source == 0:
+        hv_cap = HvcamCapture("hvcam://", **kwargs)
         if hv_cap.isOpened():
-            print(f"Camera do Windows conectada via {candidate}.")
-            return candidate, hv_cap
+            print("Camera do Windows conectada via hvcam://.")
+            return "hvcam://", hv_cap
         hv_cap.release()
+
+    # 2. Sobe hvcam-host.exe --reverse automaticamente (baixa se ausente e
+    #    escolhe a primeira webcam funcional quando source == 0).
+    if HvcamCapture is hvcam_module.HvcamCapture:
+        managed_kwargs = {}
+        if timeout_ms is not None:
+            managed_kwargs["timeout_ms"] = timeout_ms
+        if connect_timeout_ms is not None:
+            managed_kwargs["connect_timeout_ms"] = connect_timeout_ms
+        try:
+            hv_cap, dev_idx, dev_name = hvcam_module.open_managed_reverse(
+                device=source,
+                try_all=(source == 0),
+                **managed_kwargs,
+            )
+        except RuntimeError as error:
+            print(f"Aviso: inicio automatico do hvcam-host.exe falhou ({error}).")
+            hv_cap = None
+            dev_idx = None
+            dev_name = None
+        if hv_cap is not None:
+            print(
+                f"Camera do Windows conectada via hvcam-host.exe "
+                f"([{dev_idx}] {dev_name})."
+            )
+            return "hvcam+reverse://", hv_cap
+
+    # 3. Fallback manual: escuta hvcam+reverse:// apenas quando o indice padrao
+    #    (0) foi pedido. Para um --source N explicito, um host manual no Windows
+    #    nao informa qual dispositivo esta servindo e poderia entregar outra camera.
+    if source != 0:
+        return None, None
+    print("Aguardando hvcam-host.exe --reverse conectar no Windows (ate 35 s)...")
+    hv_cap = HvcamCapture("hvcam+reverse://", **kwargs)
+    if hv_cap.isOpened():
+        print("Camera do Windows conectada via hvcam+reverse://.")
+        return "hvcam+reverse://", hv_cap
+    hv_cap.release()
     return None, None
+
+
+_RECOVERY_WINDOW_SECONDS = 0.35
+
+
+def _confirm_stream_alive(
+    capture,
+    *,
+    window_s=_RECOVERY_WINDOW_SECONDS,
+    retry_s=_READ_RETRY_SECONDS,
+    now=time.monotonic,
+    sleep=time.sleep,
+):
+    """Confirma que uma captura que falhou no warm-up volta a entregar quadro.
+
+    Usa uma janela curta com pausa entre falhas (como o LatestFrameCapture)
+    para nao descartar uma camera que da falhas imediatas durante 20-50 ms
+    no aquecimento, mantendo teto baixo para cameras realmente travadas.
+    """
+    deadline = now() + window_s
+    while now() < deadline:
+        ok, frame = capture.read()
+        if ok and frame is not None:
+            return True
+        remaining = deadline - now()
+        if remaining <= 0:
+            return False
+        sleep(min(retry_s, remaining))
+    return False
+
+
+def _try_other_local_cameras(source, capture_factory):
+    """Quando o indice padrao (0) falha, tenta outras webcams locais disponiveis.
+
+    So aceita um candidato depois de confirmar que ele efetivamente entregou
+    e continua entregando quadros (se houve falha no warm-up, exige retomada
+    antes de aceitar; camera travada e liberada para testar a proxima).
+    """
+    if source != 0:
+        return None
+    if sys.platform.startswith("linux"):
+        candidates = [
+            int(node[len("/dev/video") :])
+            for node in _video_nodes()
+            if int(node[len("/dev/video") :]) != 0
+        ]
+    else:
+        candidates = [1, 2, 3, 4]
+    for idx in candidates:
+        cap = capture_factory(idx)
+        if cap.isOpened():
+            _configure_local_capture(cap)
+            cap = _supervise_local_open(idx, cap, capture_factory)
+            probe = _LAST_OPEN_PROBE
+            settled = probe is not None and probe.get("brilho_medio") is not None
+            alive = settled or (_LAST_OPEN_DELIVERED and _confirm_stream_alive(cap))
+            if cap.isOpened() and alive:
+                print(f"Camera {source} indisponivel; usando camera local {idx}.")
+                return cap
+        cap.release()
+    return None
 
 
 def open_capture(source, capture_factory=None, helper_token_file=None):
@@ -583,6 +700,9 @@ def open_capture(source, capture_factory=None, helper_token_file=None):
     hint = f"Nao consegui abrir a fonte de video: {source!r}. "
     if isinstance(source, int):
         if default_factory:
+            other = _try_other_local_cameras(source, capture_factory)
+            if other is not None:
+                return other
             _candidate, hv_cap = open_wsl_hvcam_fallback(source)
             if hv_cap is not None:
                 return hv_cap

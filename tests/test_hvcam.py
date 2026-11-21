@@ -720,3 +720,556 @@ def test_run_check_on_wsl_without_dev_video_uses_hvcam_fallback(monkeypatch, cap
     ]
     out = capsys.readouterr().out
     assert "quadro lido da fonte hvcam (hvcam+reverse://)" in out
+
+
+def test_ensure_hvcam_host_downloads_verifies_and_caches(tmp_path):
+    import hashlib
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(hvcam_module.HVCAM_HOST_ZIP_MEMBER, b"MZ-fake-hvcam-exe")
+    zip_bytes = buf.getvalue()
+    sha = hashlib.sha256(zip_bytes).hexdigest()
+
+    calls = []
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            self.close()
+
+    def fake_urlopen(req, timeout=None):
+        calls.append((req.full_url, timeout))
+        return _Resp(zip_bytes)
+
+    exe = hvcam_module.ensure_hvcam_host(
+        cache_dir=tmp_path,
+        urlopen=fake_urlopen,
+        expected_sha256=sha,
+        local_candidates=(),
+    )
+    assert exe == tmp_path / "hvcam-host.exe"
+    assert exe.read_bytes() == b"MZ-fake-hvcam-exe"
+    assert len(calls) == 1
+
+    # Segunda chamada reutiliza o cache sem baixar de novo.
+    exe2 = hvcam_module.ensure_hvcam_host(
+        cache_dir=tmp_path,
+        urlopen=fake_urlopen,
+        expected_sha256=sha,
+        local_candidates=(),
+    )
+    assert exe2 == exe
+    assert len(calls) == 1
+
+
+def test_ensure_hvcam_host_rejects_bad_sha256(tmp_path):
+    import io
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            self.close()
+
+    with pytest.raises(RuntimeError, match="sha256 divergente"):
+        hvcam_module.ensure_hvcam_host(
+            cache_dir=tmp_path,
+            urlopen=lambda _req, timeout=None: _Resp(b"corrupted"),
+            expected_sha256="0" * 64,
+            local_candidates=(),
+        )
+    assert not (tmp_path / "hvcam-host.exe").exists()
+
+
+def test_list_hvcam_devices_parses_cp1252_stderr(monkeypatch, tmp_path):
+    raw = b"[0] 1200W Camera\r\n[1] POCO M3 (C\xe2mera Virtual)\r\n"
+    monkeypatch.setattr(
+        hvcam_module.subprocess,
+        "check_output",
+        lambda *_a, **_k: raw,
+    )
+    devices = hvcam_module.list_hvcam_devices(tmp_path / "hvcam-host.exe")
+    assert devices == [(0, "1200W Camera"), (1, "POCO M3 (Câmera Virtual)")]
+
+
+def test_listen_vsock_bounded_calls_on_listening_and_aborts():
+    events = []
+    aborted = [False]
+
+    class _FakeListener:
+        def setblocking(self, _flag):
+            pass
+
+        def bind(self, _addr):
+            events.append("bind")
+
+        def listen(self, _backlog):
+            events.append("listen")
+
+        def close(self):
+            events.append("close")
+
+    class _FakeSelector:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def register(self, *_):
+            pass
+
+        def select(self, _timeout):
+            aborted[0] = True
+            return []
+
+    def on_listening():
+        events.append("spawn")
+
+    rc = hvcam_module._listen_vsock_bounded(
+        8765,
+        timeout_ms=10_000,
+        socket_factory=lambda *_a: _FakeListener(),
+        selector_factory=_FakeSelector,
+        on_listening=on_listening,
+        abort_check=lambda: aborted[0],
+    )
+    assert rc == -errno.ECONNABORTED
+    assert events == ["bind", "listen", "spawn", "close"]
+
+
+def test_open_managed_reverse_falls_back_to_working_device_and_cleans_up(tmp_path):
+    fake_exe = tmp_path / "hvcam-host.exe"
+    fake_exe.write_bytes(b"MZ")
+    procs = []
+
+    class _FakeProc:
+        def __init__(self, cmd):
+            self.cmd = cmd
+            self.terminated = False
+            self.stdout = None
+            self.stderr = None
+            self.stdin = None
+            self._rc = None
+
+        def poll(self):
+            return self._rc
+
+        def terminate(self):
+            self.terminated = True
+            self._rc = 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            self.terminated = True
+            self._rc = -9
+
+    def fake_popen(cmd, **_kw):
+        proc = _FakeProc(cmd)
+        procs.append(proc)
+        return proc
+
+    class _FakeManagedCap:
+        def __init__(self, url, **kw):
+            self.url = url
+            self._host_proc = None
+            kw["on_listening"]()
+            self._device = procs[-1].cmd[-1]
+            # Dispositivo 0 abre mas nao entrega quadros; dispositivo 1 abre e entrega.
+            self._opened = self._device in ("0", "1")
+
+        def isOpened(self):
+            return self._opened
+
+        def read(self):
+            if self._device == "1":
+                return True, _frame()
+            return False, None
+
+        def release(self):
+            self._opened = False
+            if self._host_proc is not None:
+                hvcam_module._terminate_host_process(self._host_proc)
+                self._host_proc = None
+
+    cap, dev_idx, dev_name = hvcam_module.open_managed_reverse(
+        device=0,
+        try_all=True,
+        host_exe=fake_exe,
+        devices=[(0, "Frameless Cam"), (1, "Working Cam")],
+        popen=fake_popen,
+        capture_cls=_FakeManagedCap,
+    )
+    assert cap is not None
+    assert (dev_idx, dev_name) == (1, "Working Cam")
+    assert len(procs) == 2
+    assert procs[0].terminated is True
+    assert procs[1].terminated is False
+
+    cap.release()
+    assert procs[1].terminated is True
+
+
+def test_windows_cache_dir_handles_accented_utf8_profile(monkeypatch):
+    def fake_check_output(cmd, **_kw):
+        if cmd[0] == "powershell.exe":
+            return "C:\\Users\\João\\AppData\\Local\r\n".encode("utf-8")
+        if cmd[0] == "wslpath":
+            assert cmd[1] == "C:\\Users\\João\\AppData\\Local"
+            return "/mnt/c/Users/João/AppData/Local\n".encode("utf-8")
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(hvcam_module.subprocess, "check_output", fake_check_output)
+    result = hvcam_module._windows_cache_dir()
+    assert result is not None
+    assert str(result).endswith("/Users/João/AppData/Local/draw")
+
+
+def test_try_other_local_cameras_skips_frameless_candidate(monkeypatch):
+    class _FakeLocalCap:
+        def __init__(self, idx, has_frame):
+            self.idx = idx
+            self._has_frame = has_frame
+            self._opened = True
+            self.released = False
+
+        def isOpened(self):
+            return self._opened
+
+        def set(self, *_):
+            return True
+
+        def read(self):
+            if self._has_frame:
+                return True, np.full((32, 32, 3), 100, dtype=np.uint8)
+            return False, None
+
+        def release(self):
+            self._opened = False
+            self.released = True
+
+    caps = {1: _FakeLocalCap(1, False), 2: _FakeLocalCap(2, True)}
+    monkeypatch.setattr(camera_module.sys, "platform", "linux")
+    monkeypatch.setattr(
+        camera_module, "_video_nodes", lambda: ["/dev/video1", "/dev/video2"]
+    )
+    chosen = camera_module._try_other_local_cameras(0, lambda idx: caps[idx])
+    assert chosen is caps[2]
+    assert caps[1].released is True
+
+
+def test_try_other_local_cameras_accepts_camera_that_recovers_after_missed_read(
+    monkeypatch,
+):
+    class _RecoveringCap:
+        def __init__(self):
+            self._calls = 0
+            self.released = False
+
+        def isOpened(self):
+            return True
+
+        def set(self, *_):
+            return True
+
+        def read(self):
+            self._calls += 1
+            if self._calls == 2:
+                return False, None  # falha pontual no warm-up
+            return True, np.full((32, 32, 3), 100, dtype=np.uint8)
+
+        def release(self):
+            self.released = True
+
+    recovering = _RecoveringCap()
+    monkeypatch.setattr(camera_module.sys, "platform", "linux")
+    monkeypatch.setattr(camera_module, "_video_nodes", lambda: ["/dev/video1"])
+    chosen = camera_module._try_other_local_cameras(0, lambda _idx: recovering)
+    assert chosen is recovering
+    assert recovering.released is False
+
+
+def test_confirm_stream_alive_recovers_after_short_gap_and_fails_on_stall():
+    now = [0.0]
+
+    def fake_clock():
+        return now[0]
+
+    def fake_sleep(dt):
+        now[0] += dt
+
+    class _GapCap:
+        def __init__(self, resume_at):
+            self._resume_at = resume_at
+
+        def read(self):
+            if self._resume_at is not None and now[0] >= self._resume_at:
+                return True, np.full((16, 16, 3), 100, dtype=np.uint8)
+            return False, None
+
+    # Falhas imediatas por 30 ms e retomada em seguida -> aceita.
+    assert (
+        camera_module._confirm_stream_alive(
+            _GapCap(resume_at=0.03),
+            window_s=0.35,
+            retry_s=0.005,
+            now=fake_clock,
+            sleep=fake_sleep,
+        )
+        is True
+    )
+    assert now[0] < 0.1
+
+    # Camera permanentemente travada -> encerra no teto da janela.
+    now[0] = 0.0
+    assert (
+        camera_module._confirm_stream_alive(
+            _GapCap(resume_at=None),
+            window_s=0.05,
+            retry_s=0.01,
+            now=fake_clock,
+            sleep=fake_sleep,
+        )
+        is False
+    )
+    assert now[0] >= 0.05
+
+
+def test_confirm_stream_alive_bounds_blocking_backend():
+    now = [0.0]
+    reads = []
+
+    def fake_clock():
+        return now[0]
+
+    def fake_sleep(dt):
+        now[0] += dt
+
+    class _BlockingCap:
+        def read(self):
+            reads.append(now[0])
+            now[0] += 0.03
+            return False, None
+
+    # Janela 50 ms, retry 10 ms: primeira leitura em 0.0 termina em 0.03.
+    # Sleep de 10 ms leva a 0.04 (< 0.05). Segunda leitura inicia em 0.04
+    # e termina em 0.07 (ultrapassa a janela). O loop nao deve disparar
+    # uma terceira leitura no/apos o prazo de 50 ms.
+    alive = camera_module._confirm_stream_alive(
+        _BlockingCap(),
+        window_s=0.05,
+        retry_s=0.01,
+        now=fake_clock,
+        sleep=fake_sleep,
+    )
+    assert alive is False
+    assert len(reads) == 2
+    assert all(t < 0.05 for t in reads)
+
+
+def test_confirm_stream_alive_does_not_read_at_deadline():
+    now = 0.0
+    reads = []
+
+    def sleep(delay):
+        nonlocal now
+        now += delay
+
+    class Capture:
+        def read(self):
+            reads.append(now)
+            return False, None
+
+    assert not camera_module._confirm_stream_alive(
+        Capture(), window_s=0.125, retry_s=0.25, now=lambda: now, sleep=sleep
+    )
+    assert now == 0.125
+    assert reads == [0.0]
+
+
+def test_open_managed_reverse_allows_host_to_write_large_stderr(tmp_path):
+    import subprocess
+    import sys
+
+    procs = []
+
+    def popen(_cmd, **kwargs):
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import sys; sys.stderr.buffer.write(b'x' * 2**20)"],
+            **kwargs,
+        )
+        procs.append(proc)
+        return proc
+
+    class ConnectedCapture:
+        def __init__(self, _url, **kwargs):
+            kwargs["on_listening"]()
+
+        def isOpened(self):
+            return True
+
+        def release(self):
+            hvcam_module._terminate_host_process(self._host_proc)
+
+    cap, _, _ = hvcam_module.open_managed_reverse(
+        host_exe=tmp_path / "hvcam-host.exe",
+        devices=[],
+        popen=popen,
+        capture_cls=ConnectedCapture,
+    )
+    try:
+        assert procs[0].wait(timeout=3) == 0
+    finally:
+        cap.release()
+
+
+def test_open_managed_reverse_surfaces_host_stderr_on_abort(tmp_path):
+    fake_exe = tmp_path / "hvcam-host.exe"
+    fake_exe.write_bytes(b"MZ")
+
+    class _FailingProc:
+        def __init__(self, cmd):
+            self.cmd = cmd
+            self._rc = 1
+            self.stdout = None
+            self.stdin = None
+            self.stderr = None
+
+        def poll(self):
+            return self._rc
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 1
+
+        def kill(self):
+            pass
+
+    def fake_popen(cmd, *, stderr, **_kw):
+        stderr.write(b"x" * 32_768 + b"\nFailed to open camera: 0x80070490\n")
+        return _FailingProc(cmd)
+
+    class _AbortedCap:
+        def __init__(self, url, **kw):
+            self.url = url
+            self._host_proc = None
+            kw["on_listening"]()
+            assert kw["abort_check"]() is True
+            self._opened = False
+            self.open_error = OSError("aborted")
+
+        def isOpened(self):
+            return False
+
+        def release(self):
+            pass
+
+    with pytest.raises(RuntimeError) as exc_info:
+        hvcam_module.open_managed_reverse(
+            device=0,
+            try_all=False,
+            host_exe=fake_exe,
+            popen=fake_popen,
+            capture_cls=_AbortedCap,
+        )
+    assert str(exc_info.value).endswith("Failed to open camera: 0x80070490")
+    assert len(str(exc_info.value)) <= 16_384
+
+
+def test_try_other_local_cameras_skips_camera_that_stalls_permanently(monkeypatch):
+    class _StalledAfterOneCap:
+        def __init__(self):
+            self._calls = 0
+            self.released = False
+
+        def isOpened(self):
+            return True
+
+        def set(self, *_):
+            return True
+
+        def read(self):
+            self._calls += 1
+            if self._calls == 1:
+                return True, np.full((32, 32, 3), 100, dtype=np.uint8)
+            return False, None  # morre permanentemente
+
+        def release(self):
+            self.released = True
+
+    class _GoodCap:
+        def __init__(self):
+            self.released = False
+
+        def isOpened(self):
+            return True
+
+        def set(self, *_):
+            return True
+
+        def read(self):
+            return True, np.full((32, 32, 3), 100, dtype=np.uint8)
+
+        def release(self):
+            self.released = True
+
+    stalled = _StalledAfterOneCap()
+    good = _GoodCap()
+    caps = {1: stalled, 2: good}
+    monkeypatch.setattr(camera_module.sys, "platform", "linux")
+    monkeypatch.setattr(
+        camera_module, "_video_nodes", lambda: ["/dev/video1", "/dev/video2"]
+    )
+    chosen = camera_module._try_other_local_cameras(0, lambda idx: caps[idx])
+    assert chosen is good
+    assert stalled.released is True
+
+
+def test_run_check_succeeds_without_fail_message_when_video1_works(monkeypatch, capsys):
+    monkeypatch.setattr(app_module.sys, "platform", "linux")
+    monkeypatch.setattr(app_module, "_require_gui_backend", lambda: None)
+    monkeypatch.setattr(app_module, "_check_models", lambda: True)
+    monkeypatch.setattr(
+        app_module, "_video_nodes", lambda: ["/dev/video0", "/dev/video1"]
+    )
+    monkeypatch.setattr(app_module.os, "access", lambda p, _m: p == "/dev/video1")
+    monkeypatch.setattr(
+        app_module,
+        "_check_camera_open",
+        lambda idx, _label: idx == 1,
+    )
+    assert app_module.run_check(0) == 0
+    assert "FAIL:" not in capsys.readouterr().out
+
+
+def test_open_wsl_hvcam_fallback_does_not_use_manual_host_for_nonzero_source(
+    monkeypatch,
+):
+    seen = []
+
+    def fake_hvcam(source, **kw):
+        seen.append(source)
+        return HvcamCapture(
+            source,
+            camera_factory=_factory(FakeCamera([], fail=OSError("no host"))),
+        )
+
+    monkeypatch.setattr(camera_module.sys, "platform", "linux")
+    monkeypatch.setattr(camera_module, "is_wsl", lambda: True)
+    monkeypatch.setattr(camera_module.os.path, "exists", lambda _p: False)
+    monkeypatch.setattr(camera_module, "_video_nodes", lambda: [])
+    monkeypatch.setattr(camera_module, "HvcamCapture", fake_hvcam)
+
+    candidate, cap = camera_module.open_wsl_hvcam_fallback(1)
+    assert (candidate, cap) == (None, None)
+    assert seen == []

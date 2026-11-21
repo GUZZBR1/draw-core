@@ -271,7 +271,7 @@ def run_check(source=0, helper_token_file=None):
 
     nodes = _video_nodes()
     if not nodes:
-        if source == 0 and is_wsl():
+        if source >= 0 and is_wsl():
             candidate, hv_cap = camera_module.open_wsl_hvcam_fallback(
                 source, timeout_ms=5000
             )
@@ -301,6 +301,13 @@ def run_check(source=0, helper_token_file=None):
 
     node = f"/dev/video{source}"
     if node not in nodes:
+        if source == 0:
+            for alt_node in nodes:
+                alt_idx = int(alt_node[len("/dev/video") :])
+                if os.access(alt_node, os.R_OK | os.W_OK) and _check_camera_open(
+                    alt_idx, alt_node
+                ):
+                    return 0 if all_ok else 1
         print(
             f"FAIL: {node} nao existe. Os dispositivos deste sistema "
             f"sao: {', '.join(nodes)}."
@@ -328,9 +335,23 @@ def run_check(source=0, helper_token_file=None):
         )
     except Exception:
         group_note = ""
+    models_ok = all_ok
     if access:
         print(f"PASS: este processo le e escreve em {node}.{group_note}")
-    else:
+        if _check_camera_open(source, node):
+            return 0 if models_ok else 1
+
+    if source == 0:
+        for alt_node in nodes:
+            if alt_node == node:
+                continue
+            alt_idx = int(alt_node[len("/dev/video") :])
+            if os.access(alt_node, os.R_OK | os.W_OK) and _check_camera_open(
+                alt_idx, alt_node
+            ):
+                return 0 if models_ok else 1
+
+    if not access:
         print(
             f"FAIL: este processo nao tem permissao de leitura e "
             f"escrita em {node}.{group_note}"
@@ -340,12 +361,7 @@ def run_check(source=0, helper_token_file=None):
             "(vale nas proximas sessoes)."
         )
         print('  Correcao nesta sessao: sg video -c "python -m draw".')
-        all_ok = False
-
-    if not _check_camera_open(source, node):
-        all_ok = False
-
-    return 0 if all_ok else 1
+    return 1
 
 
 def _check_camera_open(source, label):
