@@ -11,7 +11,16 @@ import numpy as np
 from .. import config as paper_config
 from .. import photometry
 from ..contracts import InkDelta, InkDisplaySnapshot, InkSnapshot
-from . import accumulator, identity, motion, paper_evidence, registration, ruling, votes
+from . import (
+    accumulator,
+    identity,
+    motion,
+    page_model,
+    paper_evidence,
+    registration,
+    ruling,
+    votes,
+)
 from . import anchor as anchor_mod
 from .config import InkConfig
 
@@ -348,6 +357,11 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._motion_fail_open_total = 0
         self._motion_unregistered_total = 0
         self._ruling_generation = None
+        # Modelo persistente da pagina limpa (InkConfig.page_model,
+        # opt-in): uma instancia por geracao/grade, criada na primeira
+        # passada votada da geracao — ver draw.ink.page_model.
+        self._page_model = None
+        self._pm_generation = None
         # Relogio monotonico injetavel: o padrao e o do processo;
         # replays com pump() passam o relogio da cena.
         self._clock = clock
@@ -2066,6 +2080,70 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 paper_ok = (
                     p.motion_fix.warp_back(paper_ok.astype(np.uint8), nearest=True) > 0
                 )
+        last_reg = self._last_registration
+        if self._config.page_model and pass_voted and last_reg is not None:
+            # Modelo persistente da pagina (draw.ink.page_model):
+            # observa a passada na grade da ancora e so entrega
+            # evidencia onde ha referencia semeada; o que nao e
+            # conteudo novo contra ela (pauta, desenho antigo,
+            # sombra) e suprimido antes do voto. Passada abstida
+            # nao observa: geometria em fluxo envenenaria a
+            # referencia. A 1a passada e a de identidade entram na
+            # propria geometria — que e a da ancora por definicao.
+            # A matriz e a do last_registration: no follow
+            # re-ancorado a ancora desta passada ja e a nova (o
+            # `anchor` local ainda guarda a velha) e o prob foi
+            # re-registrado para ela — so o par registrado de fato
+            # mantem o gray alinhado com o mapa que vota.
+            if (
+                self._pm_generation != p.generation
+                or self._page_model is None
+                or self._page_model.shape != p.prob.shape
+            ):
+                self._page_model = page_model.PageModel(p.prob.shape)
+                self._pm_generation = p.generation
+            pm = self._page_model
+            gray = (
+                p.warped
+                if p.warped.ndim == 2
+                else cv2.cvtColor(p.warped, cv2.COLOR_BGR2GRAY)
+            )
+            pm_matrix = registration._registration_matrix(
+                last_reg[0], last_reg[1], p.prob.shape
+            )
+            if not registration._registration_is_identity(pm_matrix):
+                gray = cv2.warpPerspective(
+                    gray,
+                    pm_matrix,
+                    (p.prob.shape[1], p.prob.shape[0]),
+                    flags=cv2.INTER_LINEAR,
+                    borderValue=0,
+                )
+            gray = np.asarray(gray, dtype=np.float32)
+            pm.observe(
+                gray,
+                visible=p.visible,
+                paper=(
+                    p.prob <= registration._REMOVAL_LOW_PROB
+                    if p.visible is None
+                    else p.visible & (p.prob <= registration._REMOVAL_LOW_PROB)
+                ),
+            )
+            p.visible = pm.admissible(p.visible)
+            confirmed = self._accumulator._confirmed
+            confirmed_ink = (
+                confirmed > 0
+                if confirmed is not None and confirmed.shape == p.prob.shape
+                else np.zeros(p.prob.shape, dtype=bool)
+            )
+            novel_mask = pm.novel(gray)
+            suppress = pm.seeded & ~novel_mask & ~confirmed_ink
+            if np.any(suppress):
+                p.prob[suppress] = 0.0
+            p.reg_info["pm_seeded_frac"] = pm.seeded_fraction
+            p.reg_info["pm_novel_px"] = int(np.count_nonzero(novel_mask))
+            p.reg_info["pm_suppressed_px"] = int(np.count_nonzero(suppress))
+            p.reg_info["pm_pending_px"] = int(np.count_nonzero(pm.pending()))
         result = self._accumulator.add(
             p.prob,
             p.visible,

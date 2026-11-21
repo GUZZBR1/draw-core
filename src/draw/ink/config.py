@@ -117,6 +117,16 @@ class InkConfig:
     # MediaPipe. Incerteza congela.
     paper_guard: bool = True
     occlusion_hold_passes: int = 3
+    # Modelo persistente da pagina limpa (draw.ink.page_model, opt-in):
+    # referencia por pixel na grade da ancora, semeada por blocos que a
+    # passada viu limpos. Pixels ainda sem referencia nao entregam
+    # evidencia (regiao pendente) e evidencia que nao e conteudo novo
+    # contra a referencia e suprimida — pauta impressa, desenho antigo
+    # e sombra de vinco deixam de parecer tinta sem depender da regra
+    # de pauta (#132) nem de o modelo ver a mao (#129). O delta de
+    # "novo" ainda nao foi calibrado em corpus real — ligar para
+    # replay/mesa, nao para o preset validado.
+    page_model: bool = False
 
     def __post_init__(self):
         if not 0.0 < self.t_low < self.t_high <= 1.0:
