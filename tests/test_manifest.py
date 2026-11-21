@@ -15,7 +15,7 @@ import re
 
 import pytest
 
-from draw.infra import manifest
+from draw.infra import manifest, safe_io
 
 
 @pytest.fixture
@@ -481,7 +481,7 @@ def test_download_model_translates_mkstemp_and_replace_oserror_to_runtime_error(
     def boom_mkstemp(*a, **kw):
         raise PermissionError("read-only filesystem")
 
-    monkeypatch.setattr(manifest.tempfile, "mkstemp", boom_mkstemp)
+    monkeypatch.setattr(safe_io.tempfile, "mkstemp", boom_mkstemp)
     with pytest.raises(RuntimeError, match="read-only filesystem") as exc_info:
         manifest.download_model(
             "hand_landmarker.task",
@@ -496,7 +496,7 @@ def test_download_model_translates_mkstemp_and_replace_oserror_to_runtime_error(
     def boom_replace(src, dst):
         raise PermissionError("cannot replace target")
 
-    monkeypatch.setattr(manifest.os, "replace", boom_replace)
+    monkeypatch.setattr(safe_io.os, "replace", boom_replace)
     with pytest.raises(RuntimeError, match="cannot replace target") as exc_info2:
         manifest.download_model(
             "hand_landmarker.task",

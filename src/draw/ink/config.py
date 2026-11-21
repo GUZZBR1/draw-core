@@ -109,6 +109,11 @@ class InkConfig:
     # vez com a mao presente; um traco revelado so depois da saida fica
     # aquem do voto e o descanso total o congela (Devin Review PR #122).
     post_exit_full_window: bool = False
+    # Guarda fotometrica de oclusao (draw.ink.occlusion, issue #129): a
+    # regiao que nao parece papel exposto (mao, braco, caneta, sombra)
+    # fica congelada — sem remocao de tinta confirmada e sem voto novo.
+    # Independente do MediaPipe. Incerteza congela.
+    paper_guard: bool = True
 
     def __post_init__(self):
         if not 0.0 < self.t_low < self.t_high <= 1.0:

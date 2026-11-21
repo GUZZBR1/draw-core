@@ -1331,11 +1331,15 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # o voto confirma (vote_hit), não num piso fixo: um bloco
             # sustentado em [vote_hit, 0,7) confirmaria no voto mas
             # ficava vetado para sempre (Devin Review do PR #144).
-            exposure = self._paper_exposure.observe(
-                photometric_image,
-                visible,
-                ink_prob=prob,
-                ink_support_threshold=self._config.vote_hit,
+            exposure = (
+                self._paper_exposure.observe(
+                    photometric_image,
+                    visible,
+                    ink_prob=prob,
+                    ink_support_threshold=self._config.vote_hit,
+                )
+                if self._config.paper_guard
+                else None
             )
             # Cobertura de folha (cobertura de folha do loop) viaja em
             # canal proprio ate depois do registro: o veto nao e
@@ -2097,6 +2101,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 # geometria que nunca chegou ao canvas.
                 self._last_registration = None
             paper_exposed = None
+            if not self._config.paper_guard:
+                # Sem a guarda o comportamento é o legado: a evidência
+                # de papel exposto não rege a remoção.
+                paper_exposed = True
             if exposure is not None:
                 # O par de registro é o da passada que VOTA
                 # (_last_registration), não o medido antes da

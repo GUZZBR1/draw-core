@@ -322,6 +322,19 @@ def test_run_new_pins_legacy_tier_a_config(monkeypatch, tmp_path):
         hand_model=None,
         verify=None,
     )
-    expected = PipelineConfig(ink=InkConfig(), ink_auto_gain=False, detect_wake=False)
+    expected = PipelineConfig(
+        ink=InkConfig(paper_guard=False), ink_auto_gain=False, detect_wake=False
+    )
     assert seen["pipeline_config"] == expected
     assert seen["worker_config"] == expected.ink
+
+
+def test_parity_frame_time_matches_legacy_reciprocal_rounding():
+    """A 10 FPS o intervalo 8→14 cruza 0,6 s só com a fórmula do legado."""
+    from lab.parity_e2e import parity_frame_time
+
+    for fps in (10.0, 15.0, 24.0, 29.97):
+        for idx in range(200):
+            assert parity_frame_time(idx, fps) == idx * (1.0 / fps)
+    assert parity_frame_time(14, 10.0) - parity_frame_time(8, 10.0) >= 0.6
+    assert 14 / 10.0 - 8 / 10.0 < 0.6

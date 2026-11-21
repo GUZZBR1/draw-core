@@ -27,7 +27,6 @@ PAPER_H = 1200
 
 # Marcadores: id -> nome do canto.
 MARKER_IDS = (0, 1, 2, 3)  # 0=sup. esq., 1=sup. dir., 2=inf. dir., 3=inf. esq.
-MARKER_SIZE_PX = 120
 
 # Centros dos marcadores no espaço da folha retificada.
 MARKER_CENTERS = {
