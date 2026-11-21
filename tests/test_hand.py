@@ -380,3 +380,36 @@ def test_a_returning_hand_resets_the_hold_budget():
     masker._retain(hands, frame)
     for _ in range(hand_module._HOLD_FRAMES):
         assert masker._retain([], frame) is hands
+
+
+def test_reset_retention_drops_held_hand_even_for_same_size_frames():
+    masker = hand_module.HandMasker.__new__(hand_module.HandMasker)
+    masker._lock = threading.RLock()
+    masker._held_hands = None
+    masker._held_shape = None
+    masker._held_misses = 0
+    masker.last_detection_held = False
+    frame = np.zeros((120, 160, 3), np.uint8)
+    hands = [np.zeros((21, 2), np.float32)]
+    masker._retain(hands, frame)
+    masker.reset_retention()
+    assert masker._retain([], frame) == []
+    assert masker.last_detection_held is False
+
+
+def test_held_detection_is_flagged_and_cleared():
+    masker = _bare_masker()
+    masker.last_detection_held = False
+    frame = np.zeros((120, 160, 3), np.uint8)
+    masker._retain([np.zeros((21, 2), np.float32)], frame)
+    masker._retain([], frame)
+    assert masker.last_detection_held is True
+    masker._retain([np.zeros((21, 2), np.float32)], frame)
+    assert masker.last_detection_held is False
+
+
+def test_low_light_cutoff_uses_luminance_not_channel_mean():
+    # BGR (100, 40, 80): media dos canais 73, luminancia BT.601 ~59 < 70.
+    frame = np.empty((120, 160, 3), np.uint8)
+    frame[:] = (100, 40, 80)
+    assert hand_module._lift_dark(frame) is not frame

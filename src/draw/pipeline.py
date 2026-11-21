@@ -629,6 +629,9 @@ class Pipeline:
         """
         self.ink_session_open = False
         self.clean_recovery_pending = False
+        reset_retention = getattr(self.hand_masker, "reset_retention", None)
+        if callable(reset_retention):
+            reset_retention()
         self.clean_mask = None
         self.clean_provisional_mask = None
         self.accumulated_canvas = None

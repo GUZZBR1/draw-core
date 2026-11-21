@@ -85,7 +85,14 @@ def _resolve_model_path(model_path):
 def _lift_dark(frame):
     """Gama leve so em frame escuro; frame normal volta intacto."""
     sample = frame[::_DARK_SAMPLE_STRIDE, ::_DARK_SAMPLE_STRIDE]
-    mean = float(sample.mean())
+    if sample.ndim == 3 and sample.shape[2] == 3:
+        # Mesma luminancia (BT.601) do cinza do diagnostico ao vivo:
+        # a media dos canais deslocaria o corte em cena com dominante.
+        mean = float(
+            cv2.cvtColor(np.ascontiguousarray(sample), cv2.COLOR_BGR2GRAY).mean()
+        )
+    else:
+        mean = float(sample.mean())
     if mean >= _DARK_MEAN or mean < 1.0:
         return frame
     gamma = np.log(_DARK_TARGET_MEAN / 255.0) / np.log(mean / 255.0)
@@ -169,6 +176,7 @@ class HandMasker:
         self._held_hands = None
         self._held_shape = None
         self._held_misses = 0
+        self.last_detection_held = False
         self._warned = False
         self._closed = False
         self._lock = threading.RLock()
@@ -351,9 +359,19 @@ class HandMasker:
                 if self._closed:
                     self._close_landmarkers()
 
+    def reset_retention(self):
+        """Descarta a mao retida (troca de fonte/camera/rotacao): marcos
+        de outra vista nao descrevem a nova, mesmo com o mesmo tamanho."""
+        with self._lock:
+            self._held_hands = None
+            self._held_shape = None
+            self._held_misses = 0
+            self.last_detection_held = False
+
     def _retain(self, hands, frame):
         """Histerese de presenca: sem mao por ate _HOLD_FRAMES deteccoes
         seguidas, devolve a ultima mao vista (mesmo tamanho de frame)."""
+        self.last_detection_held = False
         if hands is None:
             return None
         shape = frame.shape[:2]
@@ -365,6 +383,7 @@ class HandMasker:
         if self._held_hands is not None and self._held_shape == shape:
             self._held_misses += 1
             if self._held_misses <= _HOLD_FRAMES:
+                self.last_detection_held = True
                 return self._held_hands
         self._held_hands = None
         return hands

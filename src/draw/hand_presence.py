@@ -87,6 +87,10 @@ class MediaPipeHandPresence:
         if source_id != self._source_id:
             self._source_id = source_id
             self._signature = None
+            # Marcos retidos pertencem a vista anterior.
+            reset = getattr(self._masker, "reset_retention", None)
+            if callable(reset):
+                reset()
         # Caminho preferido: a assinatura direto dos marcos
         # (HandMasker.presence_signature), sem construir nem
         # dilatar a mascara 720p que so servia para contar pixels
@@ -115,6 +119,12 @@ class MediaPipeHandPresence:
             if signature.area == 0:
                 self._signature = None
                 return HandSample(False, False)
+            if getattr(self._masker, "last_detection_held", False):
+                # Deteccao perdida e mao retida: a pose repetida nao e
+                # quietude. Conta como movimento para o descanso nao
+                # acumular em cima de uma leitura que falhou.
+                self._signature = signature
+                return HandSample(True, True)
             return self._update_signature(signature)
         mask = self._masker.mask(frame)
         if mask is None:
