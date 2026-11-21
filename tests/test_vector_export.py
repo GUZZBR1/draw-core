@@ -110,14 +110,30 @@ def test_simplify_closed_mixed_collapsed_arc_keeps_interior_vertex():
     assert out.tolist() == [[0, 0], [5, 3], [10, 0]]
 
 
-def test_simplify_closed_no_arc_collapses_keeps_all_vertices():
-    """Nenhum arco colapsa (3 vértices em cada): nada duplicado nem perdido."""
+def _same_cycle(out, expected):
+    """True se `out` é `expected` percorrido na mesma ordem, de qualquer
+    ponto de partida (a âncora inicial do laço fechado pode variar)."""
+    out = [tuple(p) for p in np.asarray(out).tolist()]
+    expected = [tuple(p) for p in expected]
+    if len(out) != len(expected):
+        return False
+    return any(out[k:] + out[:k] == expected for k in range(len(out)))
+
+
+def test_simplify_closed_no_arc_collapses_keeps_every_vertex_in_order():
+    """Nenhum arco colapsa: todos os 6 vértices ficam, na ordem original."""
+    pts = np.array(
+        [[0, 0], [5, -3], [10, 0], [10, 10], [5, 13], [0, 10]], dtype=np.float64
+    )
+    out = ev.simplify(pts, 1.0, True)
+    assert _same_cycle(out, pts.tolist())
+
+
+def test_simplify_closed_drops_shallow_point_and_keeps_corner_order():
+    """O ponto raso (5, 0.2) sai; os quatro cantos ficam em ordem."""
     pts = np.array([[0, 0], [5, 0.2], [10, 0], [10, 10], [0, 10]], dtype=np.float64)
     out = ev.simplify(pts, 1.0, True)
-    assert len(out) == len(np.unique(out, axis=0))
-    assert {tuple(p) for p in [(0, 0), (10, 0), (10, 10), (0, 10)]} <= {
-        tuple(p) for p in out.tolist()
-    }
+    assert _same_cycle(out, [(0, 0), (10, 0), (10, 10), (0, 10)])
 
 
 def test_two_by_two_dot_survives_thinning_and_exports(tmp_path):
