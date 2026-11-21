@@ -1,9 +1,12 @@
 """Testes leves de exporters/export_vectors.py (ponte SVG/DXF sem ximgproc)."""
 
+import re
+
 import cv2
 import numpy as np
 
 from draw.exporters import export_vectors as ev
+from draw.exporters import vectorize as vz
 
 
 def _synthetic_page():
@@ -101,3 +104,57 @@ def test_parse_svg_paths_roundtrips_isolated_point(tmp_path):
     # round-trip mm -> px (escala por eixo): o ponto volta para (30, 20) px
     scale = np.array([210.0 / 60, 297.0 / 60])
     assert np.allclose(singles[0][0] / scale, [30.0, 20.0], atol=0.2)
+
+
+def test_per_stroke_width_flows_to_svg_and_dxf(tmp_path):
+    """Pseudo-pressão por traço: o width_px que a vetorização anota vira
+    o stroke-width do SVG e o grupo 43 do DXF por LWPOLYLINE — em vez de
+    uma largura global igual para toda a página."""
+    ink = np.zeros((80, 200), dtype=bool)
+    ink[10:13, 10:190] = True  # traço fino ~3 px
+    ink[40:52, 10:190] = True  # traço grosso ~12 px
+    polylines = vz.vectorize_mask(ink, epsilon=1.0)
+    assert len(polylines) == 2
+    widths = sorted(p["width_px"] for p in polylines)
+    assert widths[0] < widths[-1] / 2
+
+    svg_path = tmp_path / "w.svg"
+    dxf_path = tmp_path / "w.dxf"
+    # stroke_w_mm=9.9 é o fallback: nao pode aparecer no arquivo quando
+    # o width_px por traço está presente.
+    ev.write_svg(polylines, svg_path, 200, 80, 210.0, 297.0, 9.9)
+    ev.write_dxf(polylines, dxf_path, 200, 80, 210.0, 297.0, 9.9)
+
+    svg_widths = sorted(
+        float(w)
+        for w in re.findall(
+            r'stroke-width="([\d.]+)"', svg_path.read_text(encoding="utf-8")
+        )
+    )
+    assert len(svg_widths) == 2
+    assert svg_widths[0] < svg_widths[-1]
+    assert 9.9 not in svg_widths
+
+    dxf_lines = dxf_path.read_text(encoding="utf-8").splitlines()
+    w43 = sorted(
+        float(dxf_lines[i + 1]) for i, code in enumerate(dxf_lines) if code == "43"
+    )
+    assert len(w43) == 2
+    assert w43[0] < w43[-1]
+
+
+def test_lines_without_width_px_keep_the_uniform_fallback(tmp_path):
+    """Polilinhas sem anotação (caminhos que não passam por
+    vectorize_mask/stroke_widths_px) seguem com a largura global."""
+    lines = [
+        {"points": np.array([[0.0, 0.0], [40.0, 40.0]]), "closed": False},
+        {"points": np.array([[50.0, 10.0]]), "closed": False},
+    ]
+    svg_path = tmp_path / "u.svg"
+    dxf_path = tmp_path / "u.dxf"
+    ev.write_svg(lines, svg_path, 60, 60, 210.0, 297.0, 0.5)
+    ev.write_dxf(lines, dxf_path, 60, 60, 210.0, 297.0, 0.5)
+    assert 'stroke-width="0.50"' in svg_path.read_text(encoding="utf-8")
+    dxf_lines = dxf_path.read_text(encoding="utf-8").splitlines()
+    w43 = [dxf_lines[i + 1] for i, code in enumerate(dxf_lines) if code == "43"]
+    assert set(w43) == {"0.500"}

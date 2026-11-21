@@ -1114,6 +1114,10 @@ def classify_primitive(polyline):
     if "t_start_ms" in polyline:
         meta["t_start_ms"] = polyline["t_start_ms"]
         meta["t_end_ms"] = polyline["t_end_ms"]
+    if "width_px" in polyline:
+        # stroke_w_mm, não width_mm: o retângulo já usa width_mm para a
+        # largura geométrica da caixa — colidir os dois o apagaria.
+        meta["stroke_w_mm"] = round(float(polyline["width_px"]) * MM_PER_PX, 3)
 
     if len(pts) == 1:
         return {
@@ -1296,12 +1300,21 @@ def vectorize_mask(
     if order_strokes or stamps is not None:
         raw = annotate_and_order_polylines(raw, stamps=stamps)
     out = []
+    # Largura por traço amostrada no esqueleto cru (pseudo-pressão para os
+    # exportadores): um distanceTransform da máscara limpa por vetorização.
+    dt_width = cv2.distanceTransform(work.astype(np.uint8), cv2.DIST_L2, 5)
+    w_h, w_w = work.shape[:2]
     for line in raw:
         pts = simplify(line["points"], epsilon, line["closed"])
         item = {"points": pts, "closed": line["closed"]}
         if "t_start_ms" in line:
             item["t_start_ms"] = line["t_start_ms"]
             item["t_end_ms"] = line["t_end_ms"]
+        rpts = np.asarray(line["points"]).reshape(-1, 2)
+        if len(rpts):
+            xs = np.clip(np.round(rpts[:, 0]).astype(int), 0, w_w - 1)
+            ys = np.clip(np.round(rpts[:, 1]).astype(int), 0, w_h - 1)
+            item["width_px"] = round(float(2.0 * np.median(dt_width[ys, xs])), 2)
         out.append(item)
     return out
 

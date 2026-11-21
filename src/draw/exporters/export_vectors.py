@@ -318,7 +318,9 @@ def simplify_polylines(polylines, epsilon):
             .astype(np.float64)
         )
         if len(approx) >= 2:
-            out.append({"points": approx, "closed": line["closed"]})
+            # Preserva chaves extras (width_px, t_*, meta): a largura por
+            # traço morre aqui se o dict for reconstruído do zero.
+            out.append({**line, "points": approx})
         else:
             out.append(line)
     return out
@@ -332,7 +334,33 @@ def median_stroke_width(ink, skel):
     return float(2.0 * np.median(dt[skel]))
 
 
+def stroke_widths_px(ink, polylines):
+    """Largura por traço em px (pseudo-pressão): 2 x mediana do
+    distanceTransform amostrado nos pontos de cada polilinha."""
+    dt = cv2.distanceTransform(ink.astype(np.uint8), cv2.DIST_L2, 5)
+    h, w = ink.shape
+    widths = []
+    for line in polylines:
+        pts = np.asarray(line["points"]).reshape(-1, 2)
+        if not len(pts):
+            widths.append(None)
+            continue
+        xs = np.clip(np.round(pts[:, 0]).astype(int), 0, w - 1)
+        ys = np.clip(np.round(pts[:, 1]).astype(int), 0, h - 1)
+        widths.append(float(2.0 * np.median(dt[ys, xs])))
+    return widths
+
+
 # -------------------------------------------------------------- escritas
+
+
+def _line_width_mm(line, sx, sy, default_mm):
+    """Largura do traço em mm: o width_px da vetorização quando presente
+    (a média das escalas por eixo, como stroke_width_mm do pipeline)."""
+    width_px = line.get("width_px")
+    if width_px is None:
+        return default_mm
+    return float(width_px) * 0.5 * (sx + sy)
 
 
 def _export_scale(img_w, img_h, paper_w_mm, paper_h_mm, scale=None, formats=None):
@@ -380,11 +408,12 @@ def write_svg(
     ]
     for line in polylines:
         pts = line["points"]
+        w_mm = _line_width_mm(line, sx, sy, stroke_w_mm)
         if len(pts) == 1:
             cx, cy = pts[0][0] * sx, pts[0][1] * sy
             lines.append(
                 f'<circle cx="{cx:.2f}" cy="{cy:.2f}" '
-                f'r="{max(stroke_w_mm / 2, 0.1):.2f}" fill="#000"/>'
+                f'r="{max(w_mm / 2, 0.1):.2f}" fill="#000"/>'
             )
             continue
         d = "M " + " L ".join(f"{x * sx:.2f} {y * sy:.2f}" for x, y in pts)
@@ -392,7 +421,7 @@ def write_svg(
             d += " Z"
         lines.append(
             f'<path d="{d}" fill="none" stroke="#000" '
-            f'stroke-width="{stroke_w_mm:.2f}" stroke-linecap="round" '
+            f'stroke-width="{w_mm:.2f}" stroke-linecap="round" '
             f'stroke-linejoin="round"/>'
         )
     lines.append("</svg>")
@@ -486,7 +515,7 @@ def write_dxf(
             "70",
             "1" if line["closed"] else "0",
             "43",
-            f"{stroke_w_mm:.3f}",
+            f"{_line_width_mm(line, sx, sy, stroke_w_mm):.3f}",
         ]
         for x, y in pts:
             out += ["10", f"{x:.3f}", "20", f"{y:.3f}"]

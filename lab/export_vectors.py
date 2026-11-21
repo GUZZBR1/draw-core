@@ -38,6 +38,7 @@ from draw.exporters.export_vectors import (  # noqa: E402
     parse_svg_paths,
     rasterize,
     simplify_polylines,
+    stroke_widths_px,
     trace_polylines,
     write_dxf,
     write_svg,
@@ -147,6 +148,10 @@ def export_vectors(
     raw = trace_polylines(skel)
     simplified = simplify_polylines(raw, epsilon)
     width_px = median_stroke_width(ink, skel)
+    # Pseudo-pressão por traço: o width_px entra no SVG/DXF por LWPOLYLINE.
+    for line, w_px in zip(simplified, stroke_widths_px(ink, simplified), strict=True):
+        if w_px is not None:
+            line["width_px"] = w_px
 
     return {
         "ink": ink,
