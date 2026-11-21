@@ -45,6 +45,17 @@ _FILL_INK_TILE_SUPPORT = 0.15
 # dos testes), a faixa fina fica em ~0,15 (Devin Review do PR #144).
 _FILL_INK_TILE_MEAN = 0.25
 _FILL_RECOVERY_PASSES = 4
+# Piso absoluto de papel exposto: a absorção de deslocamento global
+# segue a iluminação, mas uma página mediana abaixo deste nível não
+# pode ser papel — a lente tapada/luz apagada é um oclusor, não um
+# novo ponto de referência. Sem o piso, um frame escuro inteiro era
+# adotado como baseline e a tinta confirmada era apagada.
+_MIN_PAPER_LUMA = 24.0
+# Papel que acabou de sair de anomalia fica em recuperação por este
+# número de passadas: a evidência voltou mas ainda não estabilizou —
+# uma anomalia persistente nunca entra em recuperação (espelha o hold
+# de `paper_ok` do guarda anterior, agora por tile).
+_RECOVERY_HOLD_PASSES = 4
 
 
 class PaperExposureGuard:
@@ -73,6 +84,8 @@ class PaperExposureGuard:
         self._ink_streak = None
         self._fill_adopted = None
         self._last_fill_adoption = False
+        self._recovering = None
+        self._was_anomalous = None
         self._texture_reference = None
         self._page_texture_reference = None
 
@@ -95,6 +108,17 @@ class PaperExposureGuard:
         janela de confirmação uma vez por preenchimento adotado, sem
         segurar o orçamento enquanto o bloco seguir adotado."""
         return self._last_fill_adoption
+
+    @property
+    def recovering(self):
+        """Algum tile saiu de anomalia e ainda está no hold de recuperação.
+
+        Espelha o `recovering_px` do guarda anterior: dispara quando a
+        evidência fotométrica VOLTA (sombra que sai, mão que levanta),
+        não enquanto a anomalia persiste — uma borda escura permanente
+        nunca entra em recuperação e deixa a trabalhadora descansar.
+        """
+        return self._recovering is not None and bool(np.any(self._recovering))
 
     def observe(self, image, visible=None, ink_prob=None, ink_support_threshold=None):
         """Return separate masks for safe additions and paper exposure.
@@ -166,6 +190,8 @@ class PaperExposureGuard:
             self._ink_streak = np.zeros(current.shape, dtype=np.uint8)
             self._fill_adopted = np.zeros(current.shape, dtype=bool)
             self._last_fill_adoption = False
+            self._recovering = np.zeros(current.shape, dtype=np.uint8)
+            self._was_anomalous = np.zeros(current.shape, dtype=bool)
 
         known = np.isfinite(self._reference)
         candidates = current[updateable]
@@ -210,8 +236,10 @@ class PaperExposureGuard:
         anomalous = darkened | color_anomaly
         updateable_px = int(np.count_nonzero(updateable))
         shifted = int(np.count_nonzero(anomalous & updateable))
-        if shifted >= _GLOBAL_SHIFT_MIN_TILES and shifted >= (
-            _GLOBAL_SHIFT_FRACTION * updateable_px
+        if (
+            shifted >= _GLOBAL_SHIFT_MIN_TILES
+            and shifted >= (_GLOBAL_SHIFT_FRACTION * updateable_px)
+            and page_reference >= _MIN_PAPER_LUMA
         ):
             # Quase toda a página à vista mudou junta: é a iluminação
             # global, não um oclusor. A razão medida nos tiles que
@@ -411,6 +439,16 @@ class PaperExposureGuard:
                 if visible is None:
                     visible = np.ones((height, width), dtype=bool)
                 visible[recovered] = True
+        # Hold de recuperação: tile que saiu de anomalia conta como
+        # "evidência voltando" por _RECOVERY_HOLD_PASSES passadas; um que
+        # re-escurece sai do hold, e o resto decai uma por passada.
+        left = self._was_anomalous & ~anomalous
+        self._recovering[left] = _RECOVERY_HOLD_PASSES
+        self._recovering[anomalous] = 0
+        np.subtract(
+            self._recovering, 1, out=self._recovering, where=(self._recovering > 0) & ~left
+        )
+        self._was_anomalous = anomalous.copy()
         return ExposureAssessment(
             visible=visible,
             paper_exposed=paper_exposed,

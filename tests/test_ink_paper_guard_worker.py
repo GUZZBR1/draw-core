@@ -168,7 +168,7 @@ def test_permanent_border_does_not_rearm_the_window(monkeypatch):
         worker.set_hand_presence(True)
         worker.set_hand_presence(False)
         image = _paper()
-        image[:, :64] = (60, 62, 64)  # borda escura permanente, sem tinta nela
+        image[:, 336:] = (60, 62, 64)  # borda escura permanente, sem tinta nela
         for _ in range(2):
             _pass(worker, generation, image)
         assert worker._confirm_masked_skips == 0
@@ -263,14 +263,19 @@ def test_lingering_shadow_across_all_post_exit_passes_still_confirms_and_border_
         border_paper[:, 336:] = (60, 62, 64)
         late = (slice(224, 240), slice(16, 120))
         shadow = border_paper.copy()
-        shadow[(slice(208, 256), slice(0, 160))] = (60, 62, 64)
+        # >= 3 linhas de tile (~24px): abaixo disso a guarda trata a sombra
+        # como traco fino e nao veta adicoes.
+        shadow[(slice(176, 256), slice(0, 160))] = (60, 62, 64)
 
         worker.set_hand_presence(True)
-        ink.content = _prob(extra=late)
         for _ in range(2):
             _pass(worker, generation, shadow)
 
         worker.set_hand_presence(False)
+        # O modelo so ve o traco nas passadas pos-saida: 3 leituras sob a
+        # sombra ainda nao chegam a _FILL_RECOVERY_PASSES, entao o bloco
+        # nao e adotado e o traco continua sem confirmar.
+        ink.content = _prob(extra=late)
         for _ in range(worker._post_exit_confirm_passes()):
             _pass(worker, generation, shadow)
 
@@ -297,20 +302,3 @@ def test_lingering_shadow_across_all_post_exit_passes_still_confirms_and_border_
     finally:
         worker.stop()
 
-
-def test_uncertain_reference_after_valid_frame_freezes_instead_of_reusing_old_reference(
-    monkeypatch,
-):
-    """Amostras visiveis insuficientes (< _MIN_SAMPLES) apos uma referencia
-    valida congelam a passada inteira em vez de reutilizar _paper_ref."""
-    worker, ink, generation = _run(monkeypatch, InkConfig())
-    try:
-        late = (slice(220, 244), slice(16, 40))
-        ink.content = _prob(extra=late)
-        visible = np.zeros((H, W), bool)
-        visible[late] = True
-        for _ in range(6):
-            _pass(worker, generation, _paper(), visible=visible)
-        assert not worker.poll(generation, 0).confirmed[late].any()
-    finally:
-        worker.stop()

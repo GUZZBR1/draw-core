@@ -777,7 +777,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         ):
             return False
         if (
-            self._paper_exposure.pending_fill_recovery
+            (
+                self._paper_exposure.pending_fill_recovery
+                or self._paper_exposure.recovering
+            )
             and self._fill_recovery_waited < occlusion._FILL_RECOVERY_PASSES
         ):
             # Streak de evidência de tinta contando num bloco
@@ -1141,7 +1144,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # pos-saida (review do PR #118).
             is_masked = visible is not None and not _crop_all_visible(visible, corners)
             fill_pending = (
-                self._paper_exposure.pending_fill_recovery
+                (
+                    self._paper_exposure.pending_fill_recovery
+                    or self._paper_exposure.recovering
+                )
                 and self._fill_recovery_waited < occlusion._FILL_RECOVERY_PASSES
             )
             if (
@@ -1366,7 +1372,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         self._confirm_passes,
                         votes._INK_VOTE_WINDOW,
                     )
-                elif self._paper_exposure.pending_fill_recovery:
+                elif (
+                    self._paper_exposure.pending_fill_recovery
+                    or self._paper_exposure.recovering
+                ):
                     self._fill_recovery_waited += 1
                 else:
                     self._fill_recovery_waited = 0
