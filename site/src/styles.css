@@ -1056,6 +1056,7 @@ body:not(.dark) .papers-detail { border: 1.5px solid color-mix(in srgb, var(--in
 .papers-more.is-in > :nth-child(2) { transition-delay: 150ms; }
 @media (prefers-reduced-motion: reduce) { .papers-more > :not(.papers-more-body) { opacity: 1; filter: none; transform: none; transition: none; } }
 /* Descricao e subprojetos so aparecem quando o mouse passa pelo titulo; a onda corre pelas letras. */
+.papers-more-title:focus-visible { outline: 2px solid var(--accent); outline-offset: -8px; border-radius: 14px; }
 .papers-more-title { cursor: default; outline: 0; padding: 36px 0; margin: -36px 0 -22px; }
 .papers-more-body { display: grid; grid-template-rows: 0fr; opacity: 0; filter: blur(14px); pointer-events: none; transition: grid-template-rows 900ms cubic-bezier(.22,.61,.36,1), opacity 900ms cubic-bezier(.22,.61,.36,1), filter 900ms cubic-bezier(.22,.61,.36,1); }
 .papers-more-body.is-open { grid-template-rows: 1fr; opacity: 1; filter: none; pointer-events: auto; }

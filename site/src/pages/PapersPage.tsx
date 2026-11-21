@@ -42,10 +42,12 @@ export default function PapersPage() {
   useEffect(() => {
     const el = moreRef.current;
     if (!el || moreSeen) return;
+    // Observa o próprio título (e não a seção, cujo padding de 160px entra antes): a onda só roda com ele visível.
+    const title = el.querySelector('.papers-more-title') ?? el;
     const io = new IntersectionObserver(([e]) => {
       if (e.isIntersecting) { setMoreSeen(true); startWave(); io.disconnect(); }
-    }, { threshold: 0.2 });
-    io.observe(el);
+    }, { threshold: 0.9 });
+    io.observe(title);
     return () => io.disconnect();
   }, [moreSeen]);
 
