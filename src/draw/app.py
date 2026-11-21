@@ -155,6 +155,7 @@ def _detect_sheet_combined_traced(frame, neural_detector):
         "classic_ran": False,
         "classic_verdict": None,
         "classic_corners": None,
+        "scene_stats": None,
     }
     extras = {}
 
@@ -184,6 +185,12 @@ def _detect_sheet_combined_traced(frame, neural_detector):
         # extras para o laço retificar com a homografia do warp de
         # tinta; a máscara de mão alimenta a oclusão semântica.
         corners, verdict, mask = neural_detector(frame, return_mask=True)
+        # Sinais de qualidade de cena da segmentação (issue #106): o
+        # rastro os leva à telemetria em TODOS os desfechos neurais —
+        # a cena estranha sem quadrilátero (veto, presença sem
+        # posição) é exatamente o caso medido lá. getattr com default:
+        # dublês de teste antigos não têm o atributo.
+        trace["scene_stats"] = getattr(neural_detector, "last_scene_stats", None)
         if corners is not None and mask is not None:
             # Máscara quase vazia não é evidência de folha: sem o
             # piso, uma detecção ruim transformaria a cobertura num
@@ -1283,6 +1290,9 @@ def run(
                 page_clean,
                 hand_masker,
                 config=None if pipeline_config is None else pipeline_config.ink,
+                ink_divnorm=(
+                    False if pipeline_config is None else pipeline_config.ink_divnorm
+                ),
             ).start()
             print(
                 "Tinta em thread propria: o laco principal nao espera "
@@ -1577,6 +1587,15 @@ def run(
             ui = _ui_state()
             _camera_menu["cam_shape"] = status.shape
             ui_signature = _ui_signature(ui)
+            # O resize do painel e cacheado por publicacao: geracao +
+            # versao identificam o conteudo do canvas acumulado (a
+            # versao reinicia por geracao). Canvas sem publicacao
+            # propria (blank, warp de marcadores) vai sem token.
+            canvas_version = (
+                (pipeline.clean_generation, pipeline.clean_display_version)
+                if pipeline is not None and canvas is pipeline.accumulated_canvas
+                else None
+            )
             last_view = view_module.compose_view(
                 status,
                 canvas,
@@ -1588,6 +1607,7 @@ def run(
                 camera_menu=ui["camera"],
                 settings_menu=ui["settings"],
                 hud=ui["hud"],
+                canvas_version=canvas_version,
             )
             _show(last_view)
 
