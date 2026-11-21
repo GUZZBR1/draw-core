@@ -18,10 +18,16 @@ seguidas (mesmo orcamento do app); esgotado, o desfecho e erro —
 timeout de grab nunca encerra a corrida como "ok". Encerra com
 Ctrl+C ou --max-frames.
 
+--frames <dir> grava a cena BRUTA de cada quadro como fNNNN.png, sem
+anotacao e sem stride — e o caminho de captura para clipes do corpus
+(docs/CORPUS.md): os dumps scene_/canvas_ sao evidencia de
+diagnostico, nao material de replay.
+
 Uso:
   python -m lab.desk_capture                              # webcam local (indice 0)
   python -m lab.desk_capture --source hvcam:// --fps 30
   python -m lab.desk_capture --source sessao.drawcap --fps 30 --out /tmp/desk
+  python -m lab.desk_capture --source sessao.drawcap --fps 30 --frames clipe/
 """
 
 from __future__ import annotations
@@ -209,7 +215,9 @@ class _DumpEvery:
     te-la zerado depois do ultimo dump.
     """
 
-    def __init__(self, out_dir, tap, every=15, log=print, now=time.monotonic):
+    def __init__(
+        self, out_dir, tap, every=15, log=print, now=time.monotonic, frames_dir=None
+    ):
         if every < 1:
             raise ValueError("--every precisa ser >= 1")
         self.out_dir = Path(out_dir)
@@ -219,9 +227,13 @@ class _DumpEvery:
         self.now = now
         self.t0 = now()
         self.loop = None
+        self.frames_dir = None if frames_dir is None else Path(frames_dir)
 
     def __call__(self, loop, worker, frame_index):
         self.loop = loop
+        if self.frames_dir is not None:
+            # Quadro bruto, contiguo e sem anotacao — o fNNNN.png do clipe.
+            _write_png(self.frames_dir / f"f{frame_index:04d}.png", self.tap.last_frame)
         if frame_index % self.every:
             return
         stamp = f"{frame_index:05d}"
@@ -261,6 +273,7 @@ def run(
     fps=None,
     max_frames=None,
     live_retries=0,
+    frames_dir=None,
     neural_model=None,
     page_clean_model=None,
     hand_model=None,
@@ -274,7 +287,8 @@ def run(
     Devolve o resumo de run_pipeline, ou None quando interrompido;
     em ambos os casos session.json fica no out_dir — os campos
     volumosos (mask, anchors, registrations) saem como contagens.
-    Recusa um out_dir que ja tenha artefatos de outra corrida.
+    Recusa um out_dir que ja tenha artefatos de outra corrida e um
+    frames_dir ja povoado com f*.png.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -283,9 +297,19 @@ def run(
             f"{out_dir} ja contem artefatos de captura de mesa; escolha "
             "outro --out (a evidencia anterior nao e apagada)"
         )
+    if frames_dir is not None:
+        frames_dir = Path(frames_dir)
+        if frames_dir.is_dir() and any(frames_dir.glob("f*.png")):
+            raise ValueError(
+                f"{frames_dir} ja contem quadros f*.png; escolha outro "
+                "--frames (capturas nao se misturam)"
+            )
+        frames_dir.mkdir(parents=True, exist_ok=True)
     tap = _TappedCapture(capture, max_frames=max_frames, live_retries=live_retries)
-    dump = _DumpEvery(out_dir, tap, every=every, log=log)
+    dump = _DumpEvery(out_dir, tap, every=every, log=log, frames_dir=frames_dir)
     log(f"saida em {out_dir}")
+    if frames_dir is not None:
+        log(f"quadros brutos em {frames_dir}")
     result = None
     interrupted = False
     failure = None
@@ -396,6 +420,12 @@ def main(argv=None):
     parser.add_argument(
         "--max-frames", type=int, help="encerra a corrida apos N quadros"
     )
+    parser.add_argument(
+        "--frames",
+        type=Path,
+        metavar="DIR",
+        help="grava a cena bruta de cada quadro como DIR/fNNNN.png (clipe do corpus)",
+    )
     parser.add_argument("--neural-model")
     parser.add_argument("--page-clean-model")
     parser.add_argument(
@@ -441,6 +471,7 @@ def main(argv=None):
                 fps=args.fps,
                 max_frames=args.max_frames,
                 live_retries=_live_retries(source),
+                frames_dir=args.frames,
                 neural_model=args.neural_model,
                 page_clean_model=args.page_clean_model,
                 hand_model=args.hand_model,

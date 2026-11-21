@@ -271,13 +271,19 @@ def run_replay(
     ink_model=None,
     panel_frames=None,
     verify="manifest",
+    frame_files=None,
 ):
     """Roda o corpus pelo laço real. detector/page_clean injetáveis
     (testes); por omissão, os modelos reais. panel_frames: conjunto
     de índices (na enumeração com stride) cujos artefatos se gravam;
     None = só telemetria (1ª passagem). verify é o callable de
     integridade dos modelos: "manifest" injeta o verificador de
-    assets/manifest.json; None desliga (bancadas/testes fora dele)."""
+    assets/manifest.json; None desliga (bancadas/testes fora dele).
+    frame_files: inventário de quadros explícito e ordenado (o corpus
+    rotulado passa os f*.png registrados, na ordem numérica de
+    clip_frames); o "frame" gravado em cada registro é a posição nessa
+    ordem — quadro ilegível é pulado e deixa lacuna nos índices. None
+    mantém a descoberta genérica (raw/ da sessão ou o próprio dir)."""
     from draw.contracts import FramePacket
     from draw.infra.manifest import verify_model
     from draw.ink.worker import PageCleanWorker
@@ -292,7 +298,9 @@ def run_replay(
         verify = verify_model
     config = _parse_flags(flags or [])
 
-    files = list_corpus_frames(corpus)[::stride]
+    if frame_files is None:
+        frame_files = list_corpus_frames(corpus)
+    files = list(frame_files)[::stride]
     if detector is None:
         detector = NeuralSheetDetector(
             str(sheet_model or _default_model("draw_seg_v3_dyn.onnx")),
