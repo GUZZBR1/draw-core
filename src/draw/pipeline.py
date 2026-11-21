@@ -283,6 +283,7 @@ class Pipeline:
         self._hand_mask_det = None
         self._hand_mask_captured_at = None
         self._hand_mask_needs_refresh = False
+        self._hand_mask_with_sheet = False
 
         self.tracker = tracker.SheetTracker()
         self._detect_wake = (
@@ -621,6 +622,7 @@ class Pipeline:
         self._hand_mask_det = None
         self._hand_mask_captured_at = None
         self._hand_mask_needs_refresh = False
+        self._hand_mask_with_sheet = False
         self._source_id += 1
         self._detections_since = since
         self.clean_hand_present = None
@@ -681,6 +683,15 @@ class Pipeline:
             mask, mask_at = None, None
         self._hand_mask_det = mask
         self._hand_mask_captured_at = mask_at
+        # A máscara agora acompanha qualquer desfecho neural — veto e
+        # "none" incluídos (PR #121). Quem consome a máscara como
+        # evidência de "mão sobre a folha" (auto-rotação por borda)
+        # precisa saber se ela veio de detecção que fechou cantos:
+        # um veto na janela de remoção não é folha (review do PR
+        # #123).
+        self._hand_mask_with_sheet = (
+            mask is not None and detection is not None and detection.corners is not None
+        )
 
         if woke_for_stale_mask or (had_hand_mask and (mask is None or not mask.any())):
             # Reabre a confirmação se a passada anterior ainda ocultava o traço.
@@ -691,6 +702,11 @@ class Pipeline:
     def last_hand_mask(self):
         """Máscara semântica mais recente ainda válida, ou None."""
         return self._hand_mask_det
+
+    @property
+    def last_hand_mask_with_sheet(self):
+        """A máscara vigente veio de detecção que fechou cantos."""
+        return self._hand_mask_with_sheet
 
     def step(self, packet):
         """Um quadro do laco sem marcadores.

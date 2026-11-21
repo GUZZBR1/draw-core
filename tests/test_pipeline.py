@@ -1181,6 +1181,44 @@ def test_settled_hand_mask_expires_if_heartbeat_stalls(monkeypatch, late_heartbe
     assert ink.submitted[-1][2].all()
 
 
+def test_hand_mask_with_sheet_marks_cornerless_results():
+    """A máscara de mão acompanha qualquer desfecho neural — veto e
+    "none" incluídos (PR #121). Quem a consome como evidência de
+    "mão sobre a folha" precisa saber se ela veio de detecção com
+    cantos: a flag `last_hand_mask_with_sheet` distingue os dois
+    (review do PR #123)."""
+    loop, _det, _ink = _make_loop(lambda _i: (QUAD.copy(), "paper", None))
+    mask = np.zeros((480, 640), np.uint8)
+    loop._update_hand_mask(
+        DetectionResult(
+            sequence=1,
+            corners=QUAD.copy(),
+            verdict="paper",
+            captured_at=1.0,
+            detect_ms=1.0,
+            hand_mask=mask,
+        ),
+        1.5,
+    )
+    assert loop.last_hand_mask is not None
+    assert loop.last_hand_mask_with_sheet
+    loop._update_hand_mask(
+        DetectionResult(
+            sequence=2,
+            corners=None,
+            verdict=None,
+            captured_at=2.0,
+            detect_ms=1.0,
+            hand_mask=mask,
+        ),
+        2.5,
+    )
+    # O veto ainda publica a evidência de oclusão — mas sem cantos
+    # ela não vale como "mão sobre a folha" para a auto-rotação.
+    assert loop.last_hand_mask is not None
+    assert not loop.last_hand_mask_with_sheet
+
+
 def test_expired_hand_mask_without_mediapipe_cannot_confirm_hand_as_ink(monkeypatch):
     class _DarkIsInk:
         threshold = 0.5

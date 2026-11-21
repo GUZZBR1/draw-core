@@ -1724,14 +1724,17 @@ def run(
                     and pipeline.last_det_seq != last_auto_rot_det_seq
                 ):
                     last_auto_rot_det_seq = pipeline.last_det_seq
-                    # A máscara de mão agora acompanha qualquer
-                    # desfecho neural — veto e "none" incluídos — mas
-                    # a rotação por borda só faz sentido com folha
-                    # presente; sem o gate, mãos no setup da mesa
-                    # queimariam o único flip antes da primeira
-                    # detecção (review do PR #121).
-                    if sheet_present and auto_rotator.observe_mask(
-                        pipeline.last_hand_mask
+                    # A máscara de mão acompanha qualquer desfecho
+                    # neural — veto e "none" incluídos — mas a
+                    # rotação por borda só faz sentido quando a
+                    # máscara veio de detecção que fechou cantos:
+                    # mãos no setup da mesa ou num veto na janela de
+                    # remoção queimariam o único flip sem folha de
+                    # evidência (review do PR #123).
+                    if (
+                        sheet_present
+                        and pipeline.last_hand_mask_with_sheet
+                        and auto_rotator.observe_mask(pipeline.last_hand_mask)
                     ):
                         rotation = 180 if frame_source.rotation == 0 else 0
                         frame_source.set_rotation(rotation)
