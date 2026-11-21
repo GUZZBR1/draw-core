@@ -769,6 +769,13 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             and np.any(self._accumulator._removal_streak)
         ):
             return False
+        if self._paper_exposure.pending_fill_recovery:
+            # Streak de evidência de tinta contando num bloco
+            # anômalo: as passadas que a guarda precisa para adotar
+            # o preenchimento não podem contar como quietude —
+            # dormir no meio da contagem congelava o traco antes de
+            # ele votar (Devin Review do PR #144).
+            return False
         if self._identity_recovery_requested and self._identity_reference is not None:
             return False
         if (
@@ -1115,11 +1122,20 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # fora do quad nao pode gastar a janela de confirmacao
             # pos-saida (review do PR #118).
             is_masked = visible is not None and not _crop_all_visible(visible, corners)
+            fill_pending = self._paper_exposure.pending_fill_recovery
             if (
                 self._post_exit_confirm_passes() > 1
-                and (is_pre_exit or is_masked)
-                and self._confirm_masked_skips < votes._INK_VOTE_WINDOW
+                and (is_pre_exit or is_masked or fill_pending)
+                and (
+                    self._confirm_masked_skips < votes._INK_VOTE_WINDOW or fill_pending
+                )
             ):
+                # Passada com recuperação de preenchimento em curso
+                # também não gasta a janela limpa: o veto da guarda
+                # esconde o traco exatamente como uma máscara — o
+                # orçamento serve às passadas em que ele pode votar
+                # (Devin Review do PR #144). O teto da contagem e o
+                # proprio streak: suporte perdido o zera sozinho.
                 self._confirm_masked_skips += 1
                 self._confirm_passes = self._post_exit_confirm_passes()
             else:
@@ -1302,6 +1318,19 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     return False
                 if generation != self._generation:
                     return True
+                if self._paper_exposure.last_fill_adoption:
+                    # A guarda acabou de adotar um bloco como
+                    # preenchimento: as passadas que o votam precisam
+                    # cobrir a janela de voto — sem rearma o
+                    # orçamento, gasto durante o streak, expirava
+                    # antes da confirmação fechar (Devin Review do
+                    # PR #144). Rearmar é por borda de adoção; um
+                    # bloco adotado não segura o orçamento para
+                    # sempre.
+                    self._confirm_passes = max(
+                        self._confirm_passes,
+                        votes._INK_VOTE_WINDOW,
+                    )
                 first_pass = generation != self._worker_generation
                 recovering = self._identity_reference is not None and (
                     first_pass or self._identity_recovery_requested
@@ -1685,6 +1714,14 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         identity_recall = 1.0 if keep_page else 0.0
                     else:
                         seen = candidate > self._accumulator.threshold
+                        if identity_visible is not None:
+                            # O que o bloqueio fotométrico cobre não
+                            # é evidência — tinta falsa lida sob a
+                            # sombra não pode entrar no denominador
+                            # de contenção nem, dilatada, fabricar
+                            # recall perto da tinta anterior (Devin
+                            # Review do PR #144).
+                            seen = seen & identity_visible
                         kernel = np.ones(
                             (identity._IDENTITY_DILATION_KERNEL,) * 2, np.uint8
                         )

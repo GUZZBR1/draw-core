@@ -346,6 +346,7 @@ def _bare_masker():
     masker._last_hand_mask = None
     masker._last_hand_count = 0
     masker._mask_misses = 0
+    masker._closed = False
     return masker
 
 
@@ -471,6 +472,31 @@ def test_partial_two_hand_detection_retains_missing_hand_mask():
     both = masker.mask(frame)
     one = masker.mask(frame)
     assert np.count_nonzero(one) >= np.count_nonzero(both) * 0.8
+
+
+def test_full_miss_grows_the_held_footprint():
+    """Falha total do detector: a pegada retida cresce a cada miss —
+    a mão segue se movendo sob a leitura antiga e a borda dela não
+    pode virar papel à vista antes da liberação (Devin Review do
+    PR #144)."""
+    masker = _bare_masker()
+    frame = np.zeros((120, 160, 3), dtype=np.uint8)
+    hand = np.array(
+        [[40 + i % 5 * 3, 40 + i // 5 * 3] for i in range(21)],
+        dtype=np.float32,
+    )
+    detections = iter([[hand]] + [[] for _ in range(hand_module._HOLD_FRAMES + 1)])
+    masker._landmarks_locked = lambda *_a, **_k: next(detections)
+
+    detected = masker.mask(frame)
+    assert detected is not None and detected.any()
+    counts = [
+        np.count_nonzero(masker.mask(frame)) for _ in range(hand_module._HOLD_FRAMES)
+    ]
+    assert counts[0] >= np.count_nonzero(detected)
+    assert list(counts) == sorted(counts) and counts[-1] > counts[0]
+    released = masker.mask(frame)
+    assert released is not None and not released.any()
 
 
 def test_observe_resets_retention_when_the_source_changes(monkeypatch):

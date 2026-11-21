@@ -479,6 +479,25 @@ class HandMasker:
                 cv2.MORPH_ELLIPSE, (2 * _DILATE_PX + 1, 2 * _DILATE_PX + 1)
             )
             mask = cv2.dilate(mask, kernel)
+            if self.last_detection_held:
+                # Falha total: a histerese entregou os marcos
+                # retidos e a pegada REAL cresce a cada miss — a
+                # mão segue se movendo sob uma leitura que não se
+                # atualiza; o footprint fixo exporia a borda dela
+                # como papel à vista (Devin Review do PR #144).
+                self._mask_misses += 1
+                if (
+                    self._last_hand_mask is not None
+                    and self._last_hand_mask.shape == mask.shape
+                ):
+                    grow = _MASK_HOLD_GROW_PX * self._mask_misses
+                    hold_kernel = cv2.getStructuringElement(
+                        cv2.MORPH_ELLIPSE, (2 * grow + 1, 2 * grow + 1)
+                    )
+                    mask = cv2.bitwise_or(
+                        mask, cv2.dilate(self._last_hand_mask, hold_kernel)
+                    )
+                return mask
             if (
                 self._last_hand_mask is not None
                 and self._last_hand_mask.shape == mask.shape

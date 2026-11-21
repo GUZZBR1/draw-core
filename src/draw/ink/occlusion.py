@@ -27,7 +27,8 @@ _GLOBAL_SHIFT_MIN_TILES = 4
 # adição vale como sempre; depois ele cai só para o voto de adição.
 # A remoção segue exigindo papel exposto, que o preenchimento nunca
 # produz: o tile continua anômalo para o segundo veredito.
-_FILL_INK_TILE_SUPPORT = 0.5
+_FILL_INK_PIXEL_THRESHOLD = 0.7
+_FILL_INK_TILE_SUPPORT = 0.15
 _FILL_RECOVERY_PASSES = 4
 
 
@@ -55,6 +56,28 @@ class PaperExposureGuard:
         self._page_reference = None
         self._page_color_reference = None
         self._ink_streak = None
+        self._fill_adopted = None
+        self._last_fill_adoption = False
+
+    @property
+    def pending_fill_recovery(self):
+        """Streak de evidência de tinta contando num bloco (ainda não
+        adotado): a recuperação por preenchimento tem trabalho pendente
+        e precisa de passadas limpas chegando — a porta de descanso não
+        pode ler essas passadas como quietude, senão a trabalhadora
+        dorme no meio da contagem e o preenchimento nunca vota (Devin
+        Review do PR #144)."""
+        return self._ink_streak is not None and bool(
+            np.any((self._ink_streak > 0) & (self._ink_streak < _FILL_RECOVERY_PASSES))
+        )
+
+    @property
+    def last_fill_adoption(self):
+        """True apenas na passada em que um bloco cruzou o limiar de
+        adoção: é uma borda, não um estado — a trabalhadora rearma a
+        janela de confirmação uma vez por preenchimento adotado, sem
+        segurar o orçamento enquanto o bloco seguir adotado."""
+        return self._last_fill_adoption
 
     def observe(self, image, visible=None, ink_prob=None):
         """Return separate masks for safe additions and paper exposure.
@@ -72,6 +95,11 @@ class PaperExposureGuard:
         com o tile à vista, deixa de vetar adições. Sem o mapa o veto é
         permanente, como antes.
         """
+        # Borda de adoção dura uma observação: qualquer retorno —
+        # precoce ou completo — apaga a do ciclo anterior antes de
+        # recomputar, senão uma passada sem imagem válida a repetia
+        # e a trabalhadora rearmava a janela para sempre.
+        self._last_fill_adoption = False
         if not isinstance(image, np.ndarray) or image.dtype != np.uint8:
             return None
         if image.ndim not in (2, 3) or (image.ndim == 3 and image.shape[2] != 3):
@@ -113,6 +141,8 @@ class PaperExposureGuard:
             self._page_reference = None
             self._page_color_reference = None
             self._ink_streak = np.zeros(current.shape, dtype=np.uint8)
+            self._fill_adopted = np.zeros(current.shape, dtype=bool)
+            self._last_fill_adoption = False
 
         known = np.isfinite(self._reference)
         candidates = current[updateable]
@@ -161,13 +191,56 @@ class PaperExposureGuard:
             _GLOBAL_SHIFT_FRACTION * updateable_px
         ):
             # Quase toda a página à vista mudou junta: é a iluminação
-            # global, não um oclusor. As referências cedem ao nível
-            # novo de uma vez; sem isso o quarto escurecido congelava
-            # a página atrás de um bloco único.
-            self._reference[updateable] = current[updateable]
+            # global, não um oclusor. A razão medida nos tiles que
+            # mudaram juntos escala TODA a referência conhecida —
+            # inclusive a dos tiles escondidos pela mão: ela ficava
+            # clara demais e, ao reaparecer no nível novo, virava um
+            # bloco escuro permanente. E a referência de página cede
+            # ao percentil medido, em vez de ficar presa no máximo
+            # histórico (Devin Review do PR #144).
+            measured = anomalous & updateable & known
+            if np.any(measured):
+                ratio = float(np.median(current[measured] / expected[measured]))
+            elif self._page_reference:
+                ratio = page_reference / self._page_reference
+            else:
+                ratio = 1.0
+            ratio = float(np.clip(ratio, 0.25, 4.0))
+            self._reference[known] *= np.float32(ratio)
+            self._page_reference = page_reference
             if self._color_reference is not None:
-                self._color_reference[updateable] = chroma[updateable]
-            anomalous = np.zeros(current.shape, dtype=bool)
+                # Aplica o deslocamento de croma comum; usar o valor
+                # bruto por tile ensinaria junto uma sombra colorida.
+                color_known = known & np.all(np.isfinite(self._color_reference), axis=2)
+                color_tiles = updateable & color_known
+                if np.any(color_tiles):
+                    color_shift = np.median(
+                        chroma[color_tiles] - self._color_reference[color_tiles], axis=0
+                    )
+                    self._color_reference[known] = np.clip(
+                        self._color_reference[known] + color_shift, 0.0, 2.0
+                    )
+                self._page_color_reference = np.median(
+                    chroma[updateable], axis=0
+                ).astype(np.float32)
+
+            # Absorve apenas o componente comum. Um tile muito mais
+            # escuro/colorido que o resto continua anômalo e não prova
+            # papel exposto — inclusive sob a sombra durante a mudança.
+            expected = np.where(known, self._reference, self._page_reference)
+            drop = np.maximum(_MIN_DARKENING, expected * _DARKENING_FRACTION)
+            darkened = current < expected - drop
+            color_anomaly = np.zeros(current.shape, dtype=bool)
+            if color is not None and self._page_color_reference is not None:
+                expected_color = np.where(
+                    known[..., None],
+                    self._color_reference,
+                    self._page_color_reference,
+                )
+                color_anomaly = (
+                    np.linalg.norm(chroma - expected_color, axis=2) > _CHROMA_CHANGE
+                )
+            anomalous = darkened | color_anomaly
 
         # Recuperação por preenchimento: o streak conta as passadas
         # seguidas em que o tile anômalo, à vista, é lido como tinta
@@ -175,22 +248,31 @@ class PaperExposureGuard:
         # deixa a contagem andar — a adoção só acontece com a mão
         # fora do caminho ou quando a cena não tem máscara alguma.
         supported = np.zeros(current.shape, dtype=bool)
+        pixel_support = None
         if ink_prob is not None and np.any(anomalous):
             ink_prob = np.asarray(ink_prob, dtype=np.float32)
             if ink_prob.shape == (height, width):
+                pixel_support = ink_prob >= _FILL_INK_PIXEL_THRESHOLD
+                support_fraction = cv2.resize(
+                    pixel_support.astype(np.float32), size, interpolation=cv2.INTER_AREA
+                )
                 supported = (
                     anomalous
                     & updateable
-                    & (
-                        cv2.resize(ink_prob, size, interpolation=cv2.INTER_AREA)
-                        >= _FILL_INK_TILE_SUPPORT
-                    )
+                    & (support_fraction >= _FILL_INK_TILE_SUPPORT)
                 )
         self._ink_streak[supported] = np.minimum(
             self._ink_streak[supported].astype(np.uint16) + 1, 255
         ).astype(np.uint8)
         self._ink_streak[~supported] = 0
+        # Quem perdeu o suporte desaprende a adoção: se a evidência
+        # voltar e o tile readotar, a borda dispara de novo — a
+        # trabalhadora rearma a janela de confirmação por borda, não
+        # por estado retido (Devin Review do PR #144).
+        self._fill_adopted &= self._ink_streak > 0
         adopted = self._ink_streak >= _FILL_RECOVERY_PASSES
+        self._last_fill_adoption = bool(np.any(adopted & ~self._fill_adopted))
+        self._fill_adopted |= adopted
 
         # The removal test uses every anomalous tile. For additions, require
         # a two-dimensional block before suppressing pixels; a thin dark pen
@@ -239,6 +321,17 @@ class PaperExposureGuard:
                 )
                 > 0
             )
+        if pixel_support is not None and np.any(adopted):
+            adopted_pixels = cv2.resize(
+                adopted.astype(np.uint8),
+                (width, height),
+                interpolation=cv2.INTER_NEAREST,
+            ) > 0
+            recovered = adopted_pixels & pixel_support
+            if np.any(recovered):
+                if visible is None:
+                    visible = np.ones((height, width), dtype=bool)
+                visible[recovered] = True
         return ExposureAssessment(
             visible=visible,
             paper_exposed=paper_exposed,

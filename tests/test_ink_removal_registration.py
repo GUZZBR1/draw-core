@@ -404,6 +404,41 @@ def test_global_dimming_is_absorbed_not_blocked():
     assert not assessment.visible[60, 60]
 
 
+def test_global_dimming_preserves_a_simultaneous_local_shadow():
+    """O fator global da sala não pode ensinar junto uma sombra
+    local: papel_exposed fica falso durante toda a janela de remoção."""
+    guard = occlusion_mod.PaperExposureGuard()
+    bright = np.full((240, 240, 3), 220, dtype=np.uint8)
+    visible = np.ones(bright.shape[:2], dtype=bool)
+    guard.observe(bright, visible)
+
+    dim_shadow = np.full_like(bright, 150)
+    dim_shadow[96:120, 96:120] = 60
+    for _ in range(registration_mod._REMOVAL_PASSES + 2):
+        assessment = guard.observe(dim_shadow, visible)
+        assert not assessment.paper_exposed[100:110, 100:110].any()
+        assert not assessment.visible[100:110, 100:110].any()
+
+
+def test_fill_recovery_exempts_supported_pixels_across_tile_borders():
+    """Um preenchimento deslocado da grade recupera também pixels
+    fortes das tiles de borda e sobrevive à dilatação dos vizinhos."""
+    guard = occlusion_mod.PaperExposureGuard()
+    paper = np.full((120, 168, 3), 220, dtype=np.uint8)
+    guard.observe(paper)
+    filled = paper.copy()
+    filled[37:83, 37:83] = 60
+    prob = np.zeros((120, 168), np.float32)
+    prob[37:83, 37:83] = 0.95
+
+    for _ in range(occlusion_mod._FILL_RECOVERY_PASSES):
+        assessment = guard.observe(filled, ink_prob=prob)
+
+    assert assessment.visible is not None
+    assert assessment.visible[37:83, 37:83].all()
+    assert not assessment.paper_exposed[37:83, 37:83].any()
+
+
 def test_fill_region_recovers_additions_but_never_proves_paper():
     """Preenchimento: o veto de adição cai com evidência de tinta
     sustentada e a mão fora do tile; o de remoção fica — papel
@@ -552,3 +587,128 @@ def test_hand_mask_dropouts_cannot_erase_or_add_hand_edges_and_exit_confirms():
         pass_page(shadow, new, all_visible)
     assert result._confirmed[90:106, 90:120].all()
     assert result._confirmed[180:196, 260:284].all()
+
+
+def test_global_dimming_releases_tiles_hidden_by_the_hand():
+    """A absorção de shift global escala TODAS as referências
+    conhecidas — inclusive as escondidas pela mão. Sem isso o tile
+    coberto ficava claro demais e, ao reaparecer no nível novo,
+    virava um bloco escuro permanente (Devin Review do PR #144)."""
+    guard = occlusion_mod.PaperExposureGuard()
+    bright = np.full((120, 160, 3), 220, dtype=np.uint8)
+    clear = np.ones(bright.shape[:2], dtype=bool)
+    for _ in range(2):
+        assert guard.observe(bright, clear).paper_exposed is True
+
+    hand = clear.copy()
+    hand[24:96, 24:96] = False  # 3x3 tiles sob a mão
+    dim = np.full((120, 160, 3), 150, dtype=np.uint8)
+    absorbed = guard.observe(dim, hand)
+    assert absorbed.visible is None  # shift absorvido, não bloqueio
+
+    revealed = guard.observe(dim, clear)
+    assert revealed.visible is None
+    assert revealed.paper_exposed is True
+
+
+def test_fill_recovery_keeps_the_worker_awake_past_the_exit_window():
+    """A janela pós-saída do voto legado tem 1 passada, mas o streak
+    de preenchimento precisa de _FILL_RECOVERY_PASSES limpas: sem a
+    trava, a trabalhadora dormia no meio da contagem e a tinta
+    adotável nunca votava (Devin Review do PR #144)."""
+    shape = (120, 160)
+    paper = np.full((*shape, 3), 220, dtype=np.uint8)
+    filled = paper.copy()
+    filled[24:96, 24:96] = 60
+    prob_fill = np.zeros(shape, np.float32)
+    prob_fill[24:96, 24:96] = 0.95
+
+    class _MutablePageClean:
+        threshold = 0.7
+
+        def __init__(self):
+            self.prob = np.zeros(shape, np.float32)
+
+        def ink_prob(self, _image):
+            return self.prob
+
+    clock = rr.SceneClock()
+    page_clean = _MutablePageClean()
+    worker = rr.make_ink_worker(page_clean, clock)
+    generation = worker.new_generation()
+    corners = rr.base_quad(shape)
+    clear = np.ones(shape, dtype=bool)
+    hand_covered = clear.copy()
+    hand_covered[24:96, 24:96] = False
+
+    def pass_page(image, prob, page_visible):
+        page_clean.prob = prob
+        clock.now += 1
+        worker.submit(
+            WarpedPage(
+                image,
+                generation,
+                corners,
+                visible=rr.camera_mask(page_visible, corners),
+            )
+        )
+        ran = worker.pump()
+        assert worker.error is None
+        return ran
+
+    worker.set_hand_presence(True)
+    for _ in range(2):
+        assert pass_page(filled, prob_fill, hand_covered)
+    worker.set_hand_presence(False)
+
+    ran = [
+        pass_page(filled, prob_fill, clear)
+        for _ in range(occlusion_mod._FILL_RECOVERY_PASSES + 3)
+    ]
+    assert all(ran)  # a porta de descanso não fechou durante o streak
+    assert worker._accumulator._confirmed[24:96, 24:96].all()
+
+
+def test_page_recovery_ignores_false_ink_inside_the_photometric_veto():
+    """Tinta falsa lida DENTRO do bloqueio fotométrico não entra na
+    contenção nem fabrica recall dilatada: sem a interseção com a
+    máscara à vista, a sombra acusava troca de página mesmo com a
+    tinta anterior intacta à vista (Devin Review do PR #144)."""
+    shape = (120, 160)
+    paper = np.full((*shape, 3), 220, dtype=np.uint8)
+    prob = np.zeros(shape, np.float32)
+    prob[10:20, 5:20] = 0.95  # traço real fora da futura sombra
+    shadowed = paper.copy()
+    shadowed[24:96, 48:144] = 60  # bloco 3x4 tiles
+    ghost = prob.copy()
+    ghost[30:90, 60:130] = 0.95  # "tinta" lida sob a sombra
+
+    class _MutablePageClean:
+        threshold = 0.7
+
+        def __init__(self):
+            self.prob = prob
+
+        def ink_prob(self, _image):
+            return self.prob
+
+    clock = rr.SceneClock()
+    page_clean = _MutablePageClean()
+    worker = rr.make_ink_worker(page_clean, clock)
+    generation = worker.new_generation()
+    corners = rr.base_quad(shape)
+    for _ in range(6):
+        page_clean.prob = prob
+        clock.now += 1
+        worker.submit(WarpedPage(paper, generation, corners))
+        assert worker.pump()
+        assert worker.error is None
+
+    generation = worker.new_generation(preserve_identity=True)
+    page_clean.prob = ghost
+    clock.now += 1
+    worker.submit(WarpedPage(shadowed, generation, corners))
+    assert worker.pump()
+    assert worker.error is None
+    event = worker.telemetry_snapshot()["page_identity_events"][-1]
+    assert event["decision"] == "same_page"
