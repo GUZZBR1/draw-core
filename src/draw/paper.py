@@ -402,11 +402,12 @@ def perspective_matrix(corners, destination=None):
     """Matriz de homografia 3x3 dos cantos da cena para a folha retificada."""
     src = np.asarray(corners, dtype=np.float32).reshape(4, 2)
     if destination is None:
+        spec = config.current()
         destination = [
             (0, 0),
-            (config.PAPER_W, 0),
-            (config.PAPER_W, config.PAPER_H),
-            (0, config.PAPER_H),
+            (spec.width, 0),
+            (spec.width, spec.height),
+            (0, spec.height),
         ]
     dst = np.asarray(destination, dtype=np.float32).reshape(4, 2)
     return cv2.getPerspectiveTransform(src, dst)
@@ -415,7 +416,8 @@ def perspective_matrix(corners, destination=None):
 def warp_sheet(frame, corners, destination=None):
     """Retifica a folha a partir de quatro cantos explícitos."""
     matrix = perspective_matrix(corners, destination=destination)
-    return cv2.warpPerspective(frame, matrix, (config.PAPER_W, config.PAPER_H))
+    spec = config.current()
+    return cv2.warpPerspective(frame, matrix, (spec.width, spec.height))
 
 
 def warp_paper(frame):
@@ -429,7 +431,6 @@ def warp_paper(frame):
         return None, markers
 
     src = np.array([markers[i] for i in config.MARKER_IDS], dtype=np.float32)
-    dst = np.array(
-        [config.MARKER_CENTERS[i] for i in config.MARKER_IDS], dtype=np.float32
-    )
+    marker_centers = config.current().marker_centers
+    dst = np.array([marker_centers[i] for i in config.MARKER_IDS], dtype=np.float32)
     return warp_sheet(frame, src, dst), markers

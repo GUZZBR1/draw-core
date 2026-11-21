@@ -43,8 +43,8 @@ def test_apply_format_a4_eh_incumbente():
     original = {0: (90, 90), 1: (760, 90), 2: (760, 1110), 3: (90, 1110)}
     config.apply_format("carta")
     assert config.apply_format("a4") == (850, 1200)
-    assert config.MARKER_CENTERS == original
-    assert config.PAPER_FORMAT == "a4"
+    assert config.current().marker_centers == original
+    assert config.current().name == "a4"
     frame = np.arange(200 * 300 * 3, dtype=np.uint8).reshape(200, 300, 3)
     quad = np.float32([[10, 10], [290, 10], [290, 190], [10, 190]])
     matrix = cv2.getPerspectiveTransform(
@@ -58,12 +58,12 @@ def test_apply_format_a4_eh_incumbente():
 
 def test_apply_format_recomputa_marcadores():
     config.apply_format("carta")
-    assert config.MARKER_CENTERS[1] == (929 - 90, 90)
-    assert config.MARKER_CENTERS[2] == (929 - 90, 1200 - 90)
+    assert config.current().marker_centers[1] == (929 - 90, 90)
+    assert config.current().marker_centers[2] == (929 - 90, 1200 - 90)
     assert config.mm_per_px() == 279 / 1200
     with pytest.raises(ValueError):
         config.apply_format("paisagem")
-    assert config.PAPER_FORMAT == "carta"
+    assert config.current().name == "carta"
 
 
 def projected_quad(name="carta", pitch=25, yaw=15, roll=0):
@@ -153,13 +153,13 @@ def test_paisagem_troca_a_grade_e_mantem_mm_por_px():
     )
     unit = config.mm_per_px("a4")
     assert config.apply_format("a4", "paisagem") == (1200, 850)
-    assert (config.PAPER_W, config.PAPER_H) == (1200, 850)
-    assert config.PAPER_ORIENTATION == "paisagem"
+    assert (config.current().width, config.current().height) == (1200, 850)
+    assert config.current().orientation == "paisagem"
     assert config.mm_per_px() == unit
     assert config.paper_mm() == (297.0, 210.0)
-    assert config.MARKER_CENTERS[2] == (1200 - 90, 850 - 90)
+    assert config.current().marker_centers[2] == (1200 - 90, 850 - 90)
     config.apply_format("a4")
-    assert config.PAPER_ORIENTATION == "retrato"
+    assert config.current().orientation == "retrato"
     assert config.paper_mm() == (210.0, 297.0)
 
 
