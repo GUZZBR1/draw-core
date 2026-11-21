@@ -57,6 +57,7 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
   const names = useMemo(() => studioNames(tr), [tr]);
   const paperRef = useRef<HTMLCanvasElement>(null);
   const digitalRef = useRef<HTMLCanvasElement>(null);
+  const [focusPane, setFocusPane] = useState<'paper' | 'digital'>('paper'); // painel grande: começa no papel, para acertar a câmera
   const countRef = useRef<HTMLSpanElement>(null);
   const [initialStrokes] = useState(() => drawing.strokes.map((st) => ({ ink: st.ink, pts: st.pts.map(([x, y]) => [x, y] as Pt) })));
   const strokes = useRef<{ pts: Pt[]; ink: string }[]>(initialStrokes);
@@ -379,6 +380,7 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
     // os avisos mudam a altura das folhas sem disparar 'resize': mantem o tamanho dos canvases sincronizado
     const sizeWatch = new ResizeObserver(render);
     sizeWatch.observe(paper);
+    sizeWatch.observe(digital);
     const clear = () => {
       strokes.current = [];
       scheduleAutosave(); // a folha vazia tambem e gravada
@@ -430,13 +432,13 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
         </div>
       </div>
 
-      <section className="studio-stage">
-        <figure className="studio-pane">
+      <section className={`studio-stage is-focus-${focusPane}`}>
+        <figure className={`studio-pane${focusPane === 'paper' ? '' : ' is-small'}`} onClick={focusPane === 'paper' ? undefined : () => setFocusPane('paper')}>
           <figcaption>{tr('papel', 'paper')}</figcaption>
           <video ref={videoRef} className="studio-video" muted playsInline aria-hidden="true" />
           <canvas ref={paperRef} className={`studio-canvas${camId ? ' is-cam' : ''}`} aria-label={tr('Folha de papel: desenhe aqui', 'Paper sheet: draw here')} />
         </figure>
-        <figure className="studio-pane is-digital">
+        <figure className={`studio-pane is-digital${focusPane === 'digital' ? '' : ' is-small'}`} onClick={focusPane === 'digital' ? undefined : () => setFocusPane('digital')}>
           <figcaption>{tr('digital', 'digital')} · <span ref={countRef}>00</span> {tr('traços', 'strokes')}</figcaption>
           <canvas ref={digitalRef} className="studio-canvas" role="img" aria-label={tr('Versão digital do desenho', 'Digital version of the drawing')} />
         </figure>

@@ -76,6 +76,7 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
   const [webcamCardHovered, setWebcamCardHovered] = useState(false);
   const [webcamFocused, setWebcamFocused] = useState(false);
   const [webcamPinned, setWebcamPinned] = useState(false);
+  const [webcamRec, setWebcamRec] = useState(false); // clique liga/desliga o pisca vermelho da bolinha
   const [webcamDismissed, setWebcamDismissed] = useState(false);
   const [dark, setDark] = useState(readSavedTheme);
   const [, setViewportRevision] = useState(0);
@@ -138,8 +139,8 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
   const headerWidth = useMotionTemplate`min(calc(100% - ${headerGutter}px), ${headerMaxWidth}px)`;
   const navHeight = useTransform(progress, (amount) => {
     const mobile = window.matchMedia('(max-width: 640px)').matches;
-    const initial = mobile ? 44 : 56;
-    const compact = mobile ? 38 : 44;
+    const initial = mobile ? 52 : 64;
+    const compact = mobile ? 46 : 52;
     return initial + (compact - initial) * amount;
   });
   const themeButtonScale = useTransform(progress, (amount) => {
@@ -440,7 +441,7 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
                 onHoverEnd={scheduleHoverClose}
               >
                 <motion.button
-                  className="webcam-trigger"
+                  className={`webcam-trigger${webcamRec ? ' is-rec' : ''}`}
                   type="button"
                   aria-label={tr('Sobre a webcam do Draw', 'About the Draw webcam')}
                   aria-controls="webcam-info-card"
@@ -457,6 +458,7 @@ export default function SiteHeader({ onRepeatProduct }: SiteHeaderProps) {
                     setWebcamDismissed(false);
                   }}
                   onClick={() => {
+                    setWebcamRec((on) => !on);
                     if (webcamPinned) setWebcamDismissed(true);
                     setWebcamPinned(!webcamPinned);
                   }}
