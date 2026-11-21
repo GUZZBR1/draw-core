@@ -1228,15 +1228,13 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 # com ou sem a deteccao do MediaPipe. So imagem
                 # fotometrica (uint8): mapa float nao e foto.
                 reference = paper_evidence.paper_reference(warped, visible)
-                if reference is None:
-                    reference = self._paper_ref
-                else:
+                if reference is not None:
                     self._paper_ref = reference
                 # Sem NENHUMA referencia de papel (imagem preta desde o
                 # inicio da geracao) nao ha o que comparar: a guarda se
                 # abstem como antes. Com referencia previa, incerteza
-                # congela.
-                if reference is not None:
+                # (reference None) congela a pagina inteira.
+                if self._paper_ref is not None:
                     paper_ok_page = paper_evidence.paper_exposed(warped, reference)
             if self._ruling is not None:
                 if generation != self._ruling_generation:
@@ -2023,18 +2021,20 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # warp e nao pode segurar a trabalhadora acordada).
             if (
                 self._spent_confirm_pass
-                and result["recovering_px"] >= _RECOVERY_MIN_PX
+                and (
+                    result["frozen_pending_px"] > 0
+                    or result["recovering_px"] >= _RECOVERY_MIN_PX
+                )
                 and self._confirm_passes < self._post_exit_confirm_passes()
                 and self._confirm_masked_skips
-                < votes._INK_VOTE_WINDOW + self._config.occlusion_hold_passes + 1
+                < 2 * votes._INK_VOTE_WINDOW + self._config.occlusion_hold_passes + 1
             ):
-                # Pos-saida da mao: uma sombra esta saindo (papel de volta,
-                # regiao ainda no hold), entao as passadas gastas ate aqui
-                # nao deram voto limpo — nem para tinta que o modelo nao
-                # via sob a sombra, nem para remocao que o hold barrou.
-                # Re-arma a janela cheia (limitado pelo teto de devolucoes)
-                # para que, solto o hold, haja uma janela inteira de votos
-                # antes do descanso.
+                # Pos-saida da mao: enquanto a guarda congela tinta nova
+                # detectada pelo modelo (ou remocao elegivel no hold) ou a
+                # sombra esta saindo (recovering_px), as passadas gastas ate
+                # aqui nao deram voto limpo. Re-arma a janela cheia (limitado
+                # pelo teto de devolucoes) para que, solto o hold, haja uma
+                # janela inteira de votos antes do descanso.
                 self._confirm_masked_skips += 1
                 self._confirm_passes = self._post_exit_confirm_passes()
             self._generation_passes += 1

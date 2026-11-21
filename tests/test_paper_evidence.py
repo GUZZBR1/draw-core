@@ -274,3 +274,31 @@ def test_recovery_counts_only_shadow_that_cleared_not_permanent_border():
     for _ in range(4):
         result = acc.add(prob, visible, paper_ok=border)
     assert result["recovering_px"] == 0
+
+
+def test_frozen_pending_tracks_new_ink_and_held_erasure_not_unrelated_border():
+    config = InkConfig(occlusion_hold_passes=3)
+    acc = accumulator_mod.LayeredInkAccumulator(config=config)
+    prob = _ink_prob()
+    _confirm(acc, prob)
+    visible = np.ones((H, W), bool)
+    border = np.ones((H, W), bool)
+    border[:, :20] = False  # borda permanente, sem tinta nova ou apagada
+    result = acc.add(prob, visible, paper_ok=border)
+    assert result["frozen_px"] > 0 and result["frozen_pending_px"] == 0
+
+    new = prob.copy()
+    new[140:150, 5:15] = 0.95
+    result = acc.add(new, visible, paper_ok=border)
+    assert result["frozen_pending_px"] == 100
+
+    erased = prob.copy()
+    erased[100:130, 150:210] = 0.0
+    shadow = border.copy()
+    shadow[95:135, 145:215] = False
+    acc.add(erased, visible, paper_ok=shadow)
+    for _ in range(config.occlusion_hold_passes):
+        result = acc.add(erased, visible, paper_ok=border)
+        assert result["frozen_pending_px"] == 30 * 60
+    released = acc.add(erased, visible, paper_ok=border)
+    assert released["frozen_pending_px"] == 0

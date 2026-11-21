@@ -41,9 +41,11 @@ def _prob(*, covered_ink=True, extra=None):
     return prob
 
 
-def _pass(worker, generation, image):
+def _pass(worker, generation, image, visible=None):
     before = worker.stats()["passes_total"]
-    worker.submit(WarpedPage(image, generation, Q0, np.ones((H, W), bool)))
+    if visible is None:
+        visible = np.ones((H, W), bool)
+    worker.submit(WarpedPage(image, generation, Q0, visible))
     deadline = time.monotonic() + 5.0
     while worker.stats()["passes_total"] <= before:
         assert time.monotonic() < deadline, "a passada nao executou"
@@ -222,6 +224,9 @@ def test_stroke_erased_under_a_shadow_is_removed_after_hand_exit(monkeypatch):
         for _ in range(3):
             _pass(worker, generation, _hand_image())
         worker.set_hand_presence(False)
+        # Sombra ainda persiste em parte da janela pos-saida antes de limpar.
+        for _ in range(2):
+            _pass(worker, generation, _hand_image())
         _pass_until(
             worker,
             generation,
@@ -232,5 +237,80 @@ def test_stroke_erased_under_a_shadow_is_removed_after_hand_exit(monkeypatch):
         snap = worker.poll(generation, 0)
         assert not snap.confirmed[COVERED].any()
         assert snap.confirmed[WITNESS].all()
+        _pass_until(
+            worker,
+            generation,
+            _paper(),
+            lambda _snap: worker.stats()["resting"],
+            6,
+        )
+        assert worker.stats()["resting"] is True
+    finally:
+        worker.stop()
+
+
+def test_lingering_shadow_across_all_post_exit_passes_still_confirms_and_border_rests(
+    monkeypatch,
+):
+    """Sombra nao mascarada persiste por todas as 3 passadas pos-saida
+    enquanto o modelo detecta o traco: o orcamento congelado mantem o worker
+    acordado ate limpar e confirmar, e uma borda escura permanente ainda deixa
+    o worker descansar."""
+    config = InkConfig.production()
+    worker, ink, generation = _mature(monkeypatch, config, idle_probe=True)
+    try:
+        border_paper = _paper()
+        border_paper[:, 336:] = (60, 62, 64)
+        late = (slice(224, 240), slice(16, 120))
+        shadow = border_paper.copy()
+        shadow[(slice(208, 256), slice(0, 160))] = (60, 62, 64)
+
+        worker.set_hand_presence(True)
+        ink.content = _prob(extra=late)
+        for _ in range(2):
+            _pass(worker, generation, shadow)
+
+        worker.set_hand_presence(False)
+        for _ in range(worker._post_exit_confirm_passes()):
+            _pass(worker, generation, shadow)
+
+        assert not worker.poll(generation, 0).confirmed[late].any()
+        assert not worker.stats()["resting"]
+
+        _pass_until(
+            worker,
+            generation,
+            border_paper,
+            lambda snap: snap.confirmed[late].all(),
+            config.occlusion_hold_passes + 8,
+        )
+        assert worker.poll(generation, 0).confirmed[late].all()
+
+        _pass_until(
+            worker,
+            generation,
+            border_paper,
+            lambda _snap: worker.stats()["resting"],
+            6,
+        )
+        assert worker.stats()["resting"] is True
+    finally:
+        worker.stop()
+
+
+def test_uncertain_reference_after_valid_frame_freezes_instead_of_reusing_old_reference(
+    monkeypatch,
+):
+    """Amostras visiveis insuficientes (< _MIN_SAMPLES) apos uma referencia
+    valida congelam a passada inteira em vez de reutilizar _paper_ref."""
+    worker, ink, generation = _run(monkeypatch, InkConfig())
+    try:
+        late = (slice(220, 244), slice(16, 40))
+        ink.content = _prob(extra=late)
+        visible = np.zeros((H, W), bool)
+        visible[late] = True
+        for _ in range(6):
+            _pass(worker, generation, _paper(), visible=visible)
+        assert not worker.poll(generation, 0).confirmed[late].any()
     finally:
         worker.stop()
