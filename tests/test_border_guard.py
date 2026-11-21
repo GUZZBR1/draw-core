@@ -838,6 +838,134 @@ def test_deferred_partial_overlap_does_not_mix_ink():
     assert run_case(0) > 50_000
 
 
+def test_blank_overlap_replacement_does_not_inherit_old_ink():
+    """Folha em branco cuja pegada cobre ~metade da regiao usavel da
+    ancora (bem acima do piso de 25%) mas NENHUMA tinta salva: a
+    referencia nao e vazia de verdade — o "match vazio" nao pode
+    aceitar mesma pagina e consumir a copia. A passada adia por
+    no_overlap (abstem, sem votar) e a quarentena limitada resolve
+    pelo timeout: a substituicao nao herda traco nenhum."""
+    quad_wide = np.array(
+        [[200, 100], [560, 100], [560, 600], [200, 600]], dtype=np.float32
+    )
+    # ~50% de sobreposicao util: a pegada cobre as cols ~425-849 da
+    # grade da ancora — acima do piso, mas o traco salvo em 9:13
+    # fica inteiro fora dela.
+    quad_half = np.array(
+        [[380, 100], [840, 100], [840, 600], [380, 600]], dtype=np.float32
+    )
+    img_old = np.full((1200, 850, 3), 215, np.uint8)
+    img_old[100:1100, 9:13] = 25  # traco salvo na metade nao amostrada
+    img_blank = np.full((1200, 850, 3), 215, np.uint8)
+    all_clear = np.ones(img_old.shape[:2], bool)
+
+    def run_case(border_guard_px):
+        clock = _Clock()
+        cfg = InkConfig.strict_vote(0.85, border_guard_px=border_guard_px)
+        worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
+        for _ in range(5):
+            clock.now += 1.1
+            worker.submit(
+                contracts.WarpedPage(img_old, 0, quad_wide, captured_at=clock.now)
+            )
+            worker.pump()
+        worker._anchor_corners = quad_wide.copy()
+        gen = worker.new_generation(preserve_identity=True)
+
+        for _ in range(10):
+            clock.now += 1.1
+            worker.submit(
+                contracts.WarpedPage(
+                    img_blank, gen, quad_half, all_clear, captured_at=clock.now
+                )
+            )
+            worker.pump()
+        snap = worker.poll(gen, 0)
+        assert snap is not None
+        # Nunca pode sair "mesma pagina" sem nenhuma tinta salva
+        # julgada: a decisao tem de adiar ate o timeout da
+        # quarentena, que reseta o canvas para a folha nova.
+        decisions = [e["decision"] for e in worker._identity_events]
+        assert "same_page" not in decisions
+        return int(np.count_nonzero(snap.confirmed))
+
+    assert run_case(None) == 0
+    assert run_case(0) == 0
+
+
+def test_occluded_blank_patch_hold_keeps_reference_recoverable():
+    """Referencia com a tinta toda sob a guarda alargada + mao sobre
+    um remendo interior em branco: o adiamento por interior oculto
+    segura a decisao sem queimar a quarentena — alem do limite
+    antigo a copia segue recuperavel. Levantada a mao: a MESMA
+    folha resolve same_page com o traco intacto; uma folha marcada
+    resolve new_page sem herdar nada."""
+    quad_wide = np.array(
+        [[200, 100], [560, 100], [560, 600], [200, 600]], dtype=np.float32
+    )
+    quad_narrow = np.array(
+        [[270, 120], [500, 120], [500, 580], [270, 580]], dtype=np.float32
+    )
+    img = np.full((1200, 850, 3), 215, np.uint8)
+    img[100:1100, 9:13] = 25  # traco rente a borda, coberto pela guarda
+    img_marked = np.full((1200, 850, 3), 215, np.uint8)
+    img_marked[200:800, 200:600] = 25  # folha de substituicao marcada
+    hand = np.ones(img.shape[:2], bool)
+    hand[300:500, 300:400] = False  # mao no interior em branco
+    all_clear = np.ones(img.shape[:2], bool)
+    held = _identity._PAGE_IDENTITY_MAX_DEFERRALS + 3
+
+    def run_case(reveal_img):
+        clock = _Clock()
+        cfg = InkConfig.strict_vote(0.85, border_guard_px=None)
+        worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
+        for _ in range(5):
+            clock.now += 1.1
+            worker.submit(
+                contracts.WarpedPage(img, 0, quad_wide, captured_at=clock.now)
+            )
+            worker.pump()
+        # Reancoragem alarga a guarda sobre o traco salvo.
+        worker._anchor_corners = quad_narrow.copy()
+        gen = worker.new_generation(preserve_identity=True)
+
+        # Mao parada alem do antigo timeout de quarentena.
+        for _ in range(held):
+            clock.now += 1.1
+            worker.submit(
+                contracts.WarpedPage(img, gen, quad_narrow, hand, captured_at=clock.now)
+            )
+            worker.pump()
+        snap = worker.poll(gen, 0)
+        assert snap is not None
+        # O canvas salvo sobrevive ao periodo todo de oclusao —
+        # reter a referencia e separado de apagar o canvas.
+        assert int(np.count_nonzero(snap.confirmed[100:1100, 9:13])) > 0
+
+        for _ in range(8):
+            clock.now += 1.1
+            worker.submit(
+                contracts.WarpedPage(
+                    reveal_img, gen, quad_narrow, all_clear, captured_at=clock.now
+                )
+            )
+            worker.pump()
+        snap = worker.poll(gen, 0)
+        assert snap is not None
+        return int(np.count_nonzero(snap.confirmed[100:1100, 9:13])), int(
+            np.count_nonzero(snap.confirmed[200:800, 200:600])
+        )
+
+    # Mesma folha revelada: mesma pagina, traco preservado.
+    old_px, _ = run_case(img)
+    assert old_px > 0
+    # Folha marcada: pagina nova — a velha nao carrega e a nova
+    # confirma no proprio canvas.
+    old_px, new_px = run_case(img_marked)
+    assert old_px == 0
+    assert new_px > 0
+
+
 def test_cropped_provisional_clears_with_visibility_mask():
     """Provisorio na faixa que o registro deixa de amostrar sai do
     dominio valido mesmo com mascara de visibilidade presente —

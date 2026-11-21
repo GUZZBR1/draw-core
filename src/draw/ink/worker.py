@@ -1301,6 +1301,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         identity_deferred = False
         identity_timed_out = False
         identity_switch_pending = False
+        identity_hold = False
         quarantine_reason = None
         quarantine_frames = 0
         identity_geometry_registered = False
@@ -1792,6 +1793,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     prior_guard = (
                         prior if identity_guard is None else (prior & identity_guard)
                     )
+                    prior_guard_px = int(np.count_nonzero(prior_guard))
                     # So pixel realmente amostrado pode ser julgado:
                     # a faixa que o registro (ou o warp_back da
                     # correcao afim) preencheu de zeros entra em
@@ -1874,40 +1876,80 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         identity_deferred = True
                         quarantine_reason = "occlusion"
                     elif prior_eval_px == 0:
-                        # Sem tinta salva no dominio inspecionado
-                        # (canvas vazio ou tinta toda sob a guarda,
-                        # que e estatica e nao vai descobrir nada):
-                        # a comparacao vale so pela evidencia vista.
-                        seen_any = candidate > self._accumulator.threshold
-                        if inspected is not None:
-                            seen_any = seen_any & inspected
-                        keep_page = not np.any(seen_any)
-                        identity_recall = 1.0 if keep_page else 0.0
-                        hidden_domain = None
-                        if identity_visible is not None:
-                            hidden = ~identity_visible
-                            if identity_sampled is not None:
-                                hidden = hidden & identity_sampled
-                            hidden_domain = (
-                                hidden
-                                if identity_guard is None
-                                else (identity_guard & hidden)
-                            )
+                        unobserved_px = (
+                            0
+                            if identity_sampled is None
+                            else usable_total_px - usable_px
+                        )
                         if (
-                            keep_page
-                            and hidden_domain is not None
-                            and np.any(hidden_domain)
+                            prior_domain_px == 0
+                            and prior_guard_px > 0
+                            and unobserved_px
+                            > max(
+                                identity._IDENTITY_MIN_VISIBLE_PX,
+                                int(
+                                    identity._IDENTITY_MIN_VISIBLE_FRACTION
+                                    * usable_total_px
+                                ),
+                            )
                         ):
-                            # "Vazio" nao prova pagina igual enquanto
-                            # a mao pode esconder tinta do candidato
-                            # dentro da area inspecionavel — adia como
-                            # a oclusao comum. Pixel fora da guarda ou
-                            # da pegada nao conta: e exclusao
-                            # geometrica, nao algo que a proxima
-                            # passada revele.
-                            identity_visible_reference_px = prior_eval_px
+                            # TODA a tinta da faixa usavel ficou fora
+                            # da pegada desta passada E a faixa nao
+                            # observada ainda e substancial: o "vazio"
+                            # aqui nao prova nem refuta a mesma pagina
+                            # — uma folha em branco cobrindo metade do
+                            # quad passaria no keep_page e herdaria o
+                            # desenho. Inconclusivo geometrico: adia
+                            # sem votar e a quarentena limitada
+                            # resolve pelo timeout. Com a faixa nao
+                            # observada pequena o caso do recuo
+                            # parcial segue: compara pela evidencia
+                            # vista.
+                            identity_visible_reference_px = 0
                             identity_deferred = True
-                            quarantine_reason = "occlusion"
+                            quarantine_reason = "no_overlap"
+                        else:
+                            # Sem tinta salva no dominio inspecionado
+                            # (canvas vazio ou tinta toda sob a guarda,
+                            # que e estatica e nao vai descobrir nada):
+                            # a comparacao vale so pela evidencia vista.
+                            seen_any = candidate > self._accumulator.threshold
+                            if inspected is not None:
+                                seen_any = seen_any & inspected
+                            keep_page = not np.any(seen_any)
+                            identity_recall = 1.0 if keep_page else 0.0
+                            hidden_domain = None
+                            if identity_visible is not None:
+                                hidden = ~identity_visible
+                                if identity_sampled is not None:
+                                    hidden = hidden & identity_sampled
+                                hidden_domain = (
+                                    hidden
+                                    if identity_guard is None
+                                    else (identity_guard & hidden)
+                                )
+                            if (
+                                keep_page
+                                and hidden_domain is not None
+                                and np.any(hidden_domain)
+                            ):
+                                # "Vazio" nao prova pagina igual
+                                # enquanto a mao pode esconder tinta
+                                # do candidato dentro da area
+                                # inspecionavel — mas o adiamento aqui
+                                # segura a decisao SEM queimar a
+                                # quarentena nem votar: nada do salvo
+                                # esta julgavel nesta passada, entao a
+                                # copia fica recuperavel ate uma
+                                # passada desobstruida distinguir
+                                # retorno de substituicao. Pixel fora
+                                # da guarda ou da pegada nao conta: e
+                                # exclusao geometrica, nao algo que a
+                                # proxima passada revele.
+                                identity_visible_reference_px = prior_eval_px
+                                identity_deferred = True
+                                identity_hold = True
+                                quarantine_reason = "occlusion"
                     else:
                         if identity_visible is not None:
                             identity_visible_reference_px = prior_eval_px
@@ -1934,7 +1976,12 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                             >= identity._PAGE_IDENTITY_MIN_CONTAINMENT
                         )
                 if identity_deferred:
-                    self._identity_defer_count += 1
+                    # O hold por interior oculto nao queima a
+                    # quarentena: reter a referencia e separado de
+                    # apagar o canvas salvo — so um timeout de
+                    # evidencia geometrica (no_overlap) ainda destrói.
+                    if not identity_hold:
+                        self._identity_defer_count += 1
                     quarantine_frames = self._identity_defer_count
                     identity_timed_out = (
                         quarantine_frames > identity._PAGE_IDENTITY_MAX_DEFERRALS
@@ -2154,15 +2201,20 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 self._motion_unregistered_total += 1
             elif motion_decision == "fail_open" and prob is registered_prob:
                 self._motion_fail_open_total += 1
-            # Passada adiada por "no_overlap" nao vota: o adiamento
-            # de oclusao e sobre a MESMA folha escondida pela mao e
-            # a evidencia amostrada segue valida; o de sobreposicao
-            # e sobre OUTRA folha — a tinta nova registrada na
-            # regiao parcial confirmaria no canvas velho antes do
-            # timeout misturar os dois desenhos.
+            # Passada adiada por "no_overlap" ou segurada por
+            # interior oculto nao vota: o adiamento de oclusao e
+            # sobre a MESMA folha escondida pela mao e a evidencia
+            # amostrada segue valida; os outros dois sao sobre OUTRA
+            # folha possivel — a tinta nova registrada na regiao
+            # parcial confirmaria no canvas velho antes de a
+            # decisao sair, misturando os dois desenhos.
             identity_abstain = identity_switch_pending or (
                 identity_deferred
-                and (identity_timed_out or quarantine_reason == "no_overlap")
+                and (
+                    identity_timed_out
+                    or quarantine_reason == "no_overlap"
+                    or identity_hold
+                )
             )
             pass_voted = not (
                 identity_abstain
