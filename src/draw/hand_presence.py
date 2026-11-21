@@ -90,6 +90,10 @@ class MediaPipeHandPresence:
             self._source_id = source_id
             self._signature = None
             self._missed_samples = 0
+            # Marcos retidos pertencem a vista anterior.
+            reset = getattr(self._masker, "reset_retention", None)
+            if callable(reset):
+                reset()
         # Caminho preferido: a assinatura direto dos marcos
         # (HandMasker.presence_signature), sem construir nem
         # dilatar a mascara 720p que so servia para contar pixels
@@ -116,6 +120,13 @@ class MediaPipeHandPresence:
                 return self._missing_sample(unavailable=True)
             if signature.area == 0:
                 return self._missing_sample(unavailable=False)
+            if getattr(self._masker, "last_detection_held", False):
+                # Deteccao perdida e mao retida: a pose repetida nao e
+                # quietude. Conta como movimento para o descanso nao
+                # acumular em cima de uma leitura que falhou.
+                self._signature = signature
+                self._missed_samples = 0
+                return HandSample(True, True)
             return self._update_signature(signature)
         mask = self._masker.mask(frame)
         if mask is None:
@@ -126,18 +137,6 @@ class MediaPipeHandPresence:
         ys, xs = np.nonzero(mask)
         signature = HandSignature(float(area), float(xs.mean()), float(ys.mean()))
         return self._update_signature(signature)
-
-    def _missing_sample(self, *, unavailable):
-        """Mantém presença curta durante misses consecutivos do landmarker."""
-        if (
-            self._signature is not None
-            and self._missed_samples < _PRESENCE_HOLD_SAMPLES
-        ):
-            self._missed_samples += 1
-            return HandSample(True, False)
-        self._signature = None
-        self._missed_samples = 0
-        return HandSample(None if unavailable else False, False)
 
     def _update_signature(self, signature):
         previous = self._signature
@@ -160,6 +159,18 @@ class MediaPipeHandPresence:
             or area_step > _HAND_MOVE_AREA_FRACTION
         )
         return HandSample(True, moved)
+
+    def _missing_sample(self, *, unavailable):
+        """Mantém presença curta durante misses consecutivos do landmarker."""
+        if (
+            self._signature is not None
+            and self._missed_samples < _PRESENCE_HOLD_SAMPLES
+        ):
+            self._missed_samples += 1
+            return HandSample(True, False)
+        self._signature = None
+        self._missed_samples = 0
+        return HandSample(None if unavailable else False, False)
 
 
 def make_hand_presence(model_path, *, verify):
