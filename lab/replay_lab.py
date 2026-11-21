@@ -285,8 +285,10 @@ def run_replay(
     integridade dos modelos: "manifest" injeta o verificador de
     assets/manifest.json; None desliga (bancadas/testes fora dele).
     frame_files: inventário de quadros explícito e ordenado (o corpus
-    rotulado passa os f*.png registrados); None mantém a descoberta
-    genérica (raw/ da sessão ou o próprio dir)."""
+    rotulado passa os f*.png registrados, na ordem numérica de
+    clip_frames); o "frame" gravado em cada registro é a posição nessa
+    ordem — quadro ilegível é pulado e deixa lacuna nos índices. None
+    mantém a descoberta genérica (raw/ da sessão ou o próprio dir)."""
     from draw.app import _detect_sheet_combined_traced
     from draw.contracts import DetectionResult, FramePacket
     from draw.infra.manifest import verify_model

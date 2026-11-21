@@ -230,6 +230,34 @@ def test_expected_scopes_restrict_ink_to_window_and_region():
     assert evaluate_expected(clip_far, res, run)[0]["ok"] is False
 
 
+def test_expected_window_incomplete_fails_distinctly():
+    """Todo indice da janela rotulada precisa constar do trace: o replay
+    pula quadro ilegivel e deixa lacuna — o veredito falha como janela
+    incompleta, nao passa no_ink no recorte menor que sobrou."""
+    res = SimpleNamespace(canvas_px=0, retracted_px_total=0)
+    # O quadro 2 nao foi visto pelo replay (imread falhou): o trace
+    # registra so os indices de arquivo processados.
+    run = {"_trace": _trace([(0, 1), (0, 1), (0, 1)])}
+    run["_trace"][2]["frame"] = 3
+    clip = SimpleNamespace(
+        expected=[
+            {"rule": "no_ink", "frames": [0, 3]},
+            {"rule": "no_ink", "frames": [0, 1]},
+            {"rule": "canvas_stable", "frames": [0, 3]},
+            {"rule": "ink_present", "frames": [0, 3]},
+        ]
+    )
+    verdicts = evaluate_expected(clip, res, run)
+    assert [v["ok"] for v in verdicts] == [False, True, False, False]
+    assert "incompleta" in verdicts[0]["detail"] and "[2]" in verdicts[0]["detail"]
+    assert "incompleta" in verdicts[2]["detail"]
+    # Janela 100% ausente segue "fora do replay" (nao "incompleta").
+    clip_far = SimpleNamespace(expected=[{"rule": "no_ink", "frames": [7, 9]}])
+    assert evaluate_expected(clip_far, res, run)[0]["detail"] == (
+        "janela [7, 9] fora do replay"
+    )
+
+
 def _write_fake_clip_json(clip_dir, expected=None, conditions=None):
     clip_dir.mkdir(parents=True, exist_ok=True)
     img = np.full((8, 8, 3), 200, np.uint8)

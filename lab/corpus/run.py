@@ -2,7 +2,13 @@
 
 from pathlib import Path
 
-from lab.corpus.clip import ClipError, clip_frames, load_clip, rect_problem
+from lab.corpus.clip import (
+    ClipError,
+    clip_frames,
+    load_clip,
+    rect_problem,
+    window_missing,
+)
 from lab.corpus.manifest import iter_clip_dirs
 from lab.corpus.metrics import ClipResult
 
@@ -30,7 +36,7 @@ def _scope_series(entry, result, run):
 
 
 def _window(series, entry, *, whole_clip):
-    """Recorta a série à janela ``frames`` (índices de arquivo, inclusiva).
+    """Recorta a série à janela ``frames`` (posição no inventário, inclusiva).
 
     Sem ``frames``: o clipe inteiro se ``whole_clip`` (estabilidade é uma
     régua temporal), senão só o quadro final — regras de tinta medem o
@@ -60,7 +66,10 @@ def evaluate_expected(clip, result, run=None) -> list[dict]:
     série de px confirmado/geração por quadro (régua de
     ``canvas_stable`` — queda do CONFIRMADO, não retração provisória) e
     ``_scope_px`` a mesma série restrita a cada reta ``region`` pedida.
-    ``frames`` limita a janela em que regras de tinta procuram o pico.
+    ``frames`` limita a janela em que regras de tinta procuram o pico —
+    e exige cada índice dela no trace (posição no inventário de
+    ``clip_frames``, ordem numérica): quadro que o replay pulou falha a
+    regra como janela incompleta, não encolhe o recorte em silêncio.
     """
     verdicts = []
     for entry in getattr(clip, "expected", None) or []:
@@ -81,51 +90,53 @@ def _eval_entry(rule, entry, result, run) -> dict:
     if series is None:
         return {"rule": rule, "ok": False, "detail": "sem serie do recorte"}
     scoped = "frames" in entry or "region" in entry
+    if "frames" in entry:
+        # Todo índice da janela rotulada precisa constar do trace:
+        # quadro pulado no replay é lacuna, não recorte menor.
+        missing = window_missing(entry["frames"], (pt[0] for pt in series))
+        if missing:
+            span = entry["frames"]
+            detail = (
+                f"janela {span} fora do replay"
+                if len(missing) == span[1] - span[0] + 1
+                else f"janela {span} incompleta no replay: sem os quadros {missing}"
+            )
+            return {"rule": rule, "ok": False, "detail": detail}
     if rule == "canvas_stable":
         window = _window(series, entry, whole_clip=True)
-        if "frames" in entry and not window:
-            ok, detail = False, f"janela {entry['frames']} fora do replay"
+        first = next((i for i, pt in enumerate(window) if pt[1] > 0), None)
+        if first is None:
+            ok, detail = True, "sem tinta confirmada"
         else:
-            first = next((i for i, pt in enumerate(window) if pt[1] > 0), None)
-            if first is None:
-                ok, detail = True, "sem tinta confirmada"
-            else:
-                # Depois da primeira tinta confirmada: canvas que zera
-                # ou sessão que reabre (a geração troca ao reabrir, até
-                # quando a republicação esconde a queda do px) é colapso.
-                drops = sum(1 for pt in window[first:] if pt[1] == 0)
-                reopens = sum(
-                    1
-                    for prev, cur in zip(
-                        window[first:], window[first + 1 :], strict=False
-                    )
-                    if cur[2] != prev[2]
-                )
-                ok = drops == 0 and reopens == 0
-                detail = f"quedas={drops} reaberturas={reopens}"
-                if scoped:
-                    detail += f" ({_scope_desc(entry)})"
+            # Depois da primeira tinta confirmada: canvas que zera
+            # ou sessão que reabre (a geração troca ao reabrir, até
+            # quando a republicação esconde a queda do px) é colapso.
+            drops = sum(1 for pt in window[first:] if pt[1] == 0)
+            reopens = sum(
+                1
+                for prev, cur in zip(window[first:], window[first + 1 :], strict=False)
+                if cur[2] != prev[2]
+            )
+            ok = drops == 0 and reopens == 0
+            detail = f"quedas={drops} reaberturas={reopens}"
+            if scoped:
+                detail += f" ({_scope_desc(entry)})"
     else:
         window = _window(series, entry, whole_clip=False)
-        if "frames" in entry and not window:
-            ok, detail = False, f"janela {entry['frames']} fora do replay"
+        peak = max((pt[1] for pt in window), default=0)
+        if rule == "no_ink":
+            ok = peak == 0
+            detail = (
+                f"px={peak} ({_scope_desc(entry)})" if scoped else f"canvas_px={peak}"
+            )
         else:
-            peak = max((pt[1] for pt in window), default=0)
-            if rule == "no_ink":
-                ok = peak == 0
-                detail = (
-                    f"px={peak} ({_scope_desc(entry)})"
-                    if scoped
-                    else f"canvas_px={peak}"
-                )
-            else:
-                min_px = int(entry.get("min_px", 1))
-                ok = peak >= min_px
-                detail = (
-                    f"px={peak} (min={min_px}, {_scope_desc(entry)})"
-                    if scoped
-                    else f"canvas_px={peak} (min={min_px})"
-                )
+            min_px = int(entry.get("min_px", 1))
+            ok = peak >= min_px
+            detail = (
+                f"px={peak} (min={min_px}, {_scope_desc(entry)})"
+                if scoped
+                else f"canvas_px={peak} (min={min_px})"
+            )
     return {"rule": rule, "ok": bool(ok), "detail": detail}
 
 

@@ -47,22 +47,60 @@ def _is_number(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _frame_sort_key(path):
+    """Chave de ordem do inventario: o INTEIRO do sufixo de ``f<N>.png``.
+
+    A captura grava ``f{indice:04d}`` — minimo de 4 digitos, que cresce
+    a partir do quadro 10000 — entao ``f10000.png`` segue ``f9999.png``,
+    nao ``f1000.png`` (ordem lexica rebotava quadros longos). Nomes
+    ``f*.png`` sem sufixo numerico vao ao fim, por nome; empates de
+    numero (``f1.png`` x ``f0001.png``) desempatam pelo nome.
+    """
+    digits = path.stem[1:]
+    if digits.isdecimal():
+        return (0, int(digits), path.name)
+    return (1, 0, path.name)
+
+
 def clip_frames(clip_dir) -> list[Path]:
-    """Quadros ``f*.png`` do nivel raiz, em ordem.
+    """Quadros ``f*.png`` do nivel raiz, em ordem numerica de sufixo.
 
     Inventario unico do clipe: a contagem de ``count_frames``, o hash
     do manifesto e o replay do corpus compartilham esta lista — o que
-    o sha256 cobre e o que entra no replay sao os mesmos arquivos.
+    o sha256 cobre e o que entra no replay sao os mesmos arquivos. O
+    indice i dos rotulos (``frames`` de ``expected``, ``issues``) e a
+    posicao nesta ordem.
+
+    O manifesto NAO muda com a ordem numerica: ``hash_clip`` reordena
+    por nome antes de hashear, entao o sha256 de clipes ja registrados
+    se mantem.
     """
     clip_dir = Path(clip_dir)
     if not clip_dir.is_dir():
         return []
-    return sorted(p for p in clip_dir.glob("f*.png") if p.is_file())
+    return sorted(
+        (p for p in clip_dir.glob("f*.png") if p.is_file()), key=_frame_sort_key
+    )
 
 
 def count_frames(clip_dir) -> int:
     """Conta quadros ``f*.png`` no nivel raiz do diretorio do clipe."""
     return len(clip_frames(clip_dir))
+
+
+def window_missing(span, observed) -> list[int]:
+    """Indices pedidos pela janela ``[a, b]`` ausentes de ``observed``.
+
+    Regua unica de completude de janela, compartilhada entre
+    ``validate_clip`` (``observed`` = o inventario do clipe) e a
+    avaliacao de ``expected`` (``observed`` = os quadros que o replay
+    registrou no trace — quadro pulado por imread ilegivel deixa lacuna).
+    Janela malformada levanta TypeError/ValueError — o schema e checado
+    antes por quem chama.
+    """
+    a, b = span
+    seen = set(observed)
+    return [i for i in range(a, b + 1) if i not in seen]
 
 
 def rect_problem(rect, size=None):
@@ -197,7 +235,7 @@ def load_clip(clip_dir) -> ClipSpec:
     )
 
 
-def _validate_expected(expected, frames=None, size=None) -> list[str]:
+def _validate_expected(expected, frames=None, size=None, observed=None) -> list[str]:
     problems = []
     if not isinstance(expected, list):
         return ["expected deve ser uma lista"]
@@ -224,6 +262,13 @@ def _validate_expected(expected, frames=None, size=None) -> list[str]:
                 problems.append(
                     f"expected[{idx}].frames {span!r} fora do clipe ({frames} quadros)"
                 )
+            elif observed is not None:
+                missing = window_missing(span, observed)
+                if missing:
+                    problems.append(
+                        f"expected[{idx}].frames {span!r} sem quadro no "
+                        f"inventario: {missing}"
+                    )
         if "region" in entry:
             problem = rect_problem(entry["region"], size)
             if problem is not None:
@@ -267,16 +312,15 @@ def validate_clip(clip_dir) -> list[str]:
     elif not _is_number(raw["scene_fps"]) or raw["scene_fps"] <= 0:
         problems.append(f"scene_fps deve ser > 0: {raw['scene_fps']!r}")
 
+    actual = count_frames(clip_dir)
     if "frames" not in raw:
         problems.append("frames ausente")
     elif not _is_int(raw["frames"]) or raw["frames"] < 0:
         problems.append(f"frames invalido: {raw['frames']!r}")
-    else:
-        actual = count_frames(clip_dir)
-        if actual != raw["frames"]:
-            problems.append(
-                f"contagem de f*.png ({actual}) difere de frames ({raw['frames']})"
-            )
+    elif actual != raw["frames"]:
+        problems.append(
+            f"contagem de f*.png ({actual}) difere de frames ({raw['frames']})"
+        )
 
     if "desc" not in raw:
         problems.append("desc ausente")
@@ -303,7 +347,9 @@ def validate_clip(clip_dir) -> list[str]:
     if "expected" in raw:
         declared = raw.get("frames")
         frames = declared if _is_int(declared) and declared >= 0 else None
-        problems.extend(_validate_expected(raw["expected"], frames, size))
+        problems.extend(
+            _validate_expected(raw["expected"], frames, size, range(actual))
+        )
 
     if "issues" in raw:
         issues = raw["issues"]

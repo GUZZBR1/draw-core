@@ -22,7 +22,12 @@ def iter_clip_dirs(root) -> list[Path]:
 
 
 def hash_clip(clip_dir) -> str:
-    """Sha256 deterministico sobre ``clip.json``, ``regions.json`` e ``f*.png``."""
+    """Sha256 deterministico sobre ``clip.json``, ``regions.json`` e ``f*.png``.
+
+    O digest segue a ordem LEXICA de nomes (o ``sort`` abaixo), nao a
+    ordem numerica de ``clip_frames`` — reordenar o inventario nao muda
+    o sha256 de clipes ja registrados no manifesto.
+    """
     clip_dir = Path(clip_dir)
     files = []
     for name in ("clip.json", "regions.json"):

@@ -221,6 +221,62 @@ def test_clip_frames_is_the_shared_inventory(tmp_path):
     assert hash_clip(clip_dir) == h  # fora do padrao, fora do hash
 
 
+def test_clip_frames_ordena_por_sufixo_numerico(tmp_path):
+    """A captura grava minimo 4 digitos, nao largura fixa: f10000.png
+    segue f9999.png — ordem lexica o rebotava para depois de f1000.png.
+    Nomes sem sufixo numerico vao ao fim; numero empatado desempata
+    pelo nome."""
+    clip_dir = tmp_path / "ord"
+    clip_dir.mkdir()
+    img = np.zeros((8, 8, 3), dtype=np.uint8)
+    for name in (
+        "f10000.png",
+        "fbackup.png",
+        "f9999.png",
+        "f1.png",
+        "f1000.png",
+        "f0001.png",
+        "f2.png",
+    ):
+        cv2.imwrite(str(clip_dir / name), img)
+
+    assert [p.name for p in clip_frames(clip_dir)] == [
+        "f0001.png",
+        "f1.png",
+        "f2.png",
+        "f1000.png",
+        "f9999.png",
+        "f10000.png",
+        "fbackup.png",
+    ]
+
+    # O hash nao depende da ordem nova: o manifesto segue valido.
+    init_clip(clip_dir, fps=10.0)
+    write_manifest(tmp_path, build_manifest(tmp_path))
+    assert verify_manifest(tmp_path) == []
+
+
+def test_validate_clip_flags_window_beyond_inventory(tmp_path):
+    """Janela dentro do ``frames`` declarado mas alem do inventario real
+    e apontada quadro a quadro — alem da divergencia de contagem."""
+    clip_dir = tmp_path / "gap"
+    _write_frames(clip_dir, count=2)
+    _write_json(
+        clip_dir / "clip.json",
+        {
+            "version": 2,
+            "scene_fps": 8.0,
+            "frames": 5,
+            "desc": "declarado > inventario",
+            "expected": [{"rule": "no_ink", "frames": [3, 4]}],
+        },
+    )
+    problems = validate_clip(clip_dir)
+    joined = "\n".join(problems)
+    assert "difere de frames" in joined  # contagem 2 x declarado 5
+    assert "inventario" in joined and "[3, 4]" in joined
+
+
 def test_init_clip_writes_v2_and_refuses_invalid_cases(tmp_path):
     empty_dir = tmp_path / "empty"
     empty_dir.mkdir()
