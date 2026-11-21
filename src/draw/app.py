@@ -54,6 +54,7 @@ import glob
 import itertools
 import os
 import re
+import select
 import subprocess
 import sys
 import threading
@@ -1061,13 +1062,16 @@ def _window_size():
     return rect if rect and rect[0] >= 320 and rect[1] >= 160 else default
 
 
+_WSL_HELPER_WAIT_SECONDS = 4.0
+
+
 def _wslg_active():
     """So o WSLg monta /mnt/wslg e expoe as janelas no desktop do Windows."""
     return Path("/mnt/wslg").is_dir()
 
 
-def _raise_window_on_wsl():
-    """Traz a janela para frente do desktop Windows (WSLg).
+def _start_wsl_foreground_helper():
+    """Lanca o helper que traz a janela para frente do desktop Windows.
 
     O WSLg mapeia a janela abaixo da janela ativa do Windows — com um
     browser maximizado ela nasce invisivel mesmo dentro da tela. O
@@ -1075,14 +1079,16 @@ def _raise_window_on_wsl():
     e o TOPMOST do Qt sao engolidos), entao a subida vai pelo lado
     Windows: AttachThreadInput na thread da janela ativa +
     SetForegroundWindow, depois de achar a janela pelo titulo (ate
-    10 s). O helper faz um snapshot das janelas "Draw (*)" existentes e
-    espera uma hwnd nova — com outra sessao aberta, ativar a antiga
-    seria pior do que nao fazer nada; no timeout cai para a "Draw" mais
-    fundo na ordem (a recem-criada nasce abaixo). Fire-and-forget:
-    falhar em qualquer passo so perde a subida, nada mais.
+    20 s — o RAIL pode demorar para mapear). O helper faz um snapshot
+    das janelas "Draw (*)" existentes,
+    escreve 'ready' no stdout e espera uma hwnd nova — com outra sessao
+    aberta, ativar a antiga seria pior do que nao fazer nada; no timeout
+    cai para a "Draw" mais fundo na ordem (a recem-criada nasce abaixo).
+    Retorna o processo para o chamado aguardar o 'ready' antes de criar
+    a janela, ou None fora do WSLg/se o powershell nao subir.
     """
     if not _wslg_active():
-        return
+        return None
     ps = (
         "$s='using System;using System.Text;using System.Runtime.InteropServices;"
         'public class W{[DllImport("user32.dll")]public static extern bool '
@@ -1102,9 +1108,9 @@ def _raise_window_on_wsl():
         "[W]::EnumWindows({param($h,$l)$b=New-Object Text.StringBuilder 512;"
         "[W]::GetWindowTextA($h,$b,512)|Out-Null;"
         "if($b.ToString() -like 'Draw (*)'){$script:known[$h]=$true};"
-        "return $true},[IntPtr]::Zero)|Out-Null;"
+        "return $true},[IntPtr]::Zero)|Out-Null;Write-Output 'ready';"
         "$t=[IntPtr]::Zero;$last=[IntPtr]::Zero;$n=0;"
-        "while($t -eq [IntPtr]::Zero -and $n -lt 40){$n++;$last=[IntPtr]::Zero;"
+        "while($t -eq [IntPtr]::Zero -and $n -lt 80){$n++;$last=[IntPtr]::Zero;"
         "[W]::EnumWindows({param($h,$l)$b=New-Object Text.StringBuilder 512;"
         "[W]::GetWindowTextA($h,$b,512)|Out-Null;"
         "if($b.ToString() -like 'Draw (*)'){$script:last=$h;"
@@ -1122,17 +1128,28 @@ def _raise_window_on_wsl():
         "[W]::AttachThreadInput($me,$ft,$false)|Out-Null}"
     )
     try:
-        subprocess.Popen(
+        return subprocess.Popen(
             ["powershell.exe", "-NoProfile", "-Command", ps],
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
+            text=True,
         )
     except OSError:
-        pass
+        return None
 
 
 def _open_window(fullscreen):
     """Cria a janela do Draw: sem barras do Qt, redimensionavel, com mouse."""
+    helper = _start_wsl_foreground_helper()
+    if helper is not None:
+        # A janela so e criada depois do snapshot do helper: a hwnd nova
+        # nunca entra no conjunto das antigas. A espera e curta — se o
+        # powershell travar, o startup nao fica refem.
+        try:
+            if select.select([helper.stdout], [], [], _WSL_HELPER_WAIT_SECONDS)[0]:
+                helper.stdout.readline()
+        except OSError:
+            pass
     cv2.namedWindow(
         _WINDOW,
         cv2.WINDOW_NORMAL | cv2.WINDOW_GUI_NORMAL | cv2.WINDOW_FREERATIO,
@@ -1142,7 +1159,6 @@ def _open_window(fullscreen):
     _settings["on"]["fullscreen"] = fullscreen
     _fullscreen_applied[0] = False
     cv2.setMouseCallback(_WINDOW, _on_mouse)
-    _raise_window_on_wsl()
 
 
 def _ui_wait_seconds():
