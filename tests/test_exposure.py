@@ -40,6 +40,22 @@ def test_gain_preserves_level_order():
     assert out.dtype == np.uint8 and out.shape == page.shape
 
 
+def test_temporal_gain_suppresses_small_jitter_and_tracks_real_exposure_change():
+    smoother = exposure.PaperGainSmoother()
+    values = [smoother.update(2.5, 0.0)]
+    for index, target in enumerate((2.55, 2.45, 2.54, 2.46, 2.5), start=1):
+        values.append(smoother.update(target, index * 0.1))
+
+    assert max(values) - min(values) == 0.0
+
+    for index in range(1, 41):
+        gain = smoother.update(1.5, 0.5 + index * 0.1)
+    assert 1.5 <= gain <= 1.55
+
+    smoother.reset()
+    assert smoother.update(1.35, 10.0) == pytest.approx(1.35)
+
+
 def _dark_paper_with_bright_desk(desk_fraction=0.14, shape=(1200, 850)):
     h, w = shape
     img = np.full((h, w, 3), 80, np.uint8)
