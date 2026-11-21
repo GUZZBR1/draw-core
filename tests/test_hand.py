@@ -321,6 +321,101 @@ def test_missing_model_never_imports_mediapipe(tmp_path, monkeypatch):
     assert attempted == []
 
 
+def _bare_masker():
+    masker = hand_module.HandMasker.__new__(hand_module.HandMasker)
+    masker._held_hands = None
+    masker._held_shape = None
+    masker._held_misses = 0
+    return masker
+
+
+def test_dark_frame_is_lifted_and_normal_frame_is_untouched():
+    dark = np.full((120, 160, 3), 25, np.uint8)
+    lifted = hand_module._lift_dark(dark)
+    assert lifted.mean() > 2 * dark.mean()
+    assert lifted.dtype == np.uint8 and lifted.shape == dark.shape
+    normal = np.full((120, 160, 3), 140, np.uint8)
+    assert hand_module._lift_dark(normal) is normal
+    black = np.zeros((120, 160, 3), np.uint8)
+    assert hand_module._lift_dark(black) is black
+
+
+def test_lift_dark_cost_stays_small():
+    import time
+
+    frame = np.full((720, 1280, 3), 30, np.uint8)
+    hand_module._lift_dark(frame)
+    start = time.perf_counter()
+    for _ in range(10):
+        hand_module._lift_dark(frame)
+    assert (time.perf_counter() - start) / 10 < 0.02
+
+
+def test_short_detection_gaps_keep_the_last_hand_then_release():
+    masker = _bare_masker()
+    frame = np.zeros((120, 160, 3), np.uint8)
+    hands = [np.zeros((21, 2), np.float32)]
+    assert masker._retain(hands, frame) is hands
+    for _ in range(hand_module._HOLD_FRAMES):
+        assert masker._retain([], frame) is hands
+    assert masker._retain([], frame) == []
+    assert masker._retain([], frame) == []
+
+
+def test_retention_never_crosses_frame_sizes_or_hides_unavailable():
+    masker = _bare_masker()
+    hands = [np.zeros((21, 2), np.float32)]
+    masker._retain(hands, np.zeros((120, 160, 3), np.uint8))
+    assert masker._retain([], np.zeros((240, 320, 3), np.uint8)) == []
+    masker._retain(hands, np.zeros((120, 160, 3), np.uint8))
+    assert masker._retain(None, np.zeros((120, 160, 3), np.uint8)) is None
+
+
+def test_a_returning_hand_resets_the_hold_budget():
+    masker = _bare_masker()
+    frame = np.zeros((120, 160, 3), np.uint8)
+    hands = [np.zeros((21, 2), np.float32)]
+    masker._retain(hands, frame)
+    masker._retain([], frame)
+    masker._retain([], frame)
+    masker._retain(hands, frame)
+    for _ in range(hand_module._HOLD_FRAMES):
+        assert masker._retain([], frame) is hands
+
+
+def test_reset_retention_drops_held_hand_even_for_same_size_frames():
+    masker = hand_module.HandMasker.__new__(hand_module.HandMasker)
+    masker._lock = threading.RLock()
+    masker._held_hands = None
+    masker._held_shape = None
+    masker._held_misses = 0
+    masker.last_detection_held = False
+    frame = np.zeros((120, 160, 3), np.uint8)
+    hands = [np.zeros((21, 2), np.float32)]
+    masker._retain(hands, frame)
+    masker.reset_retention()
+    assert masker._retain([], frame) == []
+    assert masker.last_detection_held is False
+
+
+def test_held_detection_is_flagged_and_cleared():
+    masker = _bare_masker()
+    masker.last_detection_held = False
+    frame = np.zeros((120, 160, 3), np.uint8)
+    masker._retain([np.zeros((21, 2), np.float32)], frame)
+    masker._retain([], frame)
+    assert masker.last_detection_held is True
+    masker._retain([np.zeros((21, 2), np.float32)], frame)
+    assert masker.last_detection_held is False
+
+
+def test_low_light_cutoff_uses_luminance_not_channel_mean():
+    # BGR (100, 40, 80): media dos canais 73, luminancia BT.601 ~59 < 70.
+    frame = np.empty((120, 160, 3), np.uint8)
+    frame[:] = (100, 40, 80)
+    assert hand_module._lift_dark(frame) is not frame
+
+
 def test_observe_keeps_image_mask_and_capture_identity(monkeypatch, tmp_path):
     _install_fake_mediapipe(monkeypatch)
     frame = np.zeros((100, 150, 3), dtype=np.uint8)
@@ -331,3 +426,22 @@ def test_observe_keeps_image_mask_and_capture_identity(monkeypatch, tmp_path):
     np.testing.assert_array_equal(result.occlusion_mask, expected)
     assert result.orientation_mask is None
     assert result.present is None
+
+
+def test_observe_resets_retention_when_the_source_changes(monkeypatch):
+    frame = np.zeros((100, 150, 3), dtype=np.uint8)
+    masker = _bare_masker()
+    masker._lock = threading.RLock()
+    masker.last_detection_held = False
+    masker._observed_source_id = None
+    sequence = iter([[np.zeros((21, 2), np.float32)], [], [], []])
+    monkeypatch.setattr(masker, "_landmarks", lambda *_a, **_k: next(sequence))
+    # mask() usa _landmarks sem retencao aqui; o que importa e o reset.
+    masker._held_hands = [np.zeros((21, 2), np.float32)]
+    masker._held_shape = frame.shape[:2]
+    masker.observe(FramePacket(frame, 1.0, 1), source_id=1)
+    masker._held_hands = [np.zeros((21, 2), np.float32)]
+    masker.observe(FramePacket(frame, 2.0, 2), source_id=1)
+    assert masker._held_hands is not None  # mesma fonte: mantem
+    masker.observe(FramePacket(frame, 3.0, 3), source_id=2)
+    assert masker._held_hands is None  # outra fonte: descartada
