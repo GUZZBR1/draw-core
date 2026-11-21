@@ -14,10 +14,18 @@ decodificar e convertem entrada malformada em erro tratável:
 ensure_private_dir marca uma pasta de dados privados com um
 .gitignore "*", para que capturas nunca entrem no git, qualquer que
 seja a raiz escolhida pelo operador.
+
+atomic_publish é o único caminho de escrita: o conteúdo nasce num
+arquivo temporário no mesmo diretório e só vira o alvo por
+os.replace quando o bloco termina sem exceção — um leitor nunca vê
+o arquivo pela metade.
 """
 
 import json
+import os
 import struct
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 MAX_IMAGE_BYTES = 64 << 20
@@ -213,6 +221,43 @@ def iter_jsonl(
         if not isinstance(row, dict):
             raise InputLimitError(f"{path}:{number}: linha nao e um objeto JSON")
         yield number, row
+
+
+@contextmanager
+def atomic_publish(target, mode=None):
+    """Handle binário de escrita para um temporário irmão de `target`.
+
+    Na saída sem exceção, aplica `mode` (se dado) e renomeia por
+    os.replace sobre `target`; com exceção, o temporário é removido e
+    `target` fica intacto. Devolve no yield o handle já aberto — o
+    arquivo é gravado por inteiro antes de existir para o leitor.
+    """
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{target.name}.", suffix=".part", dir=str(target.parent)
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            fd = None
+            yield handle
+        if mode is not None:
+            try:
+                os.chmod(tmp_path, mode)
+            except OSError:
+                pass
+        os.replace(tmp_path, target)
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def ensure_private_dir(path):

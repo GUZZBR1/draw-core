@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from lab import eval_capture as ec  # noqa: E402
+from lab.sync_workers import SyncDetector  # noqa: E402
 
 onnx_fixtures = pytest.importorskip("onnx_fixtures")  # noqa: E402
 
@@ -133,7 +134,7 @@ class _FakeNeural:
 
 
 def test_detector_sincrono_publica_contrato():
-    det = ec._SynchronousDetector(_FakeNeural())
+    det = SyncDetector(_FakeNeural())
     frame = np.zeros((120, 160, 3), np.uint8)
     det.submit(frame, 1.5, 7)
     result = det.poll(0)
