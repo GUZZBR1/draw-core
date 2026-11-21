@@ -46,6 +46,19 @@ from lab.sync_workers import (  # noqa: E402
 )
 
 
+def parity_frame_time(idx, fps):
+    """Instante do quadro, com a MESMA fórmula do driver legado.
+
+    O parity_legacy_driver.py (auto-contido, não muda) calcula
+    `idx * (1.0 / fps)`. Dividir `idx / fps` é equivalente em
+    matemática mas arredonda diferente: a 10 FPS, 1.4 - 0.8 dá
+    0.5999999999999999 (abaixo do limiar de 0,6 s do tracker) contra
+    0.6000000000000001 na multiplicação — um quadro de presença
+    divergente reprova a paridade sem que os detectores discordem.
+    """
+    return idx * (1.0 / fps)
+
+
 def run_new(
     corpus, out_dir, *, frames, fps, sheet_model, ink_model, hand_model, verify
 ):
@@ -109,7 +122,7 @@ def run_new(
     records, canvases = [], []
     try:
         for idx, frame in iter_frames(corpus, frames):
-            clock.t = idx / fps
+            clock.t = parity_frame_time(idx, fps)
             loop.step(FramePacket(image=frame, captured_at=clock.t, sequence=idx + 1))
             worker.pump()
             loop.collect_ink()
