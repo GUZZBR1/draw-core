@@ -133,8 +133,8 @@ def test_global_exposure_shift_detected_at_gain_ceiling():
 
     target = exposure.paper_gain(brighter, visible)
     gain = smoother.update(target, 0.1, image=brighter, mask=visible)
-    assert gain == pytest.approx(first * 64 / 68)  # razão medida, ~2,82
-    assert gain < target < first  # corrige sem saltar direto ao alvo
+    # correção pela razão (~2,82) + resíduo já convergindo ao alvo
+    assert first * 64 / 68 <= gain <= target < first
 
 
 def test_exposure_shift_correction_uses_shared_ratio_over_new_mask_target():
@@ -160,6 +160,49 @@ def test_exposure_shift_correction_uses_shared_ratio_over_new_mask_target():
 
     assert gain == pytest.approx(first * 80 / 88)  # ~2,02: compensação
     assert gain < first < target
+
+
+def test_leaving_unity_bypass_does_not_clip_paper_highlights():
+    """Devin Review PR #140: p90 oscilando 204 -> 198 ao sair do bypass
+    1,0. A correção pela razão restauraria 204 de brilho corrigido —
+    acima do alvo — e cliparia os realces que o alvo preserva. Com a
+    máscara estável a correção é limitada pelo alvo."""
+    visible = np.ones((120, 90), dtype=bool)
+    bright = np.full((120, 90, 3), 204, np.uint8)
+    darker = np.full((120, 90, 3), 198, np.uint8)
+    darker[8, 8] = 250
+    darker[8, 16] = 252
+
+    smoother = exposure.PaperGainSmoother()
+    assert smoother.update(1.0, 0.0, image=bright, mask=visible) == 1.0
+
+    gain = smoother.update(200 / 198, 0.1, image=darker, mask=visible)
+    out = exposure.apply_gain(darker, gain)
+    assert out[8, 8, 0] < out[8, 16, 0] < 255  # 253 < 255, não 255 = 255
+
+
+def test_exposure_shift_correction_converges_during_stationary_occlusion():
+    """Devin Review PR #140: mão parada sobre a margem e jitter de
+    exposição seguido. Cada quadro dispara o detector, mas o resíduo
+    tem que convergir ao alvo — não ficar preso no nível compensado."""
+    margin = np.full((120, 120, 3), 80, np.uint8)
+    margin[:, 100:] = 90
+    full = np.ones((120, 120), dtype=bool)
+    hand = full.copy()
+    hand[:, 100:] = False
+
+    smoother = exposure.PaperGainSmoother()
+    first = smoother.update(
+        exposure.paper_gain(margin, full), 0.0, image=margin, mask=full
+    )
+    gains = [first]
+    for index, level in enumerate([88, 90, 88, 90, 88, 90, 88]):
+        page = np.full((120, 120, 3), level, np.uint8)
+        target = exposure.paper_gain(page, hand)  # ~2,27 / ~2,22
+        gains.append(smoother.update(target, (index + 1) / 10.0, image=page, mask=hand))
+
+    assert gains[1] < first  # compensação inicial na direção certa
+    assert gains[-1] > 2.1  # convergiu ao alvo, não travou em ~2,0
 
 
 def _dark_paper_with_bright_desk(desk_fraction=0.14, shape=(1200, 850)):

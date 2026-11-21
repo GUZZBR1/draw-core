@@ -156,8 +156,17 @@ class PaperGainSmoother:
             # não do alvo: uma mão cobrindo a margem clara neste quadro
             # mudaria o p90 da máscara nova e o alvo iria na direção
             # contrária à exposição (Devin Review PR #140).
-            self._gain = float(np.clip(self._gain / shift, 1.0, _MAX_GAIN))
-            return self._gain
+            ratio, same_mask = shift
+            corrected = self._gain / ratio
+            if not same_mask:
+                self._gain = float(np.clip(corrected, 1.0, _MAX_GAIN))
+                return self._gain
+            # Máscara estável, o alvo é confiável: a correção não pode
+            # segurar brilho acima dele — sair do bypass 1,0 restaurando
+            # o nível anterior cliparia realces (Devin Review PR #140).
+            # Sem retorno aqui, o resíduo converge ao alvo pela
+            # suavização normal em vez de ficar preso para sempre.
+            self._gain = float(np.clip(min(corrected, target), 1.0, _MAX_GAIN))
 
         current_log = math.log(self._gain)
         target_log = math.log(target)
@@ -176,8 +185,9 @@ class PaperGainSmoother:
     def _shared_exposure_shift(self, sample, sample_mask):
         """Razão de exposição dos pixels visíveis nos dois quadros.
 
-        Retorna p90_atual/p90_anterior quando mediana e p90 se movem
-        juntos na interseção das máscaras — mudança global — ou None.
+        Retorna (p90_atual/p90_anterior, máscara inalterada) quando
+        mediana e p90 se movem juntos na interseção das máscaras —
+        mudança global — ou None.
         Uma mão cobrindo a margem muda a máscara, não os pixels que
         seguem visíveis: comparar a interseção evita ler oclusão como
         mudança de exposição. O p90 sai direto da amostra, não do alvo
@@ -211,7 +221,9 @@ class PaperGainSmoother:
             and abs(p90_delta) >= _GLOBAL_EXPOSURE_LOG_TOLERANCE
             and abs(p90_delta - median_delta) <= _GLOBAL_EXPOSURE_LOG_TOLERANCE
         ):
-            return p90_cur / p90_prev
+            return p90_cur / p90_prev, bool(
+                np.array_equal(sample_mask, self._prev_mask)
+            )
         return None
 
     def _newly_saturates(self, image, mask, target):
