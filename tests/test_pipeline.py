@@ -866,7 +866,10 @@ def test_det_hand_mask_reaches_occlusion_without_coverage():
         return QUAD.copy(), "paper", {}
 
     loop, _det, ink = _make_loop(
-        script, config=PipelineConfig(coverage=False, seg_hand_occlusion=True)
+        script,
+        config=PipelineConfig(
+            coverage=False, seg_hand_occlusion=True, detect_wake=False
+        ),
     )
     _drive(loop, 30)
     assert loop._hand_mask_det is not None
