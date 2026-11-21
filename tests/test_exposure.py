@@ -244,9 +244,10 @@ def test_crossing_the_ceiling_keeps_a_consistent_highlight_limit():
 
     # convergido: os dois estados de máscara dão a mesma saída
     assert gains[-2] == pytest.approx(gains[-1], rel=0.02)
-    out = exposure.apply_gain(page, gains[-1])
-    assert out[0, 720, 0] < 255  # faixa preservada nos dois lados
-    assert out[0, 40, 0] > 70  # papel escuro subiu (~84), não crua a 66
+    for gain in gains[-2:]:  # faixa preservada nos DOIS estados
+        out = exposure.apply_gain(page, gain)
+        assert out[0, 720, 0] < 255
+        assert out[0, 40, 0] > 70  # papel escuro subiu (~84), não cru a 66
 
 
 def test_first_frame_at_the_ceiling_applies_the_highlight_limit():
