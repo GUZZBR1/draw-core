@@ -79,7 +79,7 @@ fi
 
 _install_gui() {
     if [ "$USE_UV" = 1 ]; then
-        UV_PROJECT_ENVIRONMENT="$VENV_DIR" uv sync --extra gui "$@"
+        UV_PROJECT_ENVIRONMENT="$VENV_DIR" uv sync --inexact --extra gui "$@"
     else
         local extras=gui
         if [ "$#" -gt 0 ]; then
@@ -98,13 +98,19 @@ _prepare_pip() {
 }
 
 _repair_opencv() {
-    local wheels=(opencv-python opencv-python-headless opencv-contrib-python opencv-contrib-python-headless)
+    # Keep every OpenCV dist installed and just rewrite the contrib files
+    # on top — a stable state `uv sync` won't undo. Offline first (warm
+    # uv cache), network only as fallback.
     if [ "$USE_UV" = 1 ]; then
-        uv pip uninstall --python "$VENV_PYTHON" "${wheels[@]}" >/dev/null 2>&1 || true
-        uv pip install --python "$VENV_PYTHON" --reinstall "opencv-contrib-python>=4.8,<5.1"
+        uv pip install --python "$VENV_PYTHON" --offline --no-deps \
+            --reinstall-package opencv-contrib-python \
+            "opencv-contrib-python>=4.8,<5.1" ||
+            uv pip install --python "$VENV_PYTHON" --no-deps \
+                --reinstall-package opencv-contrib-python \
+                "opencv-contrib-python>=4.8,<5.1"
     else
-        "$VENV_PYTHON" -m pip uninstall -y "${wheels[@]}" >/dev/null 2>&1 || true
-        "$VENV_PYTHON" -m pip install --force-reinstall "opencv-contrib-python>=4.8,<5.1"
+        "$VENV_PYTHON" -m pip install --no-deps --force-reinstall \
+            "opencv-contrib-python>=4.8,<5.1"
     fi
 }
 
@@ -133,7 +139,11 @@ if _gui_ready; then
         fi
     fi
 else
-    echo "Preparando ambiente do Draw (primeira execucao)..."
+    if [ -d "$VENV_DIR" ]; then
+        echo "Reparando o OpenCV do ambiente do Draw..."
+    else
+        echo "Preparando ambiente do Draw (primeira execucao)..."
+    fi
     _prepare_pip
     if _install_gui --extra hand; then
         rm -f "$VENV_DIR/.no_hand"
