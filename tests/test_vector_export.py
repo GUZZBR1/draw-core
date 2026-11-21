@@ -210,6 +210,16 @@ def test_standalone_svg_writer_uses_per_stroke_width(tmp_path):
     assert widths[0] != 0.30  # o fixo antigo não pode sobrar
 
 
+def test_stroke_scale_mm_per_px_diagonal_matches_axis_on_uniform_grid():
+    """Round-trip da espessura (Devin Review PR #122): num grid
+    uniforme 1 mm = 1 px em qualquer ângulo — o diagonal não pode
+    afinar; fora do uniforme, a perpendicular manda."""
+    assert ev.stroke_scale_mm_per_px(np.array([[0, 0], [10, 0]]), 2, 4) == 4
+    assert ev.stroke_scale_mm_per_px(np.array([[0, 0], [0, 10]]), 2, 4) == 2
+    uni = ev.stroke_scale_mm_per_px(np.array([[0, 0], [10, 10]]), 3, 3)
+    assert uni == pytest.approx(3.0)
+
+
 def test_lines_without_width_px_keep_the_uniform_fallback(tmp_path):
     """Polilinhas sem anotação (caminhos que não passam por
     vectorize_mask/stroke_widths_px) seguem com a largura global."""

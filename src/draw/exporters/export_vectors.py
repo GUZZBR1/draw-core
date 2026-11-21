@@ -647,14 +647,17 @@ def stroke_scale_mm_per_px(pts_mm, sx, sy):
 
     A largura projeta na perpendicular ao eixo do traço: horizontal
     segue sy, vertical segue sx — a média (sx+sy)/2 engorda/fina o
-    traço quando os eixos diferem (Devin Review PR #122).
+    traço quando os eixos diferem (Devin Review PR #122). A norma
+    euclidiana mantém o diagonal com a espessura certa também em grid
+    uniforme; uma curva sob escala anisotrópica ainda recebe uma única
+    espessura aproximada pelo seu eixo principal.
     """
     if len(pts_mm) < 2:
         return 0.5 * (sx + sy)
     cov = np.cov(np.asarray(pts_mm, dtype=np.float64).T)
     eigvals, eigvecs = np.linalg.eigh(cov)
     u = eigvecs[:, int(np.argmax(eigvals))]
-    return abs(u[1]) * sx + abs(u[0]) * sy
+    return float(np.hypot(u[1] * sx, u[0] * sy))
 
 
 def iou(a, b):
