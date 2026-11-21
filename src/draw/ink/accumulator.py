@@ -107,9 +107,7 @@ class LayeredInkAccumulator:
         # confirmada visivel (ou se abstem quando quase tudo esta
         # coberto: mao segurando a pagina nao e pagina trocada) e a
         # camada provisoria congela onde nao ha visao (ver abaixo).
-        evidence = (
-            prob if visible is None else np.where(visible, prob, 0.0).astype(np.float32)
-        )
+        evidence = prob if visible is None else np.where(visible, prob, np.float32(0.0))
         mask_now = evidence > self.threshold
         turn = False
         if canvas_before >= identity._INK_TURN_MIN_CANVAS_PX and not self._turn_fired:
@@ -190,15 +188,13 @@ class LayeredInkAccumulator:
                     retained >= registration._REMOVAL_RETAINED_FRACTION * canvas_before
                     or retained >= registration._REMOVAL_WITNESS_FLOOR_PX
                 )
-            missing = (
-                confirmed_before
-                & visible
-                & np.isfinite(prob)
-                & (prob <= registration._REMOVAL_LOW_PROB)
-                if witnessed
-                else np.zeros(prob.shape, dtype=bool)
-            )
             if witnessed:
+                missing = (
+                    confirmed_before
+                    & visible
+                    & np.isfinite(prob)
+                    & (prob <= registration._REMOVAL_LOW_PROB)
+                )
                 # Com testemunha: pixel à vista e não ausente vê o
                 # streak zerar (evidência positiva ou prova
                 # inconclusiva); pixel ausente conta. Ocluído ou sem
@@ -254,7 +250,12 @@ class LayeredInkAccumulator:
             self._retracted_ever |= retracted
         self._provisional_ever |= provisional_now
         provisional_changed = bool(np.any(provisional_now != previous_provisional))
-        self._provisional = np.where(provisional_now, 255, 0).astype(np.uint8)
+        # bool→u8 *255: np.where+astype gastava dois temporários de
+        # página inteira por passada (~1,7 ms nesta VM; ~0,04 ms
+        # assim — issue #102). Buffer reusado com copyto+*= mediu
+        # PIOR (~+4 ms) — provável custo de laço escalar no *= de
+        # atributo; astype*255 repõe o array como sempre fez.
+        self._provisional = provisional_now.astype(np.uint8) * 255
         result = {
             "confirmed": self._confirmed.copy(),
             "provisional": self._provisional.copy(),

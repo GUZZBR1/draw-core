@@ -1975,7 +1975,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     "removed_confirmed_px": result.get("removed_confirmed_px", 0),
                     "visible_fraction": 1.0
                     if visible is None
-                    else float(np.mean(visible)),
+                    else np.count_nonzero(visible) / visible.size,
                 }
             )
             self._previous_pass_started_at = pass_started_at
