@@ -80,14 +80,19 @@ def paper_exposed(image, reference, *, min_ratio=_MIN_RATIO, block=_BLOCK_PX):
     sample = image[::step, ::step]
     peak = cv2.dilate(sample, np.ones((cells, cells), np.uint8))
     if peak.ndim == 3 and peak.shape[2] >= 3:
-        peak = peak.astype(np.float32)
-        gray = peak.mean(axis=2)
-        ok = gray >= min_ratio * level
-        red = peak[..., 2]
-        local = np.divide(peak[..., 0], red, out=np.ones_like(red), where=red > 1.0)
-        ok &= np.abs(local - ratio) <= _CHROMA_TOL * max(ratio, 1e-3)
+        # Em uint8/uint16 e float so em 2D: a versao toda em float32 custava
+        # ~2 ms por warp A4 (o grosso do paper_exposed).
+        blue, green, red = cv2.split(peak)[:3]
+        total = blue.astype(np.uint16) + green + red
+        ok = total >= 3.0 * min_ratio * level
+        red_f = red.astype(np.float32)
+        blue_f = blue.astype(np.float32)
+        spread = _CHROMA_TOL * max(ratio, 1e-3)
+        ok &= (blue_f >= (ratio - spread) * red_f) & (
+            blue_f <= (ratio + spread) * red_f
+        )
     else:
-        ok = peak.astype(np.float32) >= min_ratio * level
+        ok = peak >= min_ratio * level
     half = max(1, cells // 2)
     ok = cv2.erode(
         ok.astype(np.uint8),
