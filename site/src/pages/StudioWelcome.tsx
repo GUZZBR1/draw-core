@@ -47,7 +47,6 @@ export default function StudioWelcome() {
   const projects = useMemo(() => listProjects(names), [names]);
   const drawingCount = useMemo(() => countDrawings(), []);
   const ringRef = useRef<HTMLDivElement>(null);
-  const [rec, setRec] = useState(false); // clique na webcam liga/desliga o pisca vermelho
 
   // Carrossel elíptico: cada desenho percorre a elipse da tela; os de trás ficam menores e mais apagados.
   useEffect(() => {
@@ -125,7 +124,6 @@ export default function StudioWelcome() {
       <div className="hub-welcome">
         <div className="hub-mascot">
           <TypedBubble text={tr('O que vamos construir hoje?', 'What are we building today?')} />
-          <button type="button" className={`hub-mascot-btn${rec ? ' is-rec' : ''}`} aria-pressed={rec} aria-label={tr('Alternar gravação da webcam', 'Toggle webcam recording')} onClick={() => setRec((on) => !on)}>
           <svg className="webcam-icon hub-mascot-art" viewBox="0 0 64 56" aria-hidden="true">
             <rect x="5" y="4" width="54" height="26" rx="9" />
             <circle className="webcam-lens" cx="32" cy="17" r="8" />
@@ -137,7 +135,6 @@ export default function StudioWelcome() {
             <path className="hub-mascot-arm" d="M5 20 1 27M59 20l4 7" />
             <path className="hub-mascot-arm" d="M29 36l-5 15M35 36l5 15" />
           </svg>
-          </button>
         </div>
 
         <nav className="hub-menu" aria-label={tr('Começar', 'Get started')}>

@@ -766,7 +766,10 @@ body.is-falling::before {
 .studio-stage { display: grid; flex: 1; min-height: 200px; grid-template-columns: 1fr 1fr; gap: 14px; } /* piso de altura: em janelas curtas ou com zoom a folha continua desenhavel e o estudio rola */
 .studio-pane { position: relative; margin: 0; min-height: 0; border-radius: 20px; overflow: hidden; border: 1px solid color-mix(in srgb, var(--ink) 14%, transparent); background: color-mix(in srgb, var(--paper) 82%, transparent); backdrop-filter: blur(14px); box-shadow: 0 10px 30px rgba(34, 35, 31, .08); }
 .studio-pane.is-digital { background: color-mix(in srgb, var(--accent) 10%, var(--paper)); }
-.studio-pane figcaption { position: absolute; z-index: 1; top: 12px; left: 16px; font: 400 10px 'DM Mono', monospace; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); pointer-events: none; }
+.studio-pane figcaption { position: absolute; z-index: 1; top: 12px; left: 16px; right: 16px; display: flex; align-items: center; justify-content: space-between; gap: 10px; font: 400 10px 'DM Mono', monospace; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); pointer-events: none; }
+.studio-pane-focus { padding: 5px 9px; border: 1px solid color-mix(in srgb, var(--ink) 20%, transparent); border-radius: 999px; background: color-mix(in srgb, var(--paper) 85%, transparent); color: var(--ink); font: inherit; letter-spacing: 0; text-transform: none; cursor: pointer; pointer-events: auto; }
+.studio-pane-focus:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.studio-pane.is-small .studio-canvas { pointer-events: none; }
 .studio-canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
 .is-digital .studio-canvas { touch-action: pan-y; cursor: default; }
 .studio-canvas.is-cam { touch-action: pan-y; cursor: default; }
@@ -1142,23 +1145,23 @@ body:not(.dark) .papers-detail { border: 1.5px solid color-mix(in srgb, var(--in
 }
 .lang-anchor:hover .lang-menu,
 .lang-anchor:focus-within .lang-menu { opacity: 1; pointer-events: auto; }
+@media (max-width: 640px) {
+  .lang-menu { z-index: 40; top: calc(100% + 6px); right: 0; left: auto; transform: none; flex-direction: column; align-items: flex-end; gap: 4px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--ink) 18%, transparent); border-radius: 12px; background: var(--paper); font-size: 12px; }
+}
 .lang-menu button { background: none; border: 0; padding: 2px 0; color: var(--muted, inherit); cursor: pointer; }
 .lang-menu button:hover, .lang-menu button:focus-visible { color: var(--ink, inherit); outline: none; text-decoration: underline; }
 .lang-menu button[aria-pressed='true'] { color: var(--ink, inherit); }
 
-/* Estúdio: um painel grande (em foco) e outro menor; clicar no menor inverte. */
+/* Estúdio: um painel grande (em foco) e outro menor; o botão acessível troca o foco. */
 .studio-stage { transition: grid-template-columns .35s ease; }
 .studio-stage.is-focus-paper { grid-template-columns: 2.2fr 1fr; }
 .studio-stage.is-focus-digital { grid-template-columns: 1fr 2.2fr; }
-.studio-pane.is-small { cursor: pointer; }
 @media (max-width: 640px) {
   .studio-stage.is-focus-paper { grid-template-columns: 1fr; grid-template-rows: 2.2fr 1fr; }
   .studio-stage.is-focus-digital { grid-template-columns: 1fr; grid-template-rows: 1fr 2.2fr; }
 }
 
-.hub-mascot-btn { background: none; border: 0; padding: 0; cursor: pointer; border-radius: 16px; }
-.hub-mascot-btn.is-rec .webcam-rec { animation: webcam-rec 1.1s ease-in-out infinite; }
-@media (prefers-reduced-motion: reduce) { .hub-mascot-btn.is-rec .webcam-rec { animation: none; opacity: 1; } }
+.hub-mascot-art .webcam-rec { opacity: 1; }
 
 /* Balão do mascote: ao lado da câmera, canto inferior esquerdo reto (sem triângulo), fonte mono, pontinhos antes do texto. */
 .hub-mascot { position: relative; }
@@ -1180,8 +1183,12 @@ body:not(.dark) .papers-detail { border: 1.5px solid color-mix(in srgb, var(--in
 @keyframes hub-bubble-up { from { opacity: 0; transform: translateY(26px) scale(.7); } }
 @keyframes hub-dot { 0%, 60%, 100% { opacity: .3; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-4px); } }
 @keyframes hub-caret { 50% { opacity: 0; } }
-@media (max-width: 640px) { .hub-bubble { right: 40%; font-size: 12px; } }
-@media (prefers-reduced-motion: reduce) { .hub-bubble-dots i, .hub-bubble-caret { animation: none; } }
+@media (max-width: 640px) {
+  .hub-bubble { right: auto; left: 50%; width: min(284px, calc(100vw - 36px)); box-sizing: border-box; transform: translateX(-50%); font-size: 12px; }
+  .hub-bubble-ghost { display: block; white-space: normal; }
+  .hub-bubble-text, .hub-bubble-dots { right: 14px; white-space: normal; }
+}
+@media (prefers-reduced-motion: reduce) { .hub-bubble, .hub-bubble-dots i, .hub-bubble-caret { animation: none; } }
 body:not(.dark) .hub-bubble::before { background: rgba(34, 35, 31, .5); box-shadow: 6px 9px 0 -1px rgba(34, 35, 31, .5); }
 
 /* Formulário de novo projeto: mesma sombra suave dos painéis; no foco, o anel de destaque vem somado a ela. */

@@ -310,7 +310,13 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
         dc.strokeStyle = s.ink === INKS[0] ? css('--ink') || s.ink : s.ink;
         dc.lineWidth = 3 * dpr;
         dc.lineCap = dc.lineJoin = 'round';
-        drawSmooth(dc, s.pts, dw, dh);
+        // Keep the paper proportions when the two panes have different aspect ratios.
+        const inkScale = Math.min(dw / pw, dh / ph);
+        dc.save();
+        dc.translate((dw - pw * inkScale) / 2, (dh - ph * inkScale) / 2);
+        dc.scale(inkScale, inkScale);
+        drawSmooth(dc, s.pts, pw, ph);
+        dc.restore();
       }
       const cloud = cloudRef.current;
       if (cloud) {
@@ -433,13 +439,23 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
       </div>
 
       <section className={`studio-stage is-focus-${focusPane}`}>
-        <figure className={`studio-pane${focusPane === 'paper' ? '' : ' is-small'}`} onClick={focusPane === 'paper' ? undefined : () => setFocusPane('paper')}>
-          <figcaption>{tr('papel', 'paper')}</figcaption>
+        <figure className={`studio-pane${focusPane === 'paper' ? '' : ' is-small'}`}>
+          <figcaption>
+            <span>{tr('papel', 'paper')}</span>
+            <button type="button" className="studio-pane-focus" aria-label={tr('Focar painel do papel', 'Focus the paper pane')} aria-pressed={focusPane === 'paper'} onClick={() => setFocusPane('paper')}>
+              {focusPane === 'paper' ? tr('em foco', 'focused') : tr('ampliar', 'enlarge')}
+            </button>
+          </figcaption>
           <video ref={videoRef} className="studio-video" muted playsInline aria-hidden="true" />
           <canvas ref={paperRef} className={`studio-canvas${camId ? ' is-cam' : ''}`} aria-label={tr('Folha de papel: desenhe aqui', 'Paper sheet: draw here')} />
         </figure>
-        <figure className={`studio-pane is-digital${focusPane === 'digital' ? '' : ' is-small'}`} onClick={focusPane === 'digital' ? undefined : () => setFocusPane('digital')}>
-          <figcaption>{tr('digital', 'digital')} · <span ref={countRef}>00</span> {tr('traços', 'strokes')}</figcaption>
+        <figure className={`studio-pane is-digital${focusPane === 'digital' ? '' : ' is-small'}`}>
+          <figcaption>
+            <span>{tr('digital', 'digital')} · <span ref={countRef}>00</span> {tr('traços', 'strokes')}</span>
+            <button type="button" className="studio-pane-focus" aria-label={tr('Focar painel digital', 'Focus the digital pane')} aria-pressed={focusPane === 'digital'} onClick={() => setFocusPane('digital')}>
+              {focusPane === 'digital' ? tr('em foco', 'focused') : tr('ampliar', 'enlarge')}
+            </button>
+          </figcaption>
           <canvas ref={digitalRef} className="studio-canvas" role="img" aria-label={tr('Versão digital do desenho', 'Digital version of the drawing')} />
         </figure>
       </section>

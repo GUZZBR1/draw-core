@@ -89,9 +89,9 @@ A tabela relaciona cada barreira a um critério operacional e a uma forma de ava
 
 A Figura 1 resume as seis categorias para apoiar a leitura da taxonomia, sem sugerir que cada pessoa pertença a uma única categoria ou que as barreiras sejam independentes.
 
-**Figura 1.** Mapa conceitual de barreiras motoras, visuais, cognitivas, de equipamento, de espaço e de conectividade em atividades de desenho; elaboração própria para organizar categorias sem classificar participantes.
-
 ![](figures/11-mapa-barreiras.svg)
+
+**Figura 1.** Mapa conceitual de barreiras motoras, visuais, cognitivas, de equipamento, de espaço e de conectividade em atividades de desenho; elaboração própria para organizar categorias sem classificar participantes.
 
 **3.1 Barreiras motoras.** Controle fino, alcance, postura, fadiga, dor e coordenação podem influenciar ações distintas. A equipe não pede que a pessoa demonstre uma habilidade isolada nem define uma postura padrão. Registra se posicionar o papel, segurar o instrumento ou responder a uma instrução exigiu mudança, pausa ou ajuda. O relato da pessoa esclarece se uma dificuldade é relevante para sua atividade ou se faz parte de uma estratégia confortável. A assistência oferecida é descrita para distinguir desempenho independente, assistência solicitada e adaptação aceita. Essa descrição não deve transformar independência em objetivo superior quando o propósito é permitir participação.
 
@@ -154,15 +154,15 @@ Os instrumentos e limites estão resumidos na Tabela 2. Nenhum instrumento isola
 
 A Figura 2 situa a ordem externa de aprovação, participação e coleta, sem representar etapas internas do sistema ou antecipar como a atividade ocorrerá em cada contexto.
 
-**Figura 2.** Fluxo externo de avaliação ética, recrutamento, consentimento, sessão e instrumentos, sem descrever o funcionamento interno do sistema; elaboração própria para situar as etapas da pesquisa com pessoas.
-
 ![](figures/11-fluxo-estudo.svg)
+
+**Figura 2.** Fluxo externo de avaliação ética, recrutamento, consentimento, sessão e instrumentos, sem descrever o funcionamento interno do sistema; elaboração própria para situar as etapas da pesquisa com pessoas.
 
 Como a composição ainda não foi observada, a Figura 3 deixa campos vazios e serve somente como lembrete de descrição contextual agregada após recrutamento.
 
-**Figura 3.** Perfil planejado da amostra com campos vazios para descrever diversidade e necessidades de acesso após recrutamento; não representa participantes ou contagens; elaboração própria como guia para relato agregado.
-
 ![](figures/11-perfil-amostra.svg)
+
+**Figura 3.** Perfil planejado da amostra com campos vazios para descrever diversidade e necessidades de acesso após recrutamento; não representa participantes ou contagens; elaboração própria como guia para relato agregado.
 
 O perfil da amostra é descrito em categorias escolhidas com justificativa e consentimento. O pesquisador evita tabelas que permitam identificar uma pessoa por combinação rara de características. Se um relato incluir dado pessoal, a equipe remove ou generaliza detalhes que não sejam essenciais, desde que isso preserve o sentido. Os resultados incluem as condições que tornam uma interpretação plausível e as situações ausentes, sem estender achados para a população em geral.
 
