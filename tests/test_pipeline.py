@@ -18,6 +18,7 @@ from draw import pipeline as pipeline_module
 from draw.contracts import (
     DetectionResult,
     FramePacket,
+    HandOcclusion,
     HandPresenceResult,
     HandSample,
     InkDisplaySnapshot,
@@ -1195,6 +1196,26 @@ def test_reset_source_drops_camera_space_state_and_stale_detections():
     assert loop.tracker.corners is not None, "deteccao da camera nova vale"
 
 
+def test_reset_source_clears_the_hand_masker_retention():
+    """Marcos retidos da camera anterior nao valem na nova (mesmo tamanho)."""
+
+    class _Masker:
+        resets = 0
+
+        def mask(self, frame):
+            return np.zeros(frame.shape[:2], np.uint8)
+
+        def reset_retention(self):
+            self.resets += 1
+
+    masker = _Masker()
+    loop, _det, _ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None), hand_masker=masker
+    )
+    loop.reset_source(since=1000.0)
+    assert masker.resets == 1
+
+
 def test_reset_source_restarts_the_ink_as_a_new_page():
     """Troca de camera: a tinta nao e preservada, como ao virar a folha."""
     loop, _det, ink = _make_loop(lambda _i: (QUAD.copy(), "paper", None))
@@ -1551,3 +1572,28 @@ def test_auto_gain_still_fills_off_sheet_inside_the_quad():
         f"fora-folha {right.mean():.1f} — o &= do ganho consumiu a "
         "máscara do quad e o preenchimento não rodou"
     )
+
+
+@pytest.mark.parametrize("different", [None, "source", "sequence", "timestamp"])
+def test_hand_occlusion_reaches_ink_only_on_its_own_capture(different):
+    class _HandBackend:
+        def observe(self, packet, *, source_id):
+            mask = np.zeros(packet.image.shape[:2], dtype=bool)
+            mask[150:250, 200:300] = True
+            return HandOcclusion(
+                frame_sequence=packet.sequence - (different == "sequence"),
+                captured_at=packet.captured_at - (different == "timestamp"),
+                source_id=source_id + (different == "source"),
+                occlusion_mask=mask,
+            )
+
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None), hand_masker=_HandBackend()
+    )
+    _drive(loop, 8)
+    visible = ink.submitted[-1][2]
+    if different is None:
+        assert visible is not None and not visible[200, 250]
+        assert visible[350, 450]
+    else:
+        assert visible is None

@@ -34,6 +34,7 @@ Draw is a bridge from a person’s paper sketch to digital tools that can interp
 - The custom page scrubber is a visible, compact glass capsule with a readable track and thumb. Keep pointer dragging and keyboard navigation; do not reduce it to a tiny line.
 - Drawing mode (Home sheet): the first stroke slides the header, the compact wordmark and its Product link out of the way. They return when the pointer reaches the top edge, when the page scrolls, or through the "Mostrar menu" button (touch and keyboard).
 - Home exceptions to the hover rule above: each Draw letter hops on hover (and the webcam follows the "w"), and the gallery highlights one card at a time every 7 s with the same lift as hover. Both are disabled under reduced motion.
+- Papers exceptions: the "Subprojetos" heading plays a one-shot letter wave (on first contact by pointer or focus, or when scrolled into view) and then opens its description and card; the wave always finishes. Any `Draw` in running text (not the wordmark) shows a short speech bubble on hover. Under reduced motion the wave and the bubble animation are off (the Subprojetos content is simply open).
 - Respect reduced-motion preferences.
 - The Product construction illustration is rendered as colored ASCII symbols on a canvas, using the same glyph-ranking approach as the Vision portrait. On entry its symbols appear from the top down, scattered, slowly over about 4.6 s, then the artwork stays still. Do not animate or parallax it afterward. Reduced-motion users see it at once.
 

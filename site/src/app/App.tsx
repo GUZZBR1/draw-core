@@ -1,6 +1,7 @@
 import { Component, lazy, Suspense, useEffect, useMemo, useState, type ErrorInfo, type ReactNode } from 'react';
 import { motion } from 'motion/react';
 import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
+import DrawTip from '../components/DrawTip';
 import ScrollbarControl from '../components/ScrollbarControl';
 import SiteHeader from '../components/SiteHeader';
 import HomePage from '../pages/HomePage';
@@ -28,6 +29,7 @@ export default function App() {
 
   return (
     <>
+      <DrawTip />
       {!inStudio && <SiteHeader
         onRepeatProduct={() => {
           setProductRefresh((revision) => revision + 1);

@@ -449,6 +449,7 @@ def test_reset_source_publishes_clear():
     pipe._paper_gain_smoother = exposure.PaperGainSmoother()
     pipe._paper_gain_smoother.update(2.5, 0.0)
     pipe._source_id = 0
+    pipe.hand_masker = None
     pipe.ink_worker = type("I", (), {"set_hand_presence": lambda *_: None})()
     pipe.tracker = type("T", (), {"reset": lambda self: None})()
     pipe.corner_history = type("C", (), {"clear": lambda self: None})()
