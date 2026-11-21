@@ -20,7 +20,7 @@ import pytest
 
 from draw import hand as hand_module
 from draw import hand_presence
-from draw.contracts import HandPresenceResult, HandSample
+from draw.contracts import HandPresenceResult, HandSample, HandSignature
 
 
 def _landmarks_result():
@@ -202,3 +202,27 @@ def test_source_change_resets_motion_signature():
     assert adapter.sample(frame, 1000, source_id=0) == HandSample(True, True)
     assert adapter.sample(frame, 1100, source_id=0) == HandSample(True, False)
     assert adapter.sample(frame, 1200, source_id=1) == HandSample(True, True)
+
+
+def test_retained_detection_reports_movement_and_source_switch_resets():
+    class _Masker:
+        last_detection_held = False
+        resets = 0
+
+        def presence_signature(self, frame, timestamp_ms=None):
+            return HandSignature(100.0, 10.0, 10.0)
+
+        def reset_retention(self):
+            self.resets += 1
+
+    masker = _Masker()
+    presence = hand_presence.MediaPipeHandPresence(masker)
+    frame = np.zeros((10, 10, 3), np.uint8)
+    presence.sample(frame, source_id=0)
+    assert presence.sample(frame, source_id=0).moved is False
+    masker.last_detection_held = True
+    sample = presence.sample(frame, source_id=0)
+    assert sample.present is True and sample.moved is True
+    resets = masker.resets
+    presence.sample(frame, source_id=1)
+    assert masker.resets == resets + 1

@@ -133,6 +133,14 @@ class InkConfig:
     # voto: 0 desliga (legado); None deriva do tamanho retificado em
     # grades de pagina inteira (>= 200 px).
     border_guard_px: int | None = 0
+    # Guarda fotometrica de oclusao (draw.ink.paper_evidence, issue #129):
+    # a regiao que nao parece papel exposto (mao, braco, caneta, sombra)
+    # fica congelada — sem remocao de tinta confirmada e sem voto novo —,
+    # e continua por occlusion_hold_passes passadas depois que a evidencia
+    # some (queda curta de deteccao nao libera a regiao). Independente do
+    # MediaPipe. Incerteza congela.
+    paper_guard: bool = True
+    occlusion_hold_passes: int = 3
 
     def __post_init__(self):
         if not 0.0 < self.t_low < self.t_high <= 1.0:
@@ -144,6 +152,8 @@ class InkConfig:
             raise ValueError("provisional_min_px deve ser >= 1")
         if not self.motion_veto_px > 0.0:
             raise ValueError("motion_veto_px deve ser > 0")
+        if not 0 <= self.occlusion_hold_passes <= 10:
+            raise ValueError("occlusion_hold_passes fora de [0, 10]")
         if self.pass_interval_s is not None and not 0.0 < self.pass_interval_s <= 5.0:
             raise ValueError(
                 f"pass_interval_s fora de (0, 5] s: {self.pass_interval_s!r}"

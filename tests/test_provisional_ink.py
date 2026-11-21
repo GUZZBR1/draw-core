@@ -131,10 +131,14 @@ def _drive_until(worker, generation, predicate, timeout=5.0):
 def test_worker_display_shows_provisional_before_poll_confirms(
     monkeypatch,
 ):
-    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    # pass_interval_s=0,3s: a passada mede ~27ms, entao a versao
+    # provisoria vive ~270ms — margem segura para o poll de 5ms;
+    # com 0,01s a v1 morria entre dois polls e o teste oscilava.
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.05)
     strong_twice = _prob([(STRONG, 0.95)])
     fake = _ScriptedProbInk([strong_twice])
-    worker = worker_mod.PageCleanWorker(fake).start()
+    config = worker_mod.InkConfig(pass_interval_s=0.3)
+    worker = worker_mod.PageCleanWorker(fake, config=config).start()
     try:
         generation = worker.new_generation()
         got = _drive_until(

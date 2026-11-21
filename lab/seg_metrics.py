@@ -118,7 +118,6 @@ SCENARIOS = (
     {"id": "14_thin_pencil_stroke", "name": "traço fino de lápis"},
     {"id": "15_thick_pen_stroke", "name": "traço grosso de caneta"},
 )
-SCENARIO_IDS = tuple(s["id"] for s in SCENARIOS)
 
 
 def _validate_masks(pred, gt, require_supervised=True):
@@ -189,41 +188,6 @@ def iou_per_class(pred, gt):
         CLASSES[cls]: _safe_div(tp[cls], tp[cls] + fp[cls] + fn[cls])
         for cls in range(NUM_CLASSES)
     }
-
-
-def dice_per_class(pred, gt):
-    """Dice (F1) por classe. Retorna dict {nome_da_classe: valor}."""
-    pred, gt = _validate_masks(pred, gt)
-    tp, fp, fn = _tp_fp_fn(pred, gt)
-    return {
-        CLASSES[cls]: _safe_div(2 * tp[cls], 2 * tp[cls] + fp[cls] + fn[cls])
-        for cls in range(NUM_CLASSES)
-    }
-
-
-def precision_recall_per_class(pred, gt):
-    """Precision e Recall por classe.
-
-    Retorna {"precision": {classe: valor}, "recall": {classe: valor}}.
-    """
-    pred, gt = _validate_masks(pred, gt)
-    tp, fp, fn = _tp_fp_fn(pred, gt)
-    precision, recall = {}, {}
-    for cls in range(NUM_CLASSES):
-        p_den, g_den = tp[cls] + fp[cls], tp[cls] + fn[cls]
-        # 0/0 só vale 1.0 quando a classe está ausente dos dois lados;
-        # predição vazia com ground truth presente vale 0.0 (ver módulo).
-        precision[CLASSES[cls]] = (
-            1.0
-            if (p_den == 0 and g_den == 0)
-            else (float(tp[cls]) / p_den if p_den > 0 else 0.0)
-        )
-        recall[CLASSES[cls]] = (
-            1.0
-            if (g_den == 0 and p_den == 0)
-            else (float(tp[cls]) / g_den if g_den > 0 else 0.0)
-        )
-    return {"precision": precision, "recall": recall}
 
 
 def confusion_matrix(pred, gt):

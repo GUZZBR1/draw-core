@@ -42,6 +42,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from .export_vectors import _dp_open, simplify
+
 PAPER_W_PX = 850
 PAPER_H_PX = 1200
 PAPER_W_MM = 210.0
@@ -1001,59 +1003,6 @@ def annotate_and_order_polylines(polylines, stamps=None):
         ordered.append(chosen)
         cur_pos = chosen["points"][0 if chosen["closed"] else -1]
     return ordered
-
-
-def _dp_open(points, epsilon):
-    """Douglas-Peucker iterativo sobre uma polilinha aberta."""
-    n = len(points)
-    if n <= 2:
-        return points
-    keep = np.zeros(n, dtype=bool)
-    keep[0] = keep[-1] = True
-    stack = [(0, n - 1)]
-    while stack:
-        a, b = stack.pop()
-        if b <= a + 1:
-            continue
-        pa, pb = points[a], points[b]
-        ab = pb - pa
-        norm = np.hypot(ab[0], ab[1])
-        seg = points[a + 1 : b]
-        if norm == 0:
-            dists = np.hypot(seg[:, 0] - pa[0], seg[:, 1] - pa[1])
-        else:
-            # Distância ao SEGMENTO pa→pb, não à reta infinita: um
-            # retrocesso colinear que ultrapassa a âncora tem
-            # distância zero à reta e sumia da simplificação (o
-            # vai-e-vem do traço não chegava ao SVG/JSON).
-            t = np.clip(((seg - pa) @ ab) / (norm * norm), 0.0, 1.0)
-            closest = pa + t[:, None] * ab
-            dists = np.hypot(seg[:, 0] - closest[:, 0], seg[:, 1] - closest[:, 1])
-        i = int(np.argmax(dists))
-        if dists[i] > epsilon:
-            keep[a + 1 + i] = True
-            stack.append((a, a + 1 + i))
-            stack.append((a + 1 + i, b))
-    return points[keep]
-
-
-def simplify(points, epsilon, closed):
-    """Douglas-Peucker; em laço fechado, divide em dois arcos pelas âncoras extremas."""
-    if len(points) <= 2 or epsilon <= 0:
-        return points
-    if not closed:
-        return _dp_open(points, epsilon)
-    centroid = points.mean(axis=0)
-    i_a = int(np.argmax(np.hypot(*(points - centroid).T)))
-    i_b = int(np.argmax(np.hypot(*(points - points[i_a]).T)))
-    if i_a == i_b:
-        return _dp_open(points, epsilon)
-    lo, hi = min(i_a, i_b), max(i_a, i_b)
-    arc1 = points[lo : hi + 1]
-    arc2 = np.vstack([points[hi:], points[: lo + 1]])
-    s1 = _dp_open(arc1, epsilon)
-    s2 = _dp_open(arc2, epsilon)
-    return np.vstack([s1, s2[1:-1] if len(s2) > 2 else s2[1:]])
 
 
 def _fit_circle_kasa(pts):

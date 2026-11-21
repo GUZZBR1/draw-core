@@ -46,6 +46,7 @@ import cv2
 import numpy as np
 
 from ._hvcam_mjpeg import decode_mjpeg as _imdecode_mjpeg_strict
+from .infra.safe_io import atomic_publish
 
 # Porta padrao do servico vsock — a mesma do protocolo hvcam e do
 # ajudante draw (coincidencia util: ambos falam 8765).
@@ -1435,34 +1436,8 @@ def _local_hvcam_host_candidates():
 
 def _atomic_write_executable(target, payload_bytes):
     """Grava `payload_bytes` em `target` de forma atomica com permissao +x."""
-    target = Path(target)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fd = None
-    tmp_path = None
-    try:
-        fd, tmp_name = tempfile.mkstemp(
-            prefix=f".{target.name}.", suffix=".part", dir=str(target.parent)
-        )
-        tmp_path = Path(tmp_name)
-        with os.fdopen(fd, "wb") as handle:
-            fd = None
-            handle.write(payload_bytes)
-        try:
-            os.chmod(tmp_path, 0o755)
-        except OSError:
-            pass
-        os.replace(tmp_path, target)
-    finally:
-        if fd is not None:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-        if tmp_path is not None and tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
+    with atomic_publish(target, mode=0o755) as handle:
+        handle.write(payload_bytes)
     return target
 
 
@@ -1843,9 +1818,3 @@ def _probe_hvcam_stream(capture, attempts=3):
     if len(timestamps) >= 2 and timestamps[-1] > timestamps[0]:
         measured_fps = (len(timestamps) - 1) * 1000.0 / (timestamps[-1] - timestamps[0])
     return True, measured_fps
-
-
-def _probe_hvcam_frame(capture, attempts=3):
-    """Confirma que a fonte hvcam entrega ao menos um quadro valido."""
-    ok, _fps = _probe_hvcam_stream(capture, attempts=attempts)
-    return ok

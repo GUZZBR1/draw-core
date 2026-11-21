@@ -1120,7 +1120,9 @@ def test_main_sem_flags_usa_o_preset_de_producao(monkeypatch):
 def test_main_legacy_ink_volta_ao_comportamento_anterior(monkeypatch):
     pipeline = _run_main(monkeypatch, "--legacy-ink")["pipeline_config"]
     assert pipeline == app_module.PipelineConfig(
-        ink=app_module.InkConfig(), ink_auto_gain=False, detect_wake=False
+        ink=app_module.InkConfig(paper_guard=False),
+        ink_auto_gain=False,
+        detect_wake=False,
     )
 
 
@@ -1200,7 +1202,7 @@ def test_run_warns_when_spread_mode_has_no_neural_detector(
 
 def test_main_markers_sem_flags_usa_o_preset_legado(monkeypatch):
     pipeline = _run_main(monkeypatch, "--markers")["pipeline_config"]
-    assert pipeline.ink == app_module.InkConfig()
+    assert pipeline.ink == app_module.InkConfig(paper_guard=False)
     assert pipeline.ink_auto_gain is False and pipeline.detect_wake is False
 
 

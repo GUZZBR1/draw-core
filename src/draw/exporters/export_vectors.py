@@ -300,24 +300,82 @@ def trace_polylines(skel):
 # --------------------------------------------------------- simplificação
 
 
+def _dp_open(points, epsilon):
+    """Douglas-Peucker iterativo sobre uma polilinha aberta."""
+    n = len(points)
+    if n <= 2:
+        return points
+    keep = np.zeros(n, dtype=bool)
+    keep[0] = keep[-1] = True
+    stack = [(0, n - 1)]
+    while stack:
+        a, b = stack.pop()
+        if b <= a + 1:
+            continue
+        pa, pb = points[a], points[b]
+        ab = pb - pa
+        norm = np.hypot(ab[0], ab[1])
+        seg = points[a + 1 : b]
+        if norm == 0:
+            dists = np.hypot(seg[:, 0] - pa[0], seg[:, 1] - pa[1])
+        else:
+            # Distância ao SEGMENTO pa→pb, não à reta infinita: um
+            # retrocesso colinear que ultrapassa a âncora tem
+            # distância zero à reta e sumia da simplificação (o
+            # vai-e-vem do traço não chegava ao SVG/JSON).
+            t = np.clip(((seg - pa) @ ab) / (norm * norm), 0.0, 1.0)
+            closest = pa + t[:, None] * ab
+            dists = np.hypot(seg[:, 0] - closest[:, 0], seg[:, 1] - closest[:, 1])
+        i = int(np.argmax(dists))
+        if dists[i] > epsilon:
+            keep[a + 1 + i] = True
+            stack.append((a, a + 1 + i))
+            stack.append((a + 1 + i, b))
+    return points[keep]
+
+
+def simplify(points, epsilon, closed):
+    """Douglas-Peucker; em laço fechado, divide em dois arcos pelas âncoras extremas."""
+    if len(points) <= 2 or epsilon <= 0:
+        return points
+    if not closed:
+        return _dp_open(points, epsilon)
+    centroid = points.mean(axis=0)
+    i_a = int(np.argmax(np.hypot(*(points - centroid).T)))
+    i_b = int(np.argmax(np.hypot(*(points - points[i_a]).T)))
+    if i_a == i_b:
+        return _dp_open(points, epsilon)
+    lo, hi = min(i_a, i_b), max(i_a, i_b)
+    arc1 = points[lo : hi + 1]
+    arc2 = np.vstack([points[hi:], points[: lo + 1]])
+    s1 = _dp_open(arc1, epsilon)
+    s2 = _dp_open(arc2, epsilon)
+    # s2 termina na âncora inicial de s1: descarta as duas pontas sempre.
+    # Com o arco colapsado (len 2) o miolo é vazio; `s2[1:]` repetia a
+    # âncora e um segmento virava 3 entradas [p, q, p].
+    return np.vstack([s1, s2[1:-1]])
+
+
 def simplify_polylines(polylines, epsilon):
-    """Douglas-Peucker via cv2.approxPolyDP, linha a linha."""
+    """Douglas-Peucker com distância ao segmento, linha a linha.
+
+    Mesmo simplify() de exporters/vectorize.py — não mais o
+    cv2.approxPolyDP (distância à reta infinita), que perdia o
+    vai-e-vem de retrocessos colineares.
+    """
     out = []
     for line in polylines:
         pts = line["points"]
         if len(pts) <= 2:
             out.append(line)
             continue
-        approx = (
-            cv2.approxPolyDP(
-                pts.reshape(-1, 1, 2).astype(np.float32),
-                float(epsilon),
-                bool(line["closed"]),
-            )
-            .reshape(-1, 2)
-            .astype(np.float64)
-        )
-        if len(approx) >= 2:
+        closed = bool(line["closed"])
+        approx = simplify(pts, float(epsilon), closed)
+        # Laço fechado com menos de 3 vértices distintos é uma reta
+        # percorrida duas vezes: mantém o laço original (o approxPolyDP
+        # devolvia 1 ponto e o fallback já fazia isso).
+        min_distinct = 3 if closed else 2
+        if len(np.unique(approx, axis=0)) >= min_distinct:
             # Preserva chaves extras (width_px, t_*, meta): a largura por
             # traço morre aqui se o dict for reconstruído do zero.
             out.append({**line, "points": approx})

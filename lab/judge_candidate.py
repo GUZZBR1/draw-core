@@ -47,7 +47,6 @@ import time
 from pathlib import Path
 
 HOME = Path.home()
-REPO = Path(__file__).resolve().parent.parent
 DEFAULT_BENCH = HOME / "workspace/draw-lab/judging-bench"
 DEFAULT_PY = HOME / "workspace/draw-lab/mlvenv/bin/python"
 

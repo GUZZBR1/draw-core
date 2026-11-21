@@ -47,6 +47,7 @@ class LayeredInkAccumulator:
         self._score_buf = None
         self._hits_buf = None
         self._seen_buf = None
+        self._hold = None
 
     def _window_stats(self):
         """(soma, hits, visto-como-tinta) da janela, sem empilhar.
@@ -82,7 +83,23 @@ class LayeredInkAccumulator:
             np.logical_or(seen, item > self.threshold, out=seen)
         return score, hits, seen
 
-    def add(self, prob, visible=None, *, removal_allowed=True, valid_mask=None):
+    def add(
+        self,
+        prob,
+        visible=None,
+        *,
+        removal_allowed=True,
+        valid_mask=None,
+        paper_ok=None,
+    ):
+        """Uma passada. valid_mask delimita o dominio geometrico
+        inspecionado (guarda de borda cruzada com a pegada do
+        registro); paper_ok (bool, forma de prob) e a evidencia
+        fotometrica de papel exposto (draw.ink.paper_evidence): onde
+        e False — e por occlusion_hold_passes passadas depois — a
+        regiao congela como oclusao (sem voto, sem remocao,
+        provisoria parada). None mantem o comportamento sem
+        guarda."""
         prob = np.asarray(prob, dtype=np.float32)
         if visible is not None:
             visible = np.asarray(visible, dtype=bool)
@@ -99,6 +116,15 @@ class LayeredInkAccumulator:
                 # como uma passada sem mascara — nao apaga
                 # provisorio, nao conta retracao, nao vota contra.
                 valid_mask = None
+        # Sem mascara de visibilidade nao ha evidencia negativa
+        # confiavel — a guarda nao a inventa.
+        raw_visible = visible
+        had_visibility = raw_visible is not None
+        frozen = None
+        if paper_ok is not None:
+            paper_ok = np.asarray(paper_ok, dtype=bool)
+            if paper_ok.shape != prob.shape:
+                paper_ok = None
         if self._confirmed is None or self._confirmed.shape != prob.shape:
             self._removal_streak = None
             self._confirmed = np.zeros(prob.shape, dtype=np.uint8)
@@ -108,6 +134,15 @@ class LayeredInkAccumulator:
             self._window.clear()
             self._low_overlap_streak = 0
             self._turn_fired = False
+        if paper_ok is not None:
+            if self._hold is None or self._hold.shape != prob.shape:
+                self._hold = np.zeros(prob.shape, dtype=np.uint8)
+            np.subtract(self._hold, 1, out=self._hold, where=self._hold > 0)
+            # +1: a passada em que a evidencia some ainda e a 1a do hold; o
+            # decremento da passada seguinte nao pode soltar uma cedo.
+            self._hold[~paper_ok] = self._config.occlusion_hold_passes + 1
+            frozen = ~paper_ok | (self._hold > 0)
+            visible = ~frozen if visible is None else visible & ~frozen
         confirmed_before = self._confirmed > 0
         canvas_before = int(np.count_nonzero(self._confirmed))
         # Oclusao e guarda: pixel que a passada nao pode julgar (a
@@ -198,11 +233,16 @@ class LayeredInkAccumulator:
             weak = confirmed_rule & ~strong & (mean >= cfg.t_low - eps)
             kept = hysteresis.keep_anchored(weak, strong | confirmed_before)
             confirmed_rule = strong | kept
+        if frozen is not None:
+            # Votos antigos da janela nao confirmam o que esta congelado:
+            # regiao suspeita de oclusao nao entra no canvas.
+            confirmed_rule &= ~frozen
         new_confirmed = confirmed_rule & ~confirmed_before
         new_confirmed_px = int(np.count_nonzero(new_confirmed))
         if new_confirmed_px:
             self._confirmed[new_confirmed] = 255
         removed_px = 0
+        witnessed = False
         if self._config.removal:
             if self._removal_streak is None:
                 self._removal_streak = np.zeros(prob.shape, dtype=np.uint8)
@@ -210,7 +250,15 @@ class LayeredInkAccumulator:
             # confiavel; com a guarda ativa ela sozinha delimita
             # onde a ausencia foi de fato observada.
             witnessed = False
-            if removal_allowed and inspected is not None and canvas_before:
+            # A testemunha da remocao precisa de evidencia negativa
+            # real: a mascara de oclusao do chamador, ou o dominio
+            # geometrico da guarda. O ~frozen dobrado no visible via
+            # paper_ok nao e visao da passada — nao vale sozinho.
+            if (
+                removal_allowed
+                and canvas_before
+                and (had_visibility or valid_mask is not None)
+            ):
                 retained = np.count_nonzero(confirmed_before & inspected & mask_now)
                 witnessed = (
                     retained >= registration._REMOVAL_RETAINED_FRACTION * canvas_before
@@ -300,6 +348,35 @@ class LayeredInkAccumulator:
         # PIOR (~+4 ms) — provável custo de laço escalar no *= de
         # atributo; astype*255 repõe o array como sempre fez.
         self._provisional = provisional_now.astype(np.uint8) * 255
+        frozen_pending_px = 0
+        if frozen is not None:
+            unmasked_frozen = frozen if raw_visible is None else (raw_visible & frozen)
+            pending = unmasked_frozen & ~confirmed_before & (prob > self.threshold)
+            if (
+                self._config.removal
+                and removal_allowed
+                and had_visibility
+                and canvas_before
+                and paper_ok is not None
+            ):
+                exposed_visible = raw_visible & paper_ok
+                exposed_retained = np.count_nonzero(
+                    confirmed_before & exposed_visible & (prob > self.threshold)
+                )
+                hold_witnessed = witnessed or (
+                    exposed_retained
+                    >= registration._REMOVAL_RETAINED_FRACTION * canvas_before
+                    or exposed_retained >= registration._REMOVAL_WITNESS_FLOOR_PX
+                )
+                if hold_witnessed:
+                    pending = pending | (
+                        confirmed_before
+                        & exposed_visible
+                        & (self._hold > 0)
+                        & np.isfinite(prob)
+                        & (prob <= registration._REMOVAL_LOW_PROB)
+                    )
+            frozen_pending_px = int(np.count_nonzero(pending))
         result = {
             "confirmed": self._confirmed.copy(),
             "provisional": self._provisional.copy(),
@@ -311,6 +388,16 @@ class LayeredInkAccumulator:
             "provisional_ever_px": int(np.count_nonzero(self._provisional_ever)),
             "retracted_px_total": int(np.count_nonzero(self._retracted_ever)),
             "turn": turn,
+            "frozen_px": 0 if frozen is None else int(np.count_nonzero(frozen)),
+            "frozen_pending_px": frozen_pending_px,
+            # Papel que JA voltou a aparecer mas ainda esta no hold: sombra
+            # em recuperacao (limitada pelo hold). Borda/sombra permanente
+            # tem paper_ok False a cada passada e nao entra aqui.
+            "recovering_px": (
+                0
+                if paper_ok is None
+                else int(np.count_nonzero(paper_ok & (self._hold > 0)))
+            ),
         }
         if self._config.removal:
             result["removed_confirmed_px"] = removed_px
