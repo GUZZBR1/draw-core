@@ -683,7 +683,154 @@ def _gather_side(tracks, thick, matches, idx, line_ids, edge_col, direction):
     return part
 
 
-def _joined_through_bands(tracks, thick, valid_list, gutter_full):
+def _projected_continuation(
+    ink, track, k, valid_row, seam_col, band_edge, direction, h_run, need
+):
+    """(ok, ext): verifica tinta conectada através da costura na direção dada."""
+    if not valid_row[seam_col - track.x0]:
+        return False, 0
+    h, w = ink.shape
+    x_track = track.paths.shape[1]
+    local_seam = seam_col - track.x0
+    if direction > 0:
+        span = min(16, local_seam + 1)
+        x0_s = local_seam - span + 1
+        vals = track.paths[k, x0_s : local_seam + 1]
+        v_s = valid_row[x0_s : local_seam + 1]
+    else:
+        span = min(16, x_track - local_seam)
+        vals = track.paths[k, local_seam : local_seam + span]
+        v_s = valid_row[local_seam : local_seam + span]
+    if v_s.sum() >= 2:
+        idx = np.flatnonzero(v_s)
+        slope = float((vals[idx[-1]] - vals[idx[0]]) / (idx[-1] - idx[0]))
+    else:
+        slope = 0.0
+    y0 = float(track.paths[k, local_seam])
+    yc0 = int(round(y0))
+    lo0, hi0 = max(0, yc0 - _R), min(h, yc0 + _R + 1)
+    if lo0 >= hi0 or not ink[lo0:hi0, seam_col].any():
+        return False, 0
+    ys0 = np.flatnonzero(ink[lo0:hi0, seam_col]) + lo0
+    mid = ys0[int(np.argmin(np.abs(ys0 - yc0)))]
+    prev_top = prev_bot = int(mid)
+    while prev_top > 0 and ink[prev_top - 1, seam_col]:
+        prev_top -= 1
+    while prev_bot + 1 < h and ink[prev_bot + 1, seam_col]:
+        prev_bot += 1
+
+    out_thick = []
+    limit = w if direction > 0 else -1
+    for x in range(seam_col + direction, limit, direction):
+        yc = int(round(y0 + slope * (x - seam_col)))
+        lo, hi = max(0, prev_top), min(h, prev_bot + 1)
+        inside_band = (x < band_edge) if direction > 0 else (x > band_edge)
+        if lo >= hi or not ink[lo:hi, x].any():
+            if inside_band:
+                return False, 0
+            break
+        hit = int(np.flatnonzero(ink[lo:hi, x])[0] + lo)
+        top = bot = hit
+        while top > 0 and ink[top - 1, x] and top > yc - 2 * _R:
+            top -= 1
+        while bot + 1 < h and ink[bot + 1, x] and bot < yc + 2 * _R:
+            bot += 1
+        prev_top, prev_bot = top, bot
+        if not inside_band:
+            out_thick.append((bot - top + 1) > h_run + _THIN_MARGIN)
+    if len(out_thick) < need:
+        return False, 0
+    arr = np.array(out_thick, bool)[None, :]
+    if arr[:, :need].mean() < 0.85:
+        return False, 0
+    return True, int(_extent(arr, need)[0])
+
+
+def _vote_unmatched_split(
+    ink,
+    tracks,
+    thick,
+    valid_list,
+    matches,
+    i_src,
+    i_dst,
+    matched_src,
+    a,
+    b,
+    h_run,
+    need,
+    joined,
+):
+    """Avalia linhas sem par na divisa projetando tinta real no lado oposto."""
+    t_src, t_dst = tracks[i_src], tracks[i_dst]
+    direction = 1 if i_src < i_dst else -1
+    seam_col = t_src.x1 - 1 if direction > 0 else t_src.x0
+    band_in_edge = b if direction > 0 else a
+    band_out_edge = a if direction > 0 else b
+    k_src = t_src.paths.shape[0]
+    unmatched = np.setdiff1d(np.arange(k_src, dtype=np.int64), matched_src)
+    if unmatched.size == 0:
+        return
+    # ombro local do lado de origem (todas as linhas de t_src)
+    all_src = np.arange(k_src, dtype=np.int64)
+    src_cols = _gather_side(
+        tracks, thick, matches, i_src, all_src, band_out_edge, -direction
+    )
+    src_vote = (
+        src_cols[:, :need].mean(axis=1) >= 0.85 if src_cols.shape[1] >= need else None
+    )
+    min_bulk_src = max(2, k_src // 4)
+    has_src = src_vote is not None and src_vote.sum() > min_bulk_src
+    if has_src:
+        ext_src = _extent(src_cols, need)
+        bulk_src = _bulk_ext(ext_src[src_vote])
+    # ombro local do lado oposto (todas as linhas de t_dst)
+    k_dst = t_dst.paths.shape[0]
+    all_dst = np.arange(k_dst, dtype=np.int64)
+    dst_cols = _gather_side(
+        tracks, thick, matches, i_dst, all_dst, band_in_edge, direction
+    )
+    dst_vote = (
+        dst_cols[:, :need].mean(axis=1) >= 0.85 if dst_cols.shape[1] >= need else None
+    )
+    min_bulk_dst = max(2, k_dst // 4)
+    has_dst = dst_vote is not None and dst_vote.sum() > min_bulk_dst
+    if has_dst:
+        ext_dst = _extent(dst_cols, need)
+        bulk_dst = _bulk_ext(ext_dst[dst_vote])
+
+    for k in unmatched:
+        if src_vote is not None and not src_vote[k]:
+            continue
+        ok, ext_proj = _projected_continuation(
+            ink,
+            t_src,
+            int(k),
+            valid_list[i_src][k],
+            seam_col,
+            band_in_edge if direction > 0 else band_in_edge - 1,
+            direction,
+            h_run,
+            need,
+        )
+        if not ok:
+            continue
+        if has_src and has_dst:
+            if not (
+                ext_src[k] > bulk_src + _GUTTER_EDGE_RUN
+                and ext_proj > bulk_dst + _GUTTER_EDGE_RUN
+            ):
+                continue
+        elif has_src and src_vote is not None and unmatched.size > min_bulk_src:
+            if ext_src[k] <= bulk_src + _GUTTER_EDGE_RUN:
+                continue
+        if direction > 0:
+            joined[i_src][k, a - t_src.x0 :] = True
+        else:
+            joined[i_src][k, : b - t_src.x0] = True
+
+
+def _joined_through_bands(tracks, thick, valid_list, gutter_full, ink=None, h_run=2):
     """Lista de máscaras (K, X): trecho da linha na faixa que continua grosso fora dela.
 
     Cada faixa física de `gutter_full` é julgada uma vez só: se cruza a divisa
@@ -718,10 +865,41 @@ def _joined_through_bands(tracks, thick, valid_list, gutter_full):
         ):
             i_left, i_right = over
             pairs = matches[i_left]
-            if not pairs:
-                continue
             kl = np.array([p[0] for p in pairs], dtype=np.int64)
             kr = np.array([p[1] for p in pairs], dtype=np.int64)
+            if ink is not None:
+                _vote_unmatched_split(
+                    ink,
+                    tracks,
+                    thick,
+                    valid_list,
+                    matches,
+                    i_left,
+                    i_right,
+                    kl,
+                    a,
+                    b,
+                    h_run,
+                    need,
+                    joined,
+                )
+                _vote_unmatched_split(
+                    ink,
+                    tracks,
+                    thick,
+                    valid_list,
+                    matches,
+                    i_right,
+                    i_left,
+                    kr,
+                    a,
+                    b,
+                    h_run,
+                    need,
+                    joined,
+                )
+            if not pairs:
+                continue
         else:
             continue
         left_cols = (
@@ -758,7 +936,12 @@ def _joined_through_bands(tracks, thick, valid_list, gutter_full):
         if has_r:
             ext_r = _extent(right_cols, need)
             bulk_r = _bulk_ext(ext_r[right_vote])
-        if has_l and has_r:
+        if len(sides) == 1:
+            if has_l:
+                cont &= ext_l > bulk_l + _GUTTER_EDGE_RUN
+            if has_r:
+                cont &= ext_r > bulk_r + _GUTTER_EDGE_RUN
+        elif has_l and has_r:
             cont &= (ext_l > bulk_l + _GUTTER_EDGE_RUN) & (
                 ext_r > bulk_r + _GUTTER_EDGE_RUN
             )
@@ -960,7 +1143,9 @@ def erase_tracks(prob, tracks, h_pauta):
         w,
     )
     cap = h_run + _THIN_MARGIN + _GUTTER_EXTRA
-    joined_list = _joined_through_bands(tracks, thick, valid_list, gutter_full)
+    joined_list = _joined_through_bands(
+        tracks, thick, valid_list, gutter_full, ink, h_run
+    )
     shade_strokes = _stroke_on_shade_tracks(tracks, passes, valid_list, gutter_full)
     for i, (track, (pattern, yi, _valid, run), raw) in enumerate(
         zip(tracks, passes, thick, strict=True)

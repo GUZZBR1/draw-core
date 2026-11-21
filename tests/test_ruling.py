@@ -1134,3 +1134,98 @@ def test_empty_fold_without_any_pen_strokes_is_completely_erased():
         prob[y : y + 6, 560:640] = 0.9
     out = ruling.RulingFilter().apply(prob.copy())
     assert (out[:, 560:640] > 0.5).sum() == 0
+
+
+def test_offset_halves_preserve_a_stroke_crossing_the_fold():
+    """Pautas defasadas de meio periodo entre as metades (80/120/... a esquerda
+    e 100/140/... a direita): nenhum par casa na divisa, mas o traco de 6 px
+    sobre a pauta esquerda atravessa a sombra e sobrevive inteiro."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        yl = 80 + 40 * k
+        yr = 100 + 40 * k
+        prob[yl : yl + 2, :600] = 0.95
+        prob[yl : yl + 6, 560:600] = 0.95
+        prob[yr : yr + 2, 600:] = 0.95
+        prob[yr : yr + 6, 600:640] = 0.95
+    y = 80 + 40 * 5  # 280: cai no espaco em branco da metade direita (260 vs 300)
+    prob[y : y + 6, 540:660] = 0.95
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[y : y + 6, 540:660] > 0.5).all()
+    others = out[:, 562:638] > 0.5
+    others[y : y + 6, :] = False
+    assert others.sum() == 0
+
+
+def test_single_ruled_half_fold_at_edge_with_shoulders_and_no_stroke_is_erased():
+    """Pagina unica pautada [0, 600), sombra na borda [560, 600) com ombros
+    de 13 col em metade das linhas e sem tinta: nada sobrevive na faixa."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        y = 80 + 40 * k
+        prob[y : y + 2, :600] = 0.95
+        prob[y : y + 6, 560:600] = 0.95
+        if k % 2 == 0:
+            prob[y : y + 6, 547:560] = 0.95
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[:, 562:600] > 0.5).sum() == 0
+
+
+@pytest.mark.parametrize(
+    "layout", ["single_half", "paired_split", "offset_split", "track_edge"]
+)
+@pytest.mark.parametrize("has_stroke", [False, True])
+def test_fold_junction_matrix(layout, has_stroke):
+    """Matriz {configuracao da faixa} x {sem tinta, traco de caneta}:
+    sem tinta nada sobra isento; com traco, o miolo sobrevive inteiro."""
+    prob = np.zeros((600, 1200), np.float32)
+    if layout == "single_half":
+        fa, fb = 260, 340
+        for k in range(12):
+            y = 80 + 40 * k
+            prob[y : y + 2, :] = 0.95
+            prob[y : y + 6, fa:fb] = 0.95
+            if k % 2 == 0:
+                prob[y : y + 6, fa - 13 : fa] = 0.95
+                prob[y : y + 6, fb : fb + 13] = 0.95
+    elif layout == "paired_split":
+        fa, fb = 560, 640
+        for k in range(12):
+            y = 80 + 40 * k
+            prob[y : y + 2, :] = 0.95
+            prob[y : y + 6, fa:fb] = 0.95
+            if k % 2 == 0:
+                prob[y : y + 6, fa - 13 : fa] = 0.95
+                prob[y : y + 6, fb : fb + 13] = 0.95
+    elif layout == "offset_split":
+        fa, fb = 560, 640
+        for k in range(12):
+            yl, yr = 80 + 40 * k, 100 + 40 * k
+            prob[yl : yl + 2, :600] = 0.95
+            prob[yl : yl + 6, fa:600] = 0.95
+            prob[yr : yr + 2, 600:] = 0.95
+            prob[yr : yr + 6, 600:fb] = 0.95
+            if k % 2 == 0:
+                prob[yl : yl + 6, fa - 13 : fa] = 0.95
+                prob[yr : yr + 6, fb : fb + 13] = 0.95
+    else:  # track_edge
+        fa, fb = 560, 600
+        for k in range(12):
+            y = 80 + 40 * k
+            prob[y : y + 2, :600] = 0.95
+            prob[y : y + 6, fa:fb] = 0.95
+            if k % 2 == 0:
+                prob[y : y + 6, fa - 13 : fa] = 0.95
+
+    y_stroke = 80 + 40 * 5
+    if has_stroke:
+        prob[y_stroke : y_stroke + 6, fa - 20 : fb + 20] = 0.95
+
+    out = ruling.RulingFilter().apply(prob.copy())
+    if not has_stroke:
+        assert (out[:, fa + 2 : fb - 2] > 0.5).sum() == 0
+    else:
+        assert (out[y_stroke : y_stroke + 6, fa + 2 : fb - 2] > 0.5).all()
+        others = out[:, fa + 2 : fb - 2] > 0.5
+        others[y_stroke : y_stroke + 6, :] = False
+        assert others.sum() == 0
