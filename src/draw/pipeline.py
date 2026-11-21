@@ -87,6 +87,25 @@ def _quad_camera_mask(corners, shape):
     return mask.astype(bool)
 
 
+def _paper_mean_bgr(image, coverage):
+    """Média BGR sobre os pixels cobertos, sem materializar a seleção.
+
+    cv2.mean reduz numa passada sobre a máscara; o caminho
+    `image[coverage].mean(axis=0)` copiava os ~700-800k pixels do
+    papel (~24 ms por submit medidos na VM, issue #98) antes de
+    reduzir — mesmo resultado, ~43x mais barato.
+
+    cv2.mean multiplica a soma pelo recíproco da contagem em vez de
+    dividir: uma média em inteiro exato pode sair 1 ulp abaixo e o
+    cast para uint8 truncar um nível a menos. Recupera a soma exata
+    com round(mean*count) e divide direto — bit a bit igual ao
+    astype(uint8) do caminho antigo (floor para valores >= 0).
+    """
+    count = int(coverage.sum())
+    means = np.array(cv2.mean(image, coverage.astype(np.uint8))[:3])
+    return (np.round(means * count) // count).astype(np.uint8)
+
+
 # Anel de tolerancia do teste de componentes no IoU de cobertura
 # (_coverage_iou). A mascara chega ao espaco da camera por um resize
 # NEAREST do mapa nativo de 384 px do segmentador — um pixel nativo
@@ -326,7 +345,7 @@ class Pipeline:
         """
         if coverage is not None and coverage.any():
             filled = ink_warped.copy()
-            filled[~coverage] = ink_warped[coverage].mean(axis=0).astype(np.uint8)
+            filled[~coverage] = _paper_mean_bgr(ink_warped, coverage)
             return photometry.division_normalize(filled)
         return photometry.division_normalize(ink_warped)
 
@@ -478,8 +497,8 @@ class Pipeline:
             if coverage_page is not None:
                 if coverage_page.any():
                     ink_submit = ink_submit.copy()
-                    ink_submit[~coverage_page] = (
-                        ink_submit[coverage_page].mean(axis=0).astype(np.uint8)
+                    ink_submit[~coverage_page] = _paper_mean_bgr(
+                        ink_submit, coverage_page
                     )
         else:
             # O ganho e o preenchimento usam máscaras em grade de
@@ -524,7 +543,7 @@ class Pipeline:
                 # clareou o que a média vê (mesma ordem de antes).
                 paper = coverage & quad_mask
                 if paper.any():
-                    fill_color = frame[paper].mean(axis=0).astype(np.uint8)
+                    fill_color = _paper_mean_bgr(frame, paper)
                     filled = frame.copy()
                     filled[quad_mask & ~coverage] = fill_color
                     frame = filled
