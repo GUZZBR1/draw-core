@@ -750,14 +750,15 @@ def _joined_through_bands(tracks, thick, valid_list, gutter_full):
         cont = np.logical_and.reduce(sides)
         n_lines = max(tracks[i].paths.shape[0] for i in over)
         min_bulk = max(2, n_lines // 4)
-        if left_vote is not None and left_vote.sum() > min_bulk:
-            ext_l = _extent(left_cols, need)
-            bulk_l = _bulk_ext(ext_l[left_vote])
-            cont &= ext_l > bulk_l + _GUTTER_EDGE_RUN
-        if right_vote is not None and right_vote.sum() > min_bulk:
-            ext_r = _extent(right_cols, need)
-            bulk_r = _bulk_ext(ext_r[right_vote])
-            cont &= ext_r > bulk_r + _GUTTER_EDGE_RUN
+        if cont.sum() > min_bulk:
+            if left_vote is not None and left_vote.sum() > min_bulk:
+                ext_l = _extent(left_cols, need)
+                bulk_l = _bulk_ext(ext_l[left_vote])
+                cont &= ext_l > bulk_l + _GUTTER_EDGE_RUN
+            if right_vote is not None and right_vote.sum() > min_bulk:
+                ext_r = _extent(right_cols, need)
+                bulk_r = _bulk_ext(ext_r[right_vote])
+                cont &= ext_r > bulk_r + _GUTTER_EDGE_RUN
         if i_left == i_right:
             t = tracks[i_left]
             joined[i_left][kl, a - t.x0 : b - t.x0] |= cont[:, None]
@@ -788,14 +789,8 @@ def _long_runs(mask, length, edge_length):
     return out
 
 
-def _stroke_on_shade(run, gutter, valid=None):
-    """(K, X): traço de caneta dentro da sombra, por desvio das linhas vizinhas.
-
-    A sombra engrossa todas as linhas ao mesmo tempo (e a curva do vinco move
-    todas juntas); um traço deixa UMA linha mais grossa que a mediana da coluna
-    por um trecho contínuo. Vale também para marcas curtas inteiras na faixa,
-    sem continuação fora dela.
-    """
+def _shade_deviations(run, gutter, valid=None):
+    """(above, strong): desvios isolados da espessura em relação às linhas vizinhas."""
     if valid is None:
         med = np.median(run, axis=0)
         above = (run > med[None, :]) & gutter[None, :]
@@ -826,9 +821,55 @@ def _stroke_on_shade(run, gutter, valid=None):
         base[:, shared] = level[None, :]
         above[:, shared] = sel & (run[:, shared] > level[None, :])
     strong = above & (run >= base + 2)
+    return above, strong
+
+
+def _stroke_on_shade(run, gutter, valid=None):
+    """(K, X): traço de caneta dentro da sombra, por desvio das linhas vizinhas."""
+    above, strong = _shade_deviations(run, gutter, valid)
     return _long_runs(above, _STROKE_RUN, _STROKE_RUN) | _long_runs(
         strong, _STROKE_SHORT_RUN, _STROKE_SHORT_RUN
     )
+
+
+def _stroke_on_shade_tracks(tracks, passes, valid_list, gutter_full):
+    """Lista de máscaras (K, X) de traços na sombra, contando desvios através da divisa."""
+    strokes = [np.zeros_like(v) for v in valid_list]
+    if not tracks or not gutter_full.any():
+        return strokes
+    devs = [
+        _shade_deviations(run, gutter_full[t.x0 : t.x1], valid)
+        for t, (_p, _y, valid, run) in zip(tracks, passes, strict=True)
+    ]
+    for i, (above, strong) in enumerate(devs):
+        strokes[i] = _long_runs(above, _STROKE_RUN, _STROKE_RUN) | _long_runs(
+            strong, _STROKE_SHORT_RUN, _STROKE_SHORT_RUN
+        )
+    for i in range(len(tracks) - 1):
+        xc = tracks[i].x1
+        if tracks[i + 1].x0 != xc or not (gutter_full[xc - 1] and gutter_full[xc]):
+            continue
+        pairs = _match_tracks(
+            tracks[i], valid_list[i], tracks[i + 1], valid_list[i + 1]
+        )
+        if not pairs:
+            continue
+        kl = np.array([p[0] for p in pairs], dtype=np.int64)
+        kr = np.array([p[1] for p in pairs], dtype=np.int64)
+        wl = min(_STROKE_RUN, tracks[i].paths.shape[1])
+        wr = min(_STROKE_RUN, tracks[i + 1].paths.shape[1])
+        comb_above = np.concatenate(
+            [devs[i][0][kl, -wl:], devs[i + 1][0][kr, :wr]], axis=1
+        )
+        comb_strong = np.concatenate(
+            [devs[i][1][kl, -wl:], devs[i + 1][1][kr, :wr]], axis=1
+        )
+        comb_ok = _long_runs(comb_above, _STROKE_RUN, _STROKE_RUN + 1) | _long_runs(
+            comb_strong, _STROKE_SHORT_RUN, _STROKE_SHORT_RUN + 1
+        )
+        strokes[i][kl, -wl:] |= comb_ok[:, :wl]
+        strokes[i + 1][kr, :wr] |= comb_ok[:, wl:]
+    return strokes
 
 
 def _opening_cols(mask, length):
@@ -893,7 +934,8 @@ def erase_tracks(prob, tracks, h_pauta):
     )
     cap = h_run + _THIN_MARGIN + _GUTTER_EXTRA
     joined_list = _joined_through_bands(tracks, thick, valid_list, gutter_full)
-    for i, (track, (pattern, yi, valid, run), raw) in enumerate(
+    shade_strokes = _stroke_on_shade_tracks(tracks, passes, valid_list, gutter_full)
+    for i, (track, (pattern, yi, _valid, run), raw) in enumerate(
         zip(tracks, passes, thick, strict=True)
     ):
         jstar = jstar_t[pattern].astype(np.int64)
@@ -902,7 +944,7 @@ def erase_tracks(prob, tracks, h_pauta):
         if gutter.any():
             shaded = (run >= 1) & (run <= cap) & gutter[None, :]
             shaded &= ~joined_list[i]
-            shaded &= ~_stroke_on_shade(run, gutter, valid)
+            shaded &= ~shade_strokes[i]
             thin |= shaded
             raw = raw & ~(gutter[None, :] & (run <= cap))
         anchor = np.zeros_like(raw)

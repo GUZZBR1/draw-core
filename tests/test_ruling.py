@@ -1045,3 +1045,42 @@ def test_a_1px_two_column_shadow_bump_inside_the_fold_is_erased():
     prob[y : y + 7, 575:577] = 0.8  # +1 px por 2 colunas = 14 px de ruido
     out = ruling.RulingFilter().apply(prob.copy())
     assert (out[:, 566:634] > 0.5).sum() == 0
+
+
+def test_one_sided_shoulders_do_not_erase_a_crossing_stroke():
+    """Tres ombros de 13 colunas so a esquerda (sem ombros a direita) e um
+    traco de 15 col a esquerda e 30 a direita: o traco cruza os dois lados
+    e nao pode ser vetado pelos ombros unilaterais."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        y = 80 + 40 * k
+        prob[y : y + 2, :] = 0.95
+        prob[y : y + 6, 560:700] = 0.95
+    for k in range(3):
+        y = 80 + 40 * k
+        prob[y : y + 6, 547:560] = 0.95  # ombros so na esquerda
+    y = 80 + 40 * 7
+    prob[y : y + 6, 545:730] = 0.95  # 15 a esquerda, 30 a direita
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[y : y + 6, 562:698] > 0.5).all()
+    others = out[:, 562:698] > 0.5
+    others[y : y + 6, :] = False
+    assert others.sum() == 0
+
+
+def test_a_4_column_1px_dash_straddling_the_split_is_kept():
+    """Traco de 7 px (+1 px sobre a sombra de 6 px) por 4 colunas (598..601)
+    cruzando a divisa das metades em 600: somando os dois lados atinge 4 col
+    e sobrevive inteiro."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        y = 80 + 40 * k
+        prob[y : y + 2, :] = 0.95
+        prob[y : y + 6, 560:640] = 0.8
+    dash = np.zeros(prob.shape, bool)
+    y = 80 + 40 * 5
+    dash[y - 1 : y + 6, 598:602] = True  # 7 px x 4 col (2 de cada lado)
+    prob[dash] = 0.95
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[y - 1 : y + 6, 598:602] > 0.5).all()
+    assert ((out > 0.5) & ~dash)[:, 560:640].sum() == 0
