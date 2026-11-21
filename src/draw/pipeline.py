@@ -231,9 +231,8 @@ class Pipeline:
     render_display: o painel em camadas (confirmada + provisoria).
     Callbacks: on_format_suggestion (sugestao de formato),
     on_acquisition (evento por aquisicao),
-    on_ink(contracts.InkPublication) a cada publicacao nova da tinta,
-    save_page_snapshot(prefixo, mascara) (pagina anterior na
-    virada ou na divisao) e log (console).
+    on_ink(contracts.InkPublication) a cada publicacao nova da tinta
+    e log (console).
     """
 
     def __init__(
@@ -249,7 +248,6 @@ class Pipeline:
         on_acquisition=_ignore,
         on_ink=_ignore,
         ink_meta=False,
-        save_page_snapshot=_ignore,
         clock=time.monotonic,
         warp_sheet=paper.warp_sheet,
         to_gray=_bgr_to_gray,
@@ -270,7 +268,6 @@ class Pipeline:
         self._on_acquisition = on_acquisition
         self._on_ink = on_ink
         self._ink_meta = bool(ink_meta)
-        self._save_page_snapshot = save_page_snapshot
         self._clock = clock
         self._warp_sheet = warp_sheet
         self._to_gray = to_gray
