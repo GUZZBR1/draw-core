@@ -47,10 +47,21 @@ _resolve_venv_paths() {
 
 _gui_ready() {
     _resolve_venv_paths
+    # A second registered cv2 provider is a time bomb: the next exact
+    # `uv sync` uninstalls the contrib dist and deletes the shared cv2/
+    # files — collapse it through the repair instead of launching.
     [ -n "$VENV_DRAW" ] && [ -x "$VENV_DRAW" ] && "$VENV_PYTHON" -c '
 import cv2, onnxruntime, draw
 from draw.app import _gui_backend_compiled
 assert _gui_backend_compiled(), "headless opencv"
+from importlib.metadata import distributions
+names = {dist.metadata["Name"] for dist in distributions()}
+if "opencv-contrib-python" in names:
+    assert not {
+        "opencv-contrib-python-headless",
+        "opencv-python",
+        "opencv-python-headless",
+    } & names, "segundo provedor de cv2 registrado"
 ' >/dev/null 2>&1
 }
 
@@ -79,7 +90,8 @@ fi
 
 _install_gui() {
     if [ "$USE_UV" = 1 ]; then
-        UV_PROJECT_ENVIRONMENT="$VENV_DIR" uv sync --inexact --extra gui "$@"
+        UV_PROJECT_ENVIRONMENT="$VENV_DIR" uv sync --inexact --extra gui \
+            --no-install-package opencv-contrib-python-headless "$@"
     else
         local extras=gui
         if [ "$#" -gt 0 ]; then

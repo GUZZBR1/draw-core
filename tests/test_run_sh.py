@@ -33,6 +33,9 @@ def launcher(tmp_path):
         "    for name in ('cv2', 'onnxruntime', 'draw', 'draw.app'):\n"
         "        sys.modules[name] = types.ModuleType(name)\n"
         "    sys.modules['draw.app']._gui_backend_compiled = lambda: not (prefix / 'gui-broken').exists()\n"
+        "    meta = types.ModuleType('importlib.metadata')\n"
+        "    meta.distributions = lambda: []\n"
+        "    sys.modules['importlib.metadata'] = meta\n"
         "    if (prefix / 'hand-installed').exists():\n"
         "        sys.modules['mediapipe'] = types.ModuleType('mediapipe')\n"
         "    else:\n"
@@ -84,7 +87,7 @@ def test_failed_setup_never_uninstalls_opencv(tmp_path, launcher, use_uv):
     commands = (tmp_path / "commands").read_text().splitlines()
     assert all("uninstall" not in command for command in commands)
     assert commands[-2:] == (
-        ["sync --inexact --extra gui --extra hand", "sync --inexact --extra gui"]
+        [_INSTALL_SYNC_HAND, _INSTALL_SYNC_GUI]
         if use_uv
         else ["-m pip install -e .[gui,hand]", "-m pip install -e .[gui]"]
     )
@@ -145,7 +148,10 @@ def test_expired_hand_fallback_still_launches_offline(tmp_path, launcher, use_uv
     commands = (tmp_path / "commands").read_text()
     assert "uninstall" not in commands
     assert ".[gui]\n" not in commands
-    assert "sync --inexact --extra gui\n" not in commands
+    assert (
+        "sync --inexact --extra gui --no-install-package "
+        "opencv-contrib-python-headless\n" not in commands
+    )
     assert marker.stat().st_mtime > 1
     launched = (tmp_path / "launches").read_text().strip()
     assert tmp_path / launched == tmp_path / ".venv/bin/draw"
@@ -221,6 +227,12 @@ _UNINSTALL_ALL = (
     "opencv-contrib-python-headless"
 )
 
+_INSTALL_SYNC_GUI = (
+    "sync --inexact --extra gui --no-install-package opencv-contrib-python-headless"
+)
+
+_INSTALL_SYNC_HAND = _INSTALL_SYNC_GUI + " --extra hand"
+
 _REPAIR_SYNC = (
     "sync --locked --offline --inexact --extra gui "
     "--no-install-package opencv-contrib-python-headless"
@@ -245,7 +257,7 @@ def test_uv_repair_prefers_locked_offline_sync(tmp_path, launcher):
     )
     commands = _commands(tmp_path)
     assert [c for c in commands if c.startswith("sync")] == [
-        "sync --inexact --extra gui --extra hand",
+        _INSTALL_SYNC_HAND,
         _REPAIR_SYNC,
     ]
     assert [c for c in commands if c.startswith("pip uninstall")] == [_UNINSTALL_ALL]
@@ -267,10 +279,7 @@ def test_uv_repair_falls_back_to_network_without_cache(tmp_path, launcher):
         timeout=10,
     )
     syncs = [c for c in _commands(tmp_path) if c.startswith("sync")]
-    assert syncs[1] == _REPAIR_SYNC
-    assert syncs[2] == (
-        "sync --inexact --extra gui --no-install-package opencv-contrib-python-headless"
-    )
+    assert syncs == [_INSTALL_SYNC_HAND, _REPAIR_SYNC, _INSTALL_SYNC_GUI]
     launched = (tmp_path / "launches").read_text().strip()
     assert tmp_path / launched == tmp_path / ".venv/bin/draw"
 
@@ -296,7 +305,7 @@ def test_uv_hand_retry_syncs_inexact_and_repairs_hand_env(tmp_path, launcher):
     )
     commands = _commands(tmp_path)
     syncs = [c for c in commands if c.startswith("sync")]
-    assert syncs == ["sync --inexact --extra gui --extra hand", _REPAIR_SYNC]
+    assert syncs == [_INSTALL_SYNC_HAND, _REPAIR_SYNC]
     uninstalls = [c for c in commands if c.startswith("pip uninstall")]
     assert uninstalls == [
         "pip uninstall --python .venv-hand/bin/python opencv-python "
@@ -336,9 +345,13 @@ def test_pip_repair_keeps_single_cv2_provider(tmp_path, launcher):
 def test_real_uv_plain_sync_keeps_cv2_importable(tmp_path):
     """Com um cache real populado so por `uv sync` travado: o repair
     offline instala o contrib pelo uv.lock (sem listagem de PyPI), deixa
-    um unico provedor cv2 registrado, e um `uv sync` exato depois troca
-    o provedor sem matar `import cv2` — com dois dists registrados o
-    sync removia o contrib e os arquivos cv2 junto."""
+    um unico provedor cv2 registrado, e syncs posteriores trocam o
+    provedor sem matar `import cv2` — com dois dists registrados o
+    sync exato removia o contrib e os arquivos cv2 junto. Inexact
+    syncs que recriam o par (o do launcher via --extra gui, ou um
+    manual que instala o headless por cima) sao cobertos aqui: o
+    estado de "janela abre" e de "provedor unico" e o que a sonda e
+    o repair garantem."""
     uv = shutil.which("uv")
     if uv is None:
         pytest.skip("uv nao esta no PATH")
@@ -369,26 +382,78 @@ def test_real_uv_plain_sync_keeps_cv2_importable(tmp_path):
     # sem listagem de indice — o cenario em que `uv pip install` falha.
     shutil.rmtree(tmp_path / "uvcache" / "simple-v21", ignore_errors=True)
 
-    # A sequencia real do _repair_opencv.
-    run(
-        [
-            uv,
-            "pip",
-            "uninstall",
-            "--python",
-            str(python),
-            "opencv-python",
-            "opencv-python-headless",
-            "opencv-contrib-python",
-            "opencv-contrib-python-headless",
-        ]
-    )
+    def repair():
+        # A sequencia real do _repair_opencv.
+        run(
+            [
+                uv,
+                "pip",
+                "uninstall",
+                "--python",
+                str(python),
+                "opencv-python",
+                "opencv-python-headless",
+                "opencv-contrib-python",
+                "opencv-contrib-python-headless",
+            ]
+        )
+        run(
+            [
+                uv,
+                "sync",
+                "--locked",
+                "--offline",
+                "--inexact",
+                "--extra",
+                "gui",
+                "--no-install-package",
+                "opencv-contrib-python-headless",
+            ]
+        )
+
+    def providers():
+        return subprocess.run(
+            [uv, "pip", "list", "--python", str(python)],
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+
+    def gui_opens():
+        return (
+            subprocess.run([str(python), "-c", _CV2_GUI_CHECK], check=False).returncode
+            == 0
+        )
+
+    def only_contrib():
+        dists = providers()
+        return "opencv-contrib-python" in dists and not any(
+            name in dists
+            for name in (
+                "opencv-contrib-python-headless",
+                "opencv-python",
+                "opencv-python-headless",
+            )
+        )
+
+    repair()
+    assert gui_opens()
+    assert only_contrib()
+
+    # `uv sync` exato manual depois do repair: troca o provedor para o
+    # headless travado, mas o cv2 segue importavel.
+    run([uv, "sync"])
+    run([str(python), "-c", "import cv2"])
+
+    # O sync do proprio launcher (--inexact --extra gui
+    # --no-install-package) reinstala o contrib por cima sem
+    # desregistrar o headless — a janela abre, mas o par fica armado e
+    # a sonda o manda para o repair.
     run(
         [
             uv,
             "sync",
-            "--locked",
-            "--offline",
             "--inexact",
             "--extra",
             "gui",
@@ -396,18 +461,18 @@ def test_real_uv_plain_sync_keeps_cv2_importable(tmp_path):
             "opencv-contrib-python-headless",
         ]
     )
-    run([str(python), "-c", _CV2_GUI_CHECK])
-    providers = subprocess.run(
-        [uv, "pip", "list", "--python", str(python)],
-        env=env,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
-    assert "opencv-contrib-python-headless" not in providers
-    assert "opencv-contrib-python" in providers
+    assert gui_opens()
+    assert not only_contrib()
+    repair()
+    assert gui_opens()
+    assert only_contrib()
 
-    # `uv sync` exato manual depois do repair: troca o provedor para o
-    # headless travado, mas o cv2 segue importavel.
-    run([uv, "sync"])
+    # `uv sync --inexact` manual (sem extra gui): mantem o contrib e
+    # instala o headless por cima — a janela nao abre, o cv2 importa, e
+    # o repair restaura o provedor unico com janela.
+    run([uv, "sync", "--inexact"])
+    assert not gui_opens()
     run([str(python), "-c", "import cv2"])
+    repair()
+    assert gui_opens()
+    assert only_contrib()
