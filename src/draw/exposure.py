@@ -112,6 +112,7 @@ class PaperGainSmoother:
         self._updated_at = None
         self._prev_sample = None
         self._prev_mask = None
+        self._prev_p90_full = None
 
     def update(self, target_gain, timestamp, *, image=None, mask=None):
         """Retorna o ganho temporalmente estabilizado para `timestamp` (s).
@@ -129,13 +130,17 @@ class PaperGainSmoother:
         if not math.isfinite(now):
             raise ValueError(f"timestamp precisa ser finito: {timestamp!r}")
         sample = sample_mask = None
+        p90_full = None
         if image is not None:
             sample, sample_mask = _sampled_grid(image, mask)
+            if sample_mask.any():
+                p90_full = float(np.percentile(sample[sample_mask], 90))
         if self._gain is None or self._updated_at is None:
             self._gain = target
             self._updated_at = now
             self._prev_sample = sample
             self._prev_mask = sample_mask
+            self._prev_p90_full = p90_full
             return self._gain
 
         elapsed = now - self._updated_at
@@ -143,9 +148,10 @@ class PaperGainSmoother:
             return self._gain
         self._updated_at = now
 
-        shift = self._shared_exposure_shift(sample, sample_mask)
+        shift = self._shared_exposure_shift(sample, sample_mask, p90_full)
         self._prev_sample = sample
         self._prev_mask = sample_mask
+        self._prev_p90_full = p90_full
 
         if target == 1.0:
             self._gain = target
@@ -156,48 +162,59 @@ class PaperGainSmoother:
             # não do alvo: uma mão cobrindo a margem clara neste quadro
             # mudaria o p90 da máscara nova e o alvo iria na direção
             # contrária à exposição (Devin Review PR #140).
-            ratio, mask_stable = shift
+            ratio, target_reliable = shift
             corrected = self._gain / ratio
-            if not mask_stable or target >= _MAX_GAIN:
-                # Máscara mexeu: o alvo do quadro pode ter enviesado.
-                # Alvo no teto: ele não mede a cena — convergir para ele
-                # desfaria a correção e re-injetaria overshoot a cada
-                # clarão (Devin Review PR #140).
+            if not target_reliable:
                 self._gain = float(np.clip(corrected, 1.0, _MAX_GAIN))
                 return self._gain
-            # Máscara estável e alvo confiável: a correção não pode
-            # segurar brilho acima dele — sair do bypass 1,0 restaurando
-            # o nível anterior cliparia realces (Devin Review PR #140).
-            # Sem retorno aqui, o resíduo converge ao alvo pela
-            # suavização normal em vez de ficar preso para sempre.
+            # Alvo confiável: a correção não pode segurar brilho acima
+            # dele — sair do bypass 1,0 restaurando o nível anterior
+            # cliparia realces (Devin Review PR #140). Sem retorno aqui,
+            # o resíduo converge ao alvo pela suavização normal em vez
+            # de ficar preso para sempre.
             self._gain = float(np.clip(min(corrected, target), 1.0, _MAX_GAIN))
 
         current_log = math.log(self._gain)
         target_log = math.log(target)
         error = target_log - current_log
         if abs(error) <= _GAIN_DEADBAND_LOG:
-            if error >= 0.0 or not self._newly_saturates(image, mask, target):
+            if error >= 0.0 or not self._saturates_newly(
+                image, mask, self._gain, target
+            ):
                 return self._gain
             # O decréscimo fura a banda morta: segurar o ganho retido
             # cliparia pixels que o alvo novo manteria distintos
             # (Devin Review PR #140).
 
         alpha = -math.expm1(-elapsed / _GAIN_TIME_CONSTANT_SECONDS)
-        self._gain = math.exp(current_log + alpha * error)
+        proposed = math.exp(current_log + alpha * error)
+        if target >= _MAX_GAIN and self._saturates_newly(
+            image, mask, proposed, self._gain
+        ):
+            # Alvo no teto não mede a cena: convergir para ele só vale
+            # enquanto a subida não clipa papel — realce que o ganho
+            # atual preserva trava o resíduo (Devin Review PR #140).
+            return self._gain
+        self._gain = proposed
         return self._gain
 
-    def _shared_exposure_shift(self, sample, sample_mask):
+    def _shared_exposure_shift(self, sample, sample_mask, p90_full):
         """Razão de exposição dos pixels visíveis nos dois quadros.
 
-        Retorna (p90_atual/p90_anterior, máscara inalterada) quando
-        mediana e p90 se movem juntos na interseção das máscaras —
-        mudança global — ou None.
+        Retorna (p90_atual/p90_anterior, alvo_confiável) quando mediana
+        e p90 se movem juntos na interseção das máscaras — mudança
+        global — ou None.
         Uma mão cobrindo a margem muda a máscara, não os pixels que
         seguem visíveis: comparar a interseção evita ler oclusão como
         mudança de exposição. O p90 sai direto da amostra, não do alvo
         clipado em _MAX_GAIN — no teto a mudança continua visível.
         Sem amostras compartilhadas suficientes não há comparação e o
         caminho normal de suavização decide.
+        O alvo só é confiável quando a máscara nova não enviesa o
+        percentil: o p90 da máscara inteira deve ter se movido com a
+        razão de exposição medida nos compartilhados — poucas células
+        trocadas bastam para enviesar o alvo se cruzam o corte do
+        percentil (Devin Review PR #140).
         """
         if (
             self._prev_sample is None
@@ -225,22 +242,25 @@ class PaperGainSmoother:
             and abs(p90_delta) >= _GLOBAL_EXPOSURE_LOG_TOLERANCE
             and abs(p90_delta - median_delta) <= _GLOBAL_EXPOSURE_LOG_TOLERANCE
         ):
-            # Bordas de quad/seg/mão oscilam umas células por quadro:
-            # a estabilidade usa fração de diferença, não igualdade
-            # exata (Devin Review PR #140).
-            diff = np.count_nonzero(sample_mask != self._prev_mask)
-            mask_stable = diff <= max(2, sample_mask.sum() // 50)
-            return p90_cur / p90_prev, mask_stable
+            target_reliable = (
+                p90_full is not None
+                and p90_full > 0.0
+                and self._prev_p90_full is not None
+                and self._prev_p90_full > 0.0
+                and abs(math.log(p90_full / self._prev_p90_full) - p90_delta)
+                <= _GLOBAL_EXPOSURE_LOG_TOLERANCE
+            )
+            return p90_cur / p90_prev, target_reliable
         return None
 
-    def _newly_saturates(self, image, mask, target):
-        """Fração do papel que o ganho retido satura e o alvo preserva.
+    def _saturates_newly(self, image, mask, high_gain, low_gain):
+        """Fração do papel que `high_gain` satura e `low_gain` preserva.
 
-        Um pixel conta quando algum canal cai em [255/ganho retido,
-        255/alvo): aquele canal vai a 255 com o ganho atual mas segue
-        distinto com o alvo. Retorna True se a fração passa o limite.
+        Um pixel conta quando algum canal cai em [255/high_gain,
+        255/low_gain): vai a 255 com o ganho maior mas segue distinto
+        com o menor. Retorna True se a fração passa o limite.
         """
-        if image is None:
+        if image is None or high_gain <= low_gain:
             return False
         sample = image[::_SAMPLE_STRIDE, ::_SAMPLE_STRIDE]
         if mask is not None:
@@ -249,7 +269,7 @@ class PaperGainSmoother:
                 sample = sample[sampled_mask]
         if sample.size == 0:
             return False
-        newly_saturated = (sample >= 255.0 / self._gain) & (sample < 255.0 / target)
+        newly_saturated = (sample >= 255.0 / high_gain) & (sample < 255.0 / low_gain)
         if image.ndim == 3:
             newly_saturated = newly_saturated.any(axis=-1)
         return float(newly_saturated.mean()) > _CLIP_RELEASE_FRACTION

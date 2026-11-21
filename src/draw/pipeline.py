@@ -541,12 +541,23 @@ class Pipeline:
                     gain_mask &= coverage
                 if visible is not None:
                     gain_mask &= visible
-                target_gain = exposure.paper_gain(frame, gain_mask)
-                gain_at = packet.captured_at
-                self.last_ink_gain = self._paper_gain_smoother.update(
-                    target_gain, gain_at, image=frame, mask=gain_mask
-                )
-                frame = exposure.apply_gain(frame, self.last_ink_gain)
+                # Máscara vazia — a mão cobrindo a folha inteira, ou a
+                # cobertura devolvendo seu veredito vazio deliberado:
+                # paper_gain mediria o frame todo (mesa e oclusor
+                # contam como "papel") e ainda contaminaria as
+                # estatísticas do suavizador; um quadro claro
+                # derrubaria o ganho a 1,0 num passo — o flash escuro
+                # e a reconvergência da issue #133. Sem folha visível
+                # não há estimativa: o último ganho segue aplicado —
+                # identidade antes da primeira medida — até o papel
+                # reaparecer.
+                if gain_mask.any():
+                    target_gain = exposure.paper_gain(frame, gain_mask)
+                    gain_at = packet.captured_at
+                    self.last_ink_gain = self._paper_gain_smoother.update(
+                        target_gain, gain_at, image=frame, mask=gain_mask
+                    )
+                frame = exposure.apply_gain(frame, self.last_ink_gain or 1.0)
             fill_color = None
             if coverage is not None and coverage.any():
                 # Fora da folha o warp é preto: a transição

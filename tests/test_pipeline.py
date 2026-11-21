@@ -715,6 +715,60 @@ def test_ink_auto_gain_excludes_the_hand_from_the_classic_hand_masker():
     assert loop.last_ink_gain == 1.0
 
 
+def test_ink_auto_gain_holds_last_gain_while_hand_covers_the_sheet():
+    """Issue #133: a mão cobrindo o quadro inteiro zera a máscara do
+    ganho (`visible` todo False) — e paper_gain leria mesa+oclusor como
+    "imagem inteira": um quadro claro derrubaria o ganho a 1,0 (flash
+    escuro + reconvergência ao sair a mão). Máscara vazia não mede: a
+    estimativa congela e o último ganho segue aplicado até o papel
+    reaparecer."""
+
+    class _Masker:
+        full = False
+
+        def mask(self, image):
+            camera = np.zeros(image.shape[:2], np.uint8)
+            if self.full:
+                camera[:] = 255
+            return camera
+
+    def scene(level, hand=False):
+        frame = np.full((720, 1280, 3), 235, np.uint8)  # mesa clara
+        frame[100:400, 100:500] = 100 if hand else level  # oclusor ou papel
+        return frame
+
+    masker = _Masker()
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None),
+        config=PipelineConfig(ink_auto_gain=True),
+        hand_masker=masker,
+    )
+    _drive(loop, 40, frame=scene(80))  # papel escuro: ganho estabelecido
+    assert loop.last_ink_gain == pytest.approx(2.5, rel=0.05)
+
+    masker.full = True
+    seen = len(ink.pages)
+    for _ in range(30):
+        loop.step(_packet(loop, scene(80, hand=True)))
+    occluded = ink.pages[seen:]
+    assert occluded, "a passada de tinta segue submetendo sob a mão"
+    occluded_visibles = [v for _g, _c, v, _cov in ink.submitted[seen:]]
+    assert all(v is not None and not v.any() for v in occluded_visibles)
+    # A estimativa não rodou: o ganho não caiu a 1,0 nem andou.
+    assert loop.last_ink_gain == pytest.approx(2.5, rel=0.05)
+    # E segue aplicado na página: o oclusor 100 sobe ~100 x 2,5 (sem
+    # clipar) — com o bug a página subiria crua a ~100.
+    for page in occluded:
+        assert float(page.image[400:800, 300:500].mean()) == pytest.approx(250.0, abs=3)
+
+    masker.full = False
+    for _ in range(20):
+        loop.step(_packet(loop, scene(160)))  # papel mais claro
+    # Com a folha de volta a estimativa retoma: o ganho segue o alvo
+    # novo em vez de ficar preso no valor congelado.
+    assert loop.last_ink_gain == pytest.approx(200 / 160, rel=0.05)
+
+
 def test_ink_divnorm_submits_the_raw_warp_to_the_worker():
     """ink_divnorm=True: o retificado sobe cru à tinta — a
     normalização rola dentro da passada da trabalhadora (issue

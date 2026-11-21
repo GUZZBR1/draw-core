@@ -141,7 +141,8 @@ def test_global_exposure_shift_detected_at_gain_ceiling():
 def test_ceiling_ratio_correction_not_undone_by_smoothing():
     """Devin Review PR #140: alvo travado no teto 3x nos dois níveis
     (p90 60 <-> 65). Convergir para o alvo limitado desfaz a correção
-    pela razão e clipa os realces a cada clarão."""
+    pela razão e clipa os realces a cada clarão — tem que valer em
+    clarão sustentado, não só no primeiro."""
     visible = np.ones((120, 120), dtype=bool)
     dark = np.full((120, 120, 3), 60, np.uint8)
     bright = np.full((120, 120, 3), 65, np.uint8)
@@ -149,14 +150,15 @@ def test_ceiling_ratio_correction_not_undone_by_smoothing():
     bright[8, 16] = 91
 
     smoother = exposure.PaperGainSmoother()
-    gains = []
-    for index, page in enumerate([dark, bright, dark, bright]):
+    sequence = [dark, bright] * 4  # clarões sustentados, não um flash
+    for index, page in enumerate(sequence):
         target = exposure.paper_gain(page, visible)  # 3,0 sempre
-        gains.append(smoother.update(target, index * 0.15, image=page, mask=visible))
-
-    out = exposure.apply_gain(bright, gains[-1])
-    # 65 * (3 / (65/60)) ~= 180: realces 90/91 ficam 249/252 distintos
-    assert out[8, 8, 0] < out[8, 16, 0] < 255
+        gain = smoother.update(target, index * 0.15, image=page, mask=visible)
+        if index % 2 == 0:
+            continue
+        out = exposure.apply_gain(bright, gain)
+        # 65 * (3 / (65/60)) ~= 180: realces 90/91 distintos em TODO clarão
+        assert out[8, 8, 0] < out[8, 16, 0] < 255
 
 
 def test_exposure_shift_correction_uses_shared_ratio_over_new_mask_target():
@@ -180,8 +182,69 @@ def test_exposure_shift_correction_uses_shared_ratio_over_new_mask_target():
     target = exposure.paper_gain(occluded, hand)  # ~2,273: subiu
     gain = smoother.update(target, 0.1, image=occluded, mask=hand)
 
-    assert gain == pytest.approx(first * 80 / 88)  # ~2,02: compensação
-    assert gain < first < target
+    # ~2,02 de compensação + um passo de convergência ao alvo honesto
+    assert first * 80 / 88 <= gain < first < target
+
+
+def test_p90_crossing_margin_does_not_bias_ratio_correction():
+    """Devin Review PR #140: a máscara perde poucas células escuras e a
+    margem clara passa de ~9,9% para ~10% do visível — o p90 pula do
+    papel para a margem e o alvo enviesado (1,6x) derrubaria o ganho.
+    O alvo é confiável só quando o p90 da máscara inteira acompanha a
+    razão medida nos compartilhados; enviesado, vale só a razão."""
+    page_prev = np.full((200, 320, 3), 80, np.uint8)
+    page_prev[:192, 288:] = 120
+    page_prev[192:, 288:312] = 120  # 99 células amostradas: 9,9% -> p90=80
+    mask_prev = np.ones(page_prev.shape[:2], dtype=bool)
+
+    smoother = exposure.PaperGainSmoother()
+    first = smoother.update(
+        exposure.paper_gain(page_prev, mask_prev),
+        0.0,
+        image=page_prev,
+        mask=mask_prev,
+    )
+    assert first == pytest.approx(2.5)
+
+    page_cur = np.full((200, 320, 3), 84, np.uint8)  # exposição +5%
+    page_cur[:192, 288:] = 126
+    page_cur[192:, 288:312] = 126
+    mask_cur = mask_prev.copy()
+    mask_cur[:64, :16] = False  # perde 16 células escuras: margem vira ~10%
+    target = exposure.paper_gain(page_cur, mask_cur)
+    # p90 interpola no corte: ~113 -> alvo enviesado ~1,76 (honesto ~2,38)
+    assert target == pytest.approx(200 / 113.4, rel=0.02)
+
+    gain = smoother.update(target, 0.1, image=page_cur, mask=mask_cur)
+
+    assert gain == pytest.approx(first / 1.05, rel=0.01)  # ~2,38
+    assert gain > 2.0 > target  # o alvo enviesado derrubaria o ganho
+
+
+def test_capped_target_recovers_toward_ceiling_under_stationary_occlusion():
+    """Devin Review PR #140: alvo preso no teto + oclusão parada +
+    jitter de exposição seguido. Corrigir e retornar cedo a cada quadro
+    deixa o papel ~130 para sempre; a correção pela razão tem que
+    convergir para o teto de novo."""
+    margin = np.full((120, 120, 3), 60, np.uint8)
+    margin[:, 100:] = 90
+    full = np.ones((120, 120), dtype=bool)
+    hand = full.copy()
+    hand[:, 100:] = False
+
+    smoother = exposure.PaperGainSmoother()
+    first = smoother.update(
+        exposure.paper_gain(margin, full), 0.0, image=margin, mask=full
+    )
+    gains = [first]
+    for index, level in enumerate([62, 64, 62, 64, 62, 64, 62, 64, 62, 64]):
+        page = np.full((120, 120, 3), level, np.uint8)
+        target = exposure.paper_gain(page, hand)  # 3,0 em todos
+        gains.append(smoother.update(target, (index + 1) / 10.0, image=page, mask=hand))
+
+    # no nível compensado (~2,1) o papel sai ~130; a recuperação tem
+    # que passar bem disso rumo ao teto
+    assert gains[-1] > 2.6
 
 
 def test_leaving_unity_bypass_does_not_clip_paper_highlights():
