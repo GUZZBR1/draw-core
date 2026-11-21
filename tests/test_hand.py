@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 
 from draw import hand as hand_module
+from draw.contracts import FramePacket
 
 
 def _landmarks_result():
@@ -318,3 +319,15 @@ def test_missing_model_never_imports_mediapipe(tmp_path, monkeypatch):
     assert masker.mask(frame) is None
     assert masker.presence_signature(frame, timestamp_ms=1000) is None
     assert attempted == []
+
+
+def test_observe_keeps_image_mask_and_capture_identity(monkeypatch, tmp_path):
+    _install_fake_mediapipe(monkeypatch)
+    frame = np.zeros((100, 150, 3), dtype=np.uint8)
+    with hand_module.HandMasker(_model(tmp_path), verify=None) as masker:
+        expected = masker.mask(frame) > 0
+        result = masker.observe(FramePacket(frame, 3.0, 7), source_id=5)
+    assert (result.frame_sequence, result.captured_at, result.source_id) == (7, 3.0, 5)
+    np.testing.assert_array_equal(result.occlusion_mask, expected)
+    assert result.orientation_mask is None
+    assert result.present is None
