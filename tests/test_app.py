@@ -5,6 +5,10 @@ neural+classico com veto de presenca e extras de mascara, a checagem
 de modelos do --check e a validacao de argumentos do main().
 """
 
+import os
+import re
+import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -842,6 +846,142 @@ def test_show_nao_reabre_posicionamento_ao_sair_do_fullscreen(monkeypatch):
     app_module._settings["on"]["fullscreen"] = False
     app_module._show(frame)
     assert moves == []
+
+
+def test_start_wsl_foreground_helper_so_dispara_powershell_em_wsl(monkeypatch):
+    """A subida pelo lado Windows so sai em WSL.
+
+    Fora do WSL nao ha powershell.exe nem janela hospedada no Windows:
+    o helper nem e invocado. Em WSL, ele procura a hwnd pelo titulo
+    unico do lancamento e a traz para frente via AttachThreadInput +
+    SetForegroundWindow.
+    """
+    calls = []
+    monkeypatch.setattr(app_module.camera_module, "is_wsl", lambda: False)
+    monkeypatch.setattr(app_module.subprocess, "Popen", lambda *a, **k: calls.append(a))
+    assert app_module._start_wsl_foreground_helper("Draw 4242") is None
+    assert calls == []
+    monkeypatch.setattr(app_module.camera_module, "is_wsl", lambda: True)
+    app_module._start_wsl_foreground_helper("Draw 4242")
+    assert len(calls) == 1
+    argv = calls[0][0]
+    assert argv[0] == "powershell.exe"
+    assert "-NonInteractive" in argv
+    assert "SetForegroundWindow" in argv[-1]
+    assert "Draw 4242" in argv[-1]
+
+
+def test_publish_usa_titulo_unico_por_lancamento(monkeypatch):
+    """O helper nao confunde sessoes: cada lancamento tem um token proprio.
+
+    pid + hex aleatorio cobre duas distros WSL com o mesmo pid em
+    namespaces separados.
+    """
+    titles = []
+    monkeypatch.setattr(app_module.camera_module, "is_wsl", lambda: True)
+    monkeypatch.setattr(app_module.cv2, "setWindowTitle", lambda w, t: titles.append(t))
+    monkeypatch.setattr(app_module, "_window_token", [None])
+    monkeypatch.setattr(app_module, "_window_title_restore_at", [0.0])
+    launched = []
+    monkeypatch.setattr(
+        app_module, "_start_wsl_foreground_helper", lambda t: launched.append(t)
+    )
+    app_module._publish_unique_title_and_raise()
+    assert re.fullmatch(r"Draw \d+-[0-9a-f]{6}", titles[0])
+    assert launched == titles
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(
+    not app_module.camera_module.is_wsl()
+    or not app_module._gui_backend_compiled()
+    or not os.environ.get("DISPLAY")
+    or shutil.which("powershell.exe") is None,
+    reason="fumaca de foreground so roda em WSLg com GUI e powershell",
+)
+def test_foreground_helper_levanta_a_janela_real_no_wslg():
+    """Fumaca end-to-end: a hwnd do titulo-token vira a janela ativa.
+
+    A verificacao e por identidade de hwnd (foreground == a janela do
+    token), nao por titulo: janela ja ativa ou outra janela chamada
+    "Draw" em foreground nao aprovam o teste.
+    """
+    token = f"{app_module._WINDOW} smoke-{os.getpid()}-x1"
+    cv2.namedWindow(app_module._WINDOW, cv2.WINDOW_NORMAL)
+    cv2.setWindowTitle(app_module._WINDOW, token)
+    cv2.imshow(app_module._WINDOW, np.zeros((120, 320, 3), np.uint8))
+    proc = None
+    try:
+        for _ in range(60):  # realiza a janela e deixa o RAIL mapear
+            cv2.waitKey(50)
+        # Resolve a hwnd desta janela ANTES do helper — depois que ele
+        # a renomeia para "Draw" o titulo unico nao existe mais.
+        ps_find = (
+            "$s='using System;using System.Text;"
+            "using System.Runtime.InteropServices;"
+            'public class F{[DllImport("user32.dll")]public static extern '
+            "bool EnumWindows(E e,IntPtr l);public delegate bool E("
+            'IntPtr h,IntPtr l);[DllImport("user32.dll")]public static '
+            "extern int GetWindowTextA(IntPtr h,StringBuilder s,int n);}';"
+            "Add-Type -TypeDefinition $s;$t=[IntPtr]::Zero;$n=0;"
+            "while($t -eq [IntPtr]::Zero -and $n -lt 60){$n++;"
+            "[F]::EnumWindows({param($h,$l)$b=New-Object "
+            "Text.StringBuilder 512;[F]::GetWindowTextA($h,$b,512)|Out-Null;"
+            f"if($b.ToString() -like '*{token}*'){{$script:t=$h}};"
+            "return $true},[IntPtr]::Zero)|Out-Null;"
+            "if($t -eq [IntPtr]::Zero){Start-Sleep -Milliseconds 250}};"
+            "if($t -ne [IntPtr]::Zero){Write-Output $t.ToInt64()}"
+        )
+        found = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps_find],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        target = int(found.stdout.strip() or "0")
+        assert target != 0, "janela do token nao apareceu no Windows (RAIL)"
+        proc = app_module._start_wsl_foreground_helper(token)
+        assert proc is not None
+        ps_fg = (
+            "$s='using System;using System.Runtime.InteropServices;"
+            'public class G{[DllImport("user32.dll")]public static extern '
+            "IntPtr GetForegroundWindow();}';"
+            "Add-Type -TypeDefinition $s;"
+            "for($i=0;$i -lt 120;$i++){"
+            f"if([G]::GetForegroundWindow().ToInt64() -eq {target})"
+            "{Write-Output 'FG';break};"
+            "Start-Sleep -Milliseconds 250}"
+        )
+        out = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps_fg],
+            capture_output=True,
+            text=True,
+            timeout=45,
+        )
+        assert "FG" in out.stdout
+    finally:
+        if proc is not None:
+            proc.terminate()
+        cv2.destroyAllWindows()
+
+
+def test_show_restaura_o_titulo_depois_do_prazo_do_helper(monkeypatch):
+    """O titulo unico do lancamento e temporario: _show devolve 'Draw'."""
+    moves = []
+    _stub_show_gui(monkeypatch, moves)
+    now = [1000.0]
+    monkeypatch.setattr(app_module, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    titles = []
+    monkeypatch.setattr(app_module.cv2, "setWindowTitle", lambda w, t: titles.append(t))
+    monkeypatch.setattr(app_module, "_window_token", ["Draw 4242"])
+    monkeypatch.setattr(app_module, "_window_title_restore_at", [now[0] + 10.0])
+    frame = np.zeros((640, 1600, 3), np.uint8)
+    app_module._show(frame)
+    assert titles == []
+    now[0] += 11.0
+    app_module._show(frame)
+    assert titles == [app_module._WINDOW]
+    assert app_module._window_token[0] is None
 
 
 def test_camera_menu_with_many_cameras_scrolls_and_selects_absolute_rows(monkeypatch):

@@ -690,6 +690,19 @@ _window_sized = set()
 _window_place_until = [0.0]
 _WINDOW_PLACE_SECONDS = 2.5
 _WINDOW_PLACE_X, _WINDOW_PLACE_Y = 96, 48
+# Titulo unico por lancamento no WSLg: "Draw <pid>-<hex>" identifica a
+# hwnd desta sessao para o helper de foreground, sem confundir sessoes
+# abertas — o pid sozinho colide entre distros (namespaces separados).
+# Volta a "Draw" quando o helper renomeia a janela ou, na falta dele,
+# ao expirar o prazo local (busca do helper + margem).
+_window_token = [None]
+_window_title_restore_at = [0.0]
+_WSL_RAISE_POLLS = 240  # ~60 s: o RAIL pode demorar a publicar a hwnd
+_WSL_RAISE_POLL_MS = 250
+# O prazo local cobre a vida inteira do helper com folga: cada sonda
+# paga o EnumWindows alem do sleep, entao a duracao real passa do
+# nominal — restaurar o titulo no meio da busca perderia o raise.
+_WSL_TITLE_RESTORE_SECONDS = _WSL_RAISE_POLLS * _WSL_RAISE_POLL_MS / 1000 * 1.5 + 10.0
 
 
 _mouse = {}
@@ -1061,6 +1074,98 @@ def _window_size():
     return rect if rect and rect[0] >= 320 and rect[1] >= 160 else default
 
 
+def _start_wsl_foreground_helper(token):
+    """Lanca o helper que traz a janela nova para frente do desktop Windows.
+
+    O WSLg mapeia a janela abaixo da janela ativa do Windows — com um
+    browser maximizado ela nasce invisivel mesmo dentro da tela. O
+    Wayland nao deixa o cliente se levantar (move/raise/_NET_ACTIVE_WINDOW
+    e o TOPMOST do Qt sao engolidos), entao a subida vai pelo lado
+    Windows: AttachThreadInput na thread da janela ativa +
+    SetForegroundWindow. A hwnd e identificada pelo titulo unico do
+    lancamento — o RAIL pode adicionar afixos em volta (" (Ubuntu)",
+    "[WARN:COPY MODE] ..." com captura de tela ativa), entao a busca e
+    por substring e sessoes antigas nunca entram nela. Ao achar, o
+    helper levanta a janela e
+    devolve o titulo normal via SetWindowText. Retorna o processo ou
+    None fora do WSL/se o powershell nao subir; falhar em qualquer
+    passo so perde a subida, nada mais.
+    """
+    if not camera_module.is_wsl():
+        return None
+    ps = (
+        "$s='using System;using System.Text;using System.Runtime.InteropServices;"
+        'public class W{[DllImport("user32.dll")]public static extern bool '
+        "EnumWindows(E e,IntPtr l);public delegate bool E(IntPtr h,IntPtr l);"
+        '[DllImport("user32.dll")]public static extern int GetWindowTextA('
+        'IntPtr h,StringBuilder s,int n);[DllImport("user32.dll")]public static '
+        "extern bool SetWindowTextA(IntPtr h,string s);"
+        '[DllImport("user32.dll")]public static '
+        'extern IntPtr GetForegroundWindow();[DllImport("user32.dll")]public '
+        "static extern uint GetWindowThreadProcessId(IntPtr h,out uint p);"
+        '[DllImport("user32.dll")]public static extern bool AttachThreadInput('
+        'uint a,uint b,bool at);[DllImport("user32.dll")]public static extern '
+        'bool SetForegroundWindow(IntPtr h);[DllImport("user32.dll")]public '
+        "static extern bool BringWindowToTop(IntPtr h);"
+        '[DllImport("user32.dll")]public static extern bool ShowWindowAsync('
+        'IntPtr h,int n);[DllImport("kernel32.dll")]public static extern uint '
+        "GetCurrentThreadId();}';"
+        "Add-Type -TypeDefinition $s;$t=[IntPtr]::Zero;$n=0;"
+        "while($t -eq [IntPtr]::Zero -and $n -lt __POLLS__){$n++;"
+        "[W]::EnumWindows({param($h,$l)$b=New-Object Text.StringBuilder 512;"
+        "[W]::GetWindowTextA($h,$b,512)|Out-Null;"
+        "if($b.ToString() -like '*__TOKEN__*'){$script:t=$h};return $true},"
+        "[IntPtr]::Zero)|Out-Null;"
+        "if($t -eq [IntPtr]::Zero){Start-Sleep -Milliseconds __POLLMS__}};"
+        "if($t -ne [IntPtr]::Zero){$fg=[W]::GetForegroundWindow();"
+        "$ft=[W]::GetWindowThreadProcessId($fg,[ref]([uint32]$p=0));"
+        "$me=[W]::GetCurrentThreadId();"
+        "[W]::AttachThreadInput($me,$ft,$true)|Out-Null;"
+        "[W]::ShowWindowAsync($t,5)|Out-Null;"
+        "[W]::BringWindowToTop($t)|Out-Null;"
+        "[W]::SetForegroundWindow($t)|Out-Null;"
+        "[W]::AttachThreadInput($me,$ft,$false)|Out-Null;"
+        "[W]::SetWindowTextA($t,'__TITLE__')|Out-Null}"
+    )
+    ps = (
+        ps.replace("__TOKEN__", token)
+        .replace("__POLLS__", str(_WSL_RAISE_POLLS))
+        .replace("__POLLMS__", str(_WSL_RAISE_POLL_MS))
+        .replace("__TITLE__", _WINDOW)
+    )
+    try:
+        return subprocess.Popen(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return None
+
+
+def _publish_unique_title_and_raise():
+    """Publica o titulo unico do lancamento e dispara o helper de foreground.
+
+    A janela sai como "Draw <pid>-<hex>" — o RAIL a apresenta no Windows
+    como "Draw <pid>-<hex> (Ubuntu)", com possiveis afixos extras — e
+    o helper casa por substring, entao nenhuma sessao antiga pode ser
+    levantada por engano. O
+    titulo volta a "Draw" quando o helper renomeia a hwnd ou, sem ele,
+    ao expirar o prazo local. Sem GUI do Qt o passo e ignorado.
+    """
+    if not camera_module.is_wsl():
+        return
+    token = f"{_WINDOW} {os.getpid()}-{os.urandom(3).hex()}"
+    try:
+        cv2.setWindowTitle(_WINDOW, token)
+    except cv2.error:
+        return
+    _window_token[0] = token
+    _window_title_restore_at[0] = time.monotonic() + _WSL_TITLE_RESTORE_SECONDS
+    _start_wsl_foreground_helper(token)
+
+
 def _open_window(fullscreen):
     """Cria a janela do Draw: sem barras do Qt, redimensionavel, com mouse."""
     cv2.namedWindow(
@@ -1072,6 +1177,7 @@ def _open_window(fullscreen):
     _settings["on"]["fullscreen"] = fullscreen
     _fullscreen_applied[0] = False
     cv2.setMouseCallback(_WINDOW, _on_mouse)
+    _publish_unique_title_and_raise()
 
 
 def _ui_wait_seconds():
@@ -1152,6 +1258,12 @@ def _show(image):
             cv2.moveWindow(_WINDOW, _WINDOW_PLACE_X, _WINDOW_PLACE_Y)
         except cv2.error:
             _window_place_until[0] = 0.0
+    if _window_token[0] is not None and time.monotonic() >= _window_title_restore_at[0]:
+        try:
+            cv2.setWindowTitle(_WINDOW, _WINDOW)
+        except cv2.error:
+            pass
+        _window_token[0] = None
     w, h = _window_rect() or (0, 0)
     _view_map.update(scale=1.0, offset=(0, 0))
     if w > 0 and h > 0 and (w, h) != (iw, ih):
