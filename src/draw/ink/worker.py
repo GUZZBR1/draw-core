@@ -142,6 +142,34 @@ def _bbox_of(mask):
     return int(rows[0]), int(rows[-1]) + 1, int(cols[0]), int(cols[-1]) + 1
 
 
+def _provisional_for_display(provisional, min_px):
+    """Camada provisoria como a tela a ve (issue #134).
+
+    A mascara interna muda por pixel: uma poeira oscilando em
+    volta do limiar republicava o painel a cada passada e ainda
+    contava como atividade, segurando a trabalhadora na cadencia
+    cheia. A camada exibida so contem os componentes 8-conectados
+    com >= min_px pixels — poeira de borda, residuo de pauta e
+    oscilacao isolada ficam de fora, sustentados ou nao — e e a
+    mudanca desta camada que decide republicar e contar
+    atividade, nunca a diff pixel a pixel. Um traco novo entra
+    na primeira passada como antes: nesta grade o menor traco de
+    lapis ja passa do piso (o mesmo do provisorio na histerese).
+    """
+    mask = provisional > 0
+    out = np.zeros(provisional.shape, dtype=np.uint8)
+    bbox = _bbox_of(mask)
+    if bbox is None:
+        return out
+    y0, y1, x0, x1 = bbox
+    roi = mask[y0:y1, x0:x1].view(np.uint8)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(roi, connectivity=8)
+    big = stats[:, cv2.CC_STAT_AREA] >= min_px
+    big[0] = False
+    out[y0:y1, x0:x1] = np.where(big[labels], 255, 0).astype(np.uint8)
+    return out
+
+
 def _crop_all_visible(visible, corners):
     """Todo o recorte do quad visivel na mascara?
 
@@ -340,6 +368,12 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._retracted_px_total = 0
         self._published_display = None
         self._display_version = 0
+        # A camada provisoria tal como a ultima publicacao de
+        # exibicao a mostrou (filtrada por _provisional_for_display):
+        # a diff que republica o painel e conta atividade e contra
+        # ela, nao contra a mascara interna pixel a pixel (issue
+        # #134). None = ainda nada mostrado nesta geracao.
+        self._display_provisional = None
         self._hand_state = None
         self._confirm_passes = 0
         self._confirm_masked_skips = 0
@@ -351,8 +385,9 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         # confirmar nada novo.
         self._generation_passes = 0
         self._quiet_passes = 0
-        # Passadas seguidas sem a saida (confirmada ou provisoria)
-        # mudar, contadas SO pelas passadas — nunca zeradas por
+        # Passadas seguidas sem a saida visivel mudar (confirmada
+        # ou a provisoria filtrada da tela, issue #134), contadas
+        # SO pelas passadas — nunca zeradas por
         # set_hand_presence, que o laco chama a cada amostra de
         # presenca e zeraria o sinal entre passadas. E o sinal que
         # a cadencia por atividade (frente 92) le; _still_passes
@@ -442,6 +477,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._pending = None
             self._published = None
             self._published_display = None
+            self._display_provisional = None
             self._delta_ring.clear()
             self._delta_prev = None
             self._condition.notify_all()
@@ -701,6 +737,39 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             return self._config.pass_interval_s
         return _PAGE_CLEAN_INTERVAL_SECONDS
 
+    def _announce_rest_locked(self):
+        """Entrada do descanso total: a tela assenta numa unica troca.
+
+        O provisorio ainda visivel neste ponto e tinta que a
+        janela de voto nao confirmou — poeira, nao traco (o traco
+        real confirma antes da quietude fechar). Ele sai da camada
+        exibida nesta publicacao unica por entrada: o painel para
+        na saida confirmada em vez de congelar exibindo o ultimo
+        provisorio para sempre (issue #134). Sem provisorio para
+        limpar nenhuma versao sobe, entao a transicao para o
+        descanso nao pisca. Idempotente por construcao: depois da
+        limpeza a camada publicada esta vazia e, sem passadas no
+        descanso, ninguem a repoe. So e chamada com a Condition na
+        mao, no ramo em que _pass_interval devolveu descanso.
+        """
+        published = self._published_display
+        if (
+            published is None
+            or published[0] != self._generation
+            or not np.any(published[3])
+        ):
+            return
+        self._display_version += 1
+        settled = np.zeros_like(published[3])
+        self._published_display = (
+            published[0],
+            self._display_version,
+            published[2],
+            settled,
+        )
+        self._display_provisional = settled
+        self._condition.notify_all()
+
     def telemetry_snapshot(self):
         """Copia da telemetria por etapa (somente leitura).
 
@@ -932,6 +1001,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         # evento de verdade chegar. Sem isto a
                         # sonda de 1 Hz rodava para sempre sobre a
                         # pagina parada e o voto acumulava camadas.
+                        self._announce_rest_locked()
                         self._condition.wait()
                         if self._stopped:
                             return
@@ -1024,6 +1094,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             if self._last_pass_start is not None:
                 interval = self._pass_interval()
                 if interval is None:
+                    self._announce_rest_locked()
                     return False
                 elapsed = self._clock() - self._last_pass_start
                 if elapsed < interval - _SYNC_CADENCE_EPS_SECONDS:
@@ -1919,9 +1990,24 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     <= anchor_mod._ANCHOR_MIGRATION_DISPLACEMENT_PX
                 ),
             )
+            # A provisoria que a tela ve: so componentes grandes
+            # (issue #134). A diff pixel a pixel republicava o
+            # painel a cada poeira oscilando e zerava a contagem
+            # de atividade — com o sinal de mao ausente, o
+            # flicker mantinha a cadencia cheia para sempre.
+            provisional_display = _provisional_for_display(
+                result["provisional"], self._config.provisional_min_px
+            )
+            previous_display = self._display_provisional
+            provisional_display_changed = (
+                bool(np.any(provisional_display))
+                if previous_display is None
+                else previous_display.shape != provisional_display.shape
+                or bool(np.any(provisional_display != previous_display))
+            )
             if (
                 result["confirmed_changed"]
-                or result["provisional_changed"]
+                or provisional_display_changed
                 or result["turn"]
             ):
                 self._still_passes = 0
@@ -1984,14 +2070,15 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     if self._anchor_corners is None
                     else self._anchor_corners.copy(),
                 )
-            if publish_confirmed or result["provisional_changed"]:
+            if publish_confirmed or provisional_display_changed:
                 self._display_version += 1
                 self._published_display = (
                     generation,
                     self._display_version,
                     result["confirmed"],
-                    result["provisional"],
+                    provisional_display,
                 )
+                self._display_provisional = provisional_display
             # Telemetria por etapa (loop v2) sobre o caminho em
             # camadas: um registro por passada; publishes conta
             # so as passadas que publicam canvas confirmado
