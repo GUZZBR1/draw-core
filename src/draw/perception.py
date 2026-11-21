@@ -56,6 +56,7 @@ O arquivo do modelo fica fora do repositório (binário de 15 MB). O
 caminho chega sempre por argumento explícito ao detector.
 """
 
+import inspect
 import time
 from pathlib import Path
 from typing import NamedTuple, Tuple
@@ -379,11 +380,28 @@ class NeuralSheetDetector:
         if geometry != self._memory_geometry:
             self._edge_lines = None
             self._memory_mask = None
+            self._memory_is_spread = False
+            self._memory_spread_area = 0.0
             self._memory_geometry = geometry
-        fallback = self._fallback_lines(mask)
-        corners, lines, trusted = _geometry._fit_quad_impl(
-            mask, frame, fallback, scale_x, scale_y
+        contour, is_spread, contour_area = _geometry._sheet_contour_with_spread(mask)
+        prev_spread = getattr(self, "_memory_is_spread", False)
+        prev_area = getattr(self, "_memory_spread_area", 0.0)
+        # Invalida a memoria de arestas apenas na transicao pagina unica ->
+        # caderno aberto ou quando o caderno esta EXPANDINDO para fora (nunca
+        # quando encolhe sob oclusao de mao, para preservar a guarda de outlier).
+        spread_expanded = (is_spread and not prev_spread) or (
+            is_spread and prev_area > 0 and contour_area > prev_area * 1.05
         )
+        fallback = None if spread_expanded else self._fallback_lines(mask)
+        # Dublês de teste antigos nao aceitam `contour`; decide pela assinatura
+        # em vez de capturar TypeError (que mascararia erros reais do ajuste).
+        impl = _geometry._fit_quad_impl
+        if "contour" in inspect.signature(impl).parameters:
+            corners, lines, trusted = impl(
+                mask, frame, fallback, scale_x, scale_y, contour=contour
+            )
+        else:
+            corners, lines, trusted = impl(mask, frame, fallback, scale_x, scale_y)
         ref_shape = (
             frame.shape
             if frame is not None
@@ -408,7 +426,22 @@ class NeuralSheetDetector:
                 ):
                     stored[i] = self._edge_lines[i]
             self._edge_lines = stored
+        elif fallback is None:
+            # Ajuste sem retas (ex.: _min_area_quad) em quadro sem heranca:
+            # descarta retas antigas para nao parear a nova mascara com linhas
+            # pre-expansao no proximo quadro.
+            self._edge_lines = None
         self._memory_mask = mask[::_MEMORY_MASK_STRIDE, ::_MEMORY_MASK_STRIDE] > 0
+        self._memory_is_spread = is_spread
+        if not is_spread:
+            self._memory_spread_area = 0.0
+        else:
+            # Guarda o pico de area do caderno aberto apenas quando houve retas
+            # medidas e a guarda de outlier nao pode ter travado nenhuma aresta.
+            if lines is not None and (
+                fallback is None or (trusted is not None and all(trusted))
+            ):
+                self._memory_spread_area = max(prev_area, contour_area)
         return corners
 
     def predict(self, frame, *, native=False):
