@@ -143,9 +143,14 @@ fluxo:
    `corpus init <dir> --fps <fps-cena>` preenche o `clip.json` —
    `issues` aponta a issue, `expected` declara o comportamento
    correto.
-3. `corpus manifest` registra o sha256; a PR referencia **nome do
+3. `corpus check <corpus>` valida schema, contagem de quadros e
+   regiões — inclusive a numeração contígua: um inventário com
+   lacuna acusa aqui, porque é onde os índices de rótulo deixam de
+   coincidir com os números de arquivo. O `manifest` verificado não
+   carrega esse aviso.
+4. `corpus manifest` registra o sha256; a PR referencia **nome do
    clipe + número da issue** na descrição.
-4. Alegação de robustez exige `corpus run` antes × depois no bundle
+5. Alegação de robustez exige `corpus run` antes × depois no bundle
    da issue. Fixture sintético sozinho não fecha PR de robustez —
    o simulador não tem a condição real que quebrou.
 
