@@ -240,6 +240,10 @@ def test_weighted_segments_collapses_the_dxf_duplicated_dot():
     dot = np.array([[5.0, 5.0], [5.0, 5.0]])
     parts, ths = ev.weighted_segments([(dot, False)], [2.0], 1.0, 1.0, 7)
     assert len(parts) == 1 and len(parts[0][0]) == 1
+    # A largura registrada (2 mm → 2 px) tem de chegar ao raster —
+    # sem a checagem o teste passava até com o fallback de 7 px
+    # (Devin Review PR #122).
+    assert ths == [2]
     raster = ev.rasterize(parts, (20, 20), 1.0, 1.0, 7, thicknesses_px=ths)
     assert int(raster.sum()) > 0
 
