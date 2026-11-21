@@ -133,3 +133,28 @@ def test_global_exposure_jitter_does_not_worsen_shadow_input_variation():
     smooth_range = max(smooth_shadow) - min(smooth_shadow)
     raw_range = max(raw_shadow) - min(raw_shadow)
     assert smooth_range <= raw_range + 0.1
+
+
+def test_moving_hand_mask_does_not_bypass_deadband_as_exposure_shift():
+    """Devin Review PR #140: a mão cobrindo a margem clara muda a
+    mediana e o p90 da amostra JUNTOS — medido só sobre a máscara do
+    quadro, parecia mudança global de exposição e o bypass furava a
+    banda morta, fazendo a sombra intacta piscar. A estatística sobre
+    os pixels visíveis nos dois quadros vê que a cena não mudou."""
+    page = np.tile(
+        np.linspace(60, 100, 800, dtype=np.float32)[None, :, None], (480, 1, 3)
+    ).astype(np.uint8)
+    full = np.ones((480, 800), dtype=bool)
+    hand = full.copy()
+    hand[96:288, 608:800] = False  # ~6% da margem clara sob a mão
+
+    smoother = exposure.PaperGainSmoother()
+    gains = []
+    for index in range(7):
+        mask = hand if index % 2 else full
+        target = exposure.paper_gain(page, mask)
+        gains.append(smoother.update(target, index / 10.0, image=page, mask=mask))
+
+    # O alvo alterna 2,103 <-> 2,151 dentro da banda morta: sem o bypass
+    # falso de exposição o ganho retido nunca sai do lugar.
+    assert gains == [gains[0]] * len(gains)

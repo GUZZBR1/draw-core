@@ -34,17 +34,30 @@ _GAIN_TIME_CONSTANT_SECONDS = 0.35
 _GAIN_DEADBAND_LOG = math.log1p(0.03)
 _GLOBAL_EXPOSURE_LOG_TOLERANCE = math.log1p(0.01)
 _CLIP_RELEASE_FRACTION = 1e-4
+_MIN_SHARED_SAMPLES = 32
+
+
+def _sampled_grid(image, mask):
+    """Grade cinza esparsa e grade de visibilidade (passo _SAMPLE_STRIDE).
+
+    Retorna (cinza H'xW', visível H'xW'): cada célula é a média dos
+    canais do pixel amostrado e se ela entra na máscara. Máscara vazia
+    vale a grade inteira, como em _sampled_gray.
+    """
+    sample = image[::_SAMPLE_STRIDE, ::_SAMPLE_STRIDE]
+    gray = sample.mean(axis=2) if sample.ndim == 3 else sample
+    if mask is None:
+        return gray, np.ones(gray.shape, dtype=bool)
+    sampled = np.asarray(mask)[::_SAMPLE_STRIDE, ::_SAMPLE_STRIDE] > 0
+    if not sampled.any():
+        sampled = np.ones(gray.shape, dtype=bool)
+    return gray, sampled
 
 
 def _sampled_gray(image, mask):
     """Amostra cinza esparsa (passo _SAMPLE_STRIDE) restrita à máscara."""
-    sample = image[::_SAMPLE_STRIDE, ::_SAMPLE_STRIDE]
-    gray = sample.mean(axis=2) if sample.ndim == 3 else sample
-    if mask is not None:
-        sampled = np.asarray(mask)[::_SAMPLE_STRIDE, ::_SAMPLE_STRIDE] > 0
-        if sampled.any():
-            gray = gray[sampled]
-    return gray
+    gray, sampled = _sampled_grid(image, mask)
+    return gray[sampled]
 
 
 def paper_gain(image, mask=None):
@@ -80,8 +93,9 @@ class PaperGainSmoother:
     A banda morta de 3% evita que ruído do p90 altere a LUT. Mudanças
     maiores são seguidas em escala logarítmica, com constante de tempo
     curta para não prender a exposição quando a iluminação realmente muda.
-    Quando mediana e p90 acompanham a mesma mudança global, usa o alvo
-    atual para compensar a exposição do quadro sem criar atraso.
+    Quando mediana e p90 acompanham a mesma mudança global nos pixels
+    visíveis nos dois quadros, usa o alvo atual para compensar a
+    exposição do quadro sem criar atraso.
     Alvo 1,0 é bypass, não amortecimento: papel já bem exposto não pode
     esperar a banda morta liberar o resíduo — cada passada ganhada clipa
     o traço claro junto do papel. Pela mesma razão, um decréscimo dentro
@@ -95,8 +109,8 @@ class PaperGainSmoother:
     def reset(self):
         self._gain = None
         self._updated_at = None
-        self._target_gain = None
-        self._paper_median = None
+        self._prev_sample = None
+        self._prev_mask = None
 
     def update(self, target_gain, timestamp, *, image=None, mask=None):
         """Retorna o ganho temporalmente estabilizado para `timestamp` (s).
@@ -104,23 +118,22 @@ class PaperGainSmoother:
         `image`/`mask` são o quadro e a máscara da estimativa (opcionais):
         com eles um decréscimo dentro da banda morta sai da banda quando
         o ganho retido saturaria pixels do papel que o alvo preserva. Uma
-        mudança proporcional da mediana e do p90 sinaliza exposição global
-        e aplica o alvo do quadro imediatamente.
+        mudança proporcional da mediana e do p90 dos pixels visíveis nos
+        dois quadros sinaliza exposição global e aplica o alvo do quadro
+        imediatamente.
         """
         target = float(np.clip(target_gain, 1.0, _MAX_GAIN))
         now = float(timestamp)
         if not math.isfinite(now):
             raise ValueError(f"timestamp precisa ser finito: {timestamp!r}")
-        paper_median = None
+        sample = sample_mask = None
         if image is not None:
-            gray = _sampled_gray(image, mask)
-            if gray.size:
-                paper_median = float(np.median(gray))
+            sample, sample_mask = _sampled_grid(image, mask)
         if self._gain is None or self._updated_at is None:
             self._gain = target
             self._updated_at = now
-            self._target_gain = target
-            self._paper_median = paper_median
+            self._prev_sample = sample
+            self._prev_mask = sample_mask
             return self._gain
 
         elapsed = now - self._updated_at
@@ -128,9 +141,9 @@ class PaperGainSmoother:
             return self._gain
         self._updated_at = now
 
-        global_shift = self._is_global_exposure_shift(target, paper_median)
-        self._target_gain = target
-        self._paper_median = paper_median
+        global_shift = self._is_global_exposure_shift(sample, sample_mask)
+        self._prev_sample = sample
+        self._prev_mask = sample_mask
 
         if target == 1.0:
             self._gain = target
@@ -154,21 +167,40 @@ class PaperGainSmoother:
         self._gain = math.exp(current_log + alpha * error)
         return self._gain
 
-    def _is_global_exposure_shift(self, target, paper_median):
+    def _is_global_exposure_shift(self, sample, sample_mask):
+        """Mediana e p90 medidos só nos pixels visíveis nos dois quadros.
+
+        Uma mão cobrindo a margem muda a máscara, não os pixels que
+        seguem visíveis: comparar a interseção evita ler oclusão como
+        mudança de exposição. O p90 sai direto da amostra, não do alvo
+        clipado em _MAX_GAIN — no teto a mudança continua visível.
+        Sem amostras compartilhadas suficientes não há comparação e o
+        caminho normal de suavização decide.
+        """
         if (
-            self._target_gain is None
-            or self._paper_median is None
-            or paper_median is None
-            or min(self._target_gain, target, self._paper_median, paper_median) <= 0.0
-            or self._target_gain == 1.0
-            or target == 1.0
+            self._prev_sample is None
+            or self._prev_mask is None
+            or sample is None
+            or sample_mask is None
+            or sample.shape != self._prev_sample.shape
         ):
             return False
-        p90_delta = math.log(self._target_gain / target)
-        median_delta = math.log(paper_median / self._paper_median)
+        shared = sample_mask & self._prev_mask
+        if shared.sum() < _MIN_SHARED_SAMPLES or shared.sum() * 2 < sample_mask.sum():
+            return False
+        prev = self._prev_sample[shared]
+        cur = sample[shared]
+        median_prev = float(np.median(prev))
+        median_cur = float(np.median(cur))
+        p90_prev = float(np.percentile(prev, 90))
+        p90_cur = float(np.percentile(cur, 90))
+        if min(median_prev, median_cur, p90_prev, p90_cur) <= 0.0:
+            return False
+        median_delta = math.log(median_cur / median_prev)
+        p90_delta = math.log(p90_cur / p90_prev)
         return (
-            abs(p90_delta) >= _GLOBAL_EXPOSURE_LOG_TOLERANCE
-            and abs(median_delta) >= _GLOBAL_EXPOSURE_LOG_TOLERANCE
+            abs(median_delta) >= _GLOBAL_EXPOSURE_LOG_TOLERANCE
+            and abs(p90_delta) >= _GLOBAL_EXPOSURE_LOG_TOLERANCE
             and abs(p90_delta - median_delta) <= _GLOBAL_EXPOSURE_LOG_TOLERANCE
         )
 
@@ -189,6 +221,6 @@ class PaperGainSmoother:
         if sample.size == 0:
             return False
         newly_saturated = (sample >= 255.0 / self._gain) & (sample < 255.0 / target)
-        if newly_saturated.ndim == 3:
-            newly_saturated = newly_saturated.any(axis=2)
+        if image.ndim == 3:
+            newly_saturated = newly_saturated.any(axis=-1)
         return float(newly_saturated.mean()) > _CLIP_RELEASE_FRACTION

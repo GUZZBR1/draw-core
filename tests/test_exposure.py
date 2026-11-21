@@ -101,6 +101,41 @@ def test_deadband_clip_release_checks_each_color_channel():
     assert gain < first  # vermelho clippa mesmo com brilho médio abaixo da banda
 
 
+def test_masked_clip_release_counts_pixels_not_channels():
+    """Devin Review PR #140: com máscara o sample vira (N, 3) — um canal
+    saturando deve contar o pixel inteiro, não 1/3 dele. O pipeline
+    sempre passa gain_mask, então o caminho mascarado é o real."""
+    smoother = exposure.PaperGainSmoother()
+    first = smoother.update(200 / 194, 0.0)
+    page = np.full((500, 500, 3), 199, np.uint8)
+    page[8, 8] = (250, 100, 100)  # 1 pixel amostrado, 1 canal no limiar
+    visible = np.full(page.shape[:2], 255, np.uint8)
+
+    gain = smoother.update(200 / 199, 0.1, image=page, mask=visible)
+
+    # 1/3969 pixels saturando > 1e-4 (conta por canal daria 1/11907 < 1e-4)
+    assert gain < first
+
+
+def test_global_exposure_shift_detected_at_gain_ceiling():
+    """Devin Review PR #140: o p90 sai da amostra, não do alvo clipado.
+    Saindo do teto _MAX_GAIN (p90 64 -> 68), mediana e p90 acompanham
+    a mudança real de ~6% e o bypass continua disparando."""
+    visible = np.ones((120, 90), dtype=bool)
+    dark = np.full((120, 90, 3), 64, np.uint8)
+    brighter = np.full((120, 90, 3), 68, np.uint8)
+
+    smoother = exposure.PaperGainSmoother()
+    first = smoother.update(
+        exposure.paper_gain(dark, visible), 0.0, image=dark, mask=visible
+    )
+    assert first == 3.0  # 200/64 = 3,125 clipa no teto
+
+    target = exposure.paper_gain(brighter, visible)
+    gain = smoother.update(target, 0.1, image=brighter, mask=visible)
+    assert gain == target  # shift global visto mesmo com o alvo descendo do teto
+
+
 def _dark_paper_with_bright_desk(desk_fraction=0.14, shape=(1200, 850)):
     h, w = shape
     img = np.full((h, w, 3), 80, np.uint8)
