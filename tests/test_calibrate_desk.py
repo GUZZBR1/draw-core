@@ -131,6 +131,18 @@ def test_deteccao_neural_sob_o_veto_nao_e_contada_como_vetada(tmp_path):
     assert sug["sheets_vetoed"] == 0
 
 
+def test_veto_sem_arredondar_poupa_folha_na_borda(tmp_path):
+    """Revisão do PR #115: veto exato -1.00002 vs arredondado
+    -1.0 — a folha a -1.00001 cai ENTRE eles: com round(,4) ela
+    seria contada como vetada e a sugestão morria; sem arredondar
+    ela vive e o veto sai."""
+    empty = _write_telemetry(tmp_path, [_acq("veto", -5.00002)], "e.jsonl")
+    sheet = _write_telemetry(tmp_path, [_acq("classic", -1.00001)], "s.jsonl")
+    sug = cd.suggest(cd.summarize([empty], [sheet]))["presence_veto_logit"]
+    assert sug["value"] == pytest.approx(-1.00002)
+    assert sug["sheets_vetoed"] == 0
+
+
 def test_sem_um_lado_nao_ha_sugestao(tmp_path):
     """Só mesa com folha: o piso e o veto ficam sem sugestão —
     metade da distribuição não basta."""
@@ -287,18 +299,61 @@ def test_main_recusa_sessao_mista_com_erro_claro(tmp_path, capsys):
     assert "--save-dir" in capsys.readouterr().err
 
 
-def test_cauda_de_log_rotacionado_e_recusada(tmp_path):
-    """A rotação move o arquivo cheio para telemetry.jsonl.1 e o
-    ativo continua SEM o session_open do início: registros antes
-    do primeiro marcador são uma cauda cujo rótulo não é
-    confiável."""
+def test_sessao_unica_rotacionada_volta_a_ser_um_stream(tmp_path):
+    """Revisão do PR #115: até num --save-dir novo a rotação por
+    tamanho parte a captura — session_open no .1, cauda no ativo.
+    Encadeado na ordem cronológica, o stream é uma sessão só."""
+    (tmp_path / "telemetry.jsonl.1").write_text(
+        json.dumps({"event": "session_open"})
+        + "\n"
+        + json.dumps(_acq("veto", -6.0))
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "telemetry.jsonl").write_text(
+        json.dumps(_acq("none", -4.0))
+        + "\n"
+        + json.dumps(_snapshot(rejects=[0.08]))
+        + "\n",
+        encoding="utf-8",
+    )
+    summary = cd.summarize([tmp_path], [])
+    assert summary["empty"]["presence"] == [-6.0, -4.0]
+    assert summary["empty"]["coverage"] == {0.08}
+
+
+def test_cauda_sem_cabecalho_rotacionado_demais_e_recusada(tmp_path):
+    """Rotacionou mais de uma vez: o .1 guarda a cauda do pedaço
+    do meio e o session_open original já era — nada garante uma
+    sessão só, então o stream é recusado."""
     path = tmp_path / "telemetry.jsonl"
     path.write_text(
         json.dumps(_acq("veto", -6.0)) + "\n",
         encoding="utf-8",
     )
-    with pytest.raises(cd.MixedSessionError, match="rotacionado"):
+    with pytest.raises(cd.MixedSessionError, match="rotação"):
         cd.summarize([path], [])
+
+
+def test_dois_session_opens_entre_arquivos_rotacionados_recusa(tmp_path):
+    """Uma sessão no .1 e outra no ativo: o append juntou duas
+    cenas no save-dir e o rótulo não vale para as duas."""
+    (tmp_path / "telemetry.jsonl.1").write_text(
+        json.dumps({"event": "session_open"})
+        + "\n"
+        + json.dumps(_acq("veto", -6.0))
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "telemetry.jsonl").write_text(
+        json.dumps({"event": "session_open"})
+        + "\n"
+        + json.dumps(_acq("classic", 1.5))
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(cd.MixedSessionError):
+        cd.summarize([tmp_path], [])
 
 
 def test_linhas_quebradas_nao_derrubam(tmp_path):

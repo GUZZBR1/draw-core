@@ -52,14 +52,13 @@ _CONTOUR_AREA_REASONS = {"min_area", "unsupported", "fit_failed", "implausible"}
 
 
 class MixedSessionError(RuntimeError):
-    """Arquivo que não prova uma sessão única e rotulável.
+    """Stream que não prova uma sessão única e rotulável.
 
     A SessionTelemetry faz append: regravar no mesmo save-dir junta
-    duas cenas (segundo session_open), e a rotação move o arquivo
-    cheio para telemetry.jsonl.1 deixando no ativo uma cauda sem o
-    marcador de abertura. Nos dois casos o rótulo --empty/--sheet
-    deixaria de valer para o arquivo inteiro. Grave cada cena num
-    --save-dir novo.
+    duas cenas (segundo session_open), e rotações além da primeira
+    descartam o início da sessão — o stream fica sem cabeçalho. Nos
+    dois casos o rótulo --empty/--sheet deixaria de valer para a
+    captura inteira. Grave cada cena num --save-dir novo.
     """
 
 
@@ -67,40 +66,50 @@ def _iter_records(paths):
     """Abre cada telemetry.jsonl e devolve os dicts na ordem.
 
     Diretórios também valem: procura <dir>/telemetry.jsonl. Linha
-    quebrada não derruba a leitura — só é pulada. O primeiro
-    registro PRECISA ser `session_open` (senão é cauda de arquivo
-    rotacionado, cujo início ficou no .1) e único (senão o append
-    juntou duas sessões): ambos sobem MixedSessionError em vez de
-    calibrar com cena errada.
+    quebrada não derruba a leitura — só é pulada. A rotação por
+    tamanho move o pedaço antigo para <nome>.1 e continua no mesmo
+    arquivo: quando o .1 existe ele é encadeado ANTES do ativo, na
+    ordem cronológica — assim uma sessão única rotacionada no meio
+    (até num --save-dir novo) volta a ser um stream completo.
+
+    O primeiro registro do stream PRECISA ser `session_open` (senão
+    o início da sessão ficou numa rotação ainda mais antiga, já
+    perdida) e único (senão o append juntou duas cenas): ambos
+    sobem MixedSessionError em vez de calibrar com cena errada.
     """
     for raw in paths:
         path = Path(raw)
         if path.is_dir():
             path = path / "telemetry.jsonl"
+        files = [path]
+        rotated = path.with_name(path.name + ".1")
+        if rotated.exists():
+            files.insert(0, rotated)
         sessions = 0
-        with path.open(encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if rec.get("event") == "session_open":
-                    sessions += 1
-                    if sessions > 1:
+        for file in files:
+            with file.open(encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if rec.get("event") == "session_open":
+                        sessions += 1
+                        if sessions > 1:
+                            raise MixedSessionError(
+                                f"{path}: segundo session_open — duas "
+                                "sessões no mesmo arquivo"
+                            )
+                    elif sessions == 0:
                         raise MixedSessionError(
-                            f"{path}: segundo session_open — duas sessões "
-                            "no mesmo arquivo"
+                            f"{path}: registros antes do primeiro "
+                            "session_open — o início da sessão ficou "
+                            "numa rotação anterior, já descartada"
                         )
-                elif sessions == 0:
-                    raise MixedSessionError(
-                        f"{path}: registros antes do primeiro session_open — "
-                        "cauda de log rotacionado (o início ficou no "
-                        "telemetry.jsonl.1)"
-                    )
-                yield rec
+                    yield rec
 
 
 def _summarize_side(paths, *, sheet):
