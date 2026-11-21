@@ -62,23 +62,23 @@ def paper_exposed(image, reference, *, min_ratio=_MIN_RATIO, block=_BLOCK_PX):
     """Mascara bool HxW: True onde ha evidencia de papel exposto.
 
     reference e o par de paper_reference; None => tudo False (incerteza
-    congela). A estatistica do bloco e o MAXIMO (por canal) do bloco: o
-    traco de caneta, mesmo grosso, deixa papel claro no bloco, enquanto
-    mao, braco e sombra escurecem ate o pixel mais claro. Bloco com o
-    claro abaixo de min_ratio * nivel, ou com B/R fora da tolerancia da
-    referencia (pele, sombra colorida), nao e papel.
+    congela). A estatistica e o MAXIMO (por canal) numa janela deslizante
+    de `block` px centrada em cada amostra: traco de caneta, mesmo
+    grosso, deixa papel claro na janela; mao, braco e sombra mais largos
+    que a janela escurecem ate o pixel mais claro dela, onde quer que
+    caiam em relacao a uma grade (nao ha fronteira de bloco para o dedo
+    se esconder). Janela com o claro abaixo de min_ratio * nivel, ou com
+    B/R fora da tolerancia da referencia (pele, sombra colorida), nao e
+    papel. O resultado e erodido em meia janela: fail-closed na borda.
     """
     height, width = image.shape[:2]
     if reference is None:
         return np.zeros((height, width), dtype=bool)
     level, ratio = reference
-    # Sub-amostragem em vista (o traco fino pode sumir da amostra, o que
-    # so favorece o maximo) e maximo por bloco por dilatacao ancorada:
-    # amostrar [::cells] dela da o maximo exato de cada bloco.
-    cells = max(1, block // _REDUCE_PX)
-    sample = image[::_REDUCE_PX, ::_REDUCE_PX]
-    peak = cv2.dilate(sample, np.ones((cells, cells), np.uint8), anchor=(0, 0))
-    peak = peak[::cells, ::cells]
+    step = _REDUCE_PX
+    cells = max(1, block // step)
+    sample = image[::step, ::step]
+    peak = cv2.dilate(sample, np.ones((cells, cells), np.uint8))
     if peak.ndim == 3 and peak.shape[2] >= 3:
         peak = peak.astype(np.float32)
         gray = peak.mean(axis=2)
@@ -88,8 +88,12 @@ def paper_exposed(image, reference, *, min_ratio=_MIN_RATIO, block=_BLOCK_PX):
         ok &= np.abs(local - ratio) <= _CHROMA_TOL * max(ratio, 1e-3)
     else:
         ok = peak.astype(np.float32) >= min_ratio * level
-    # Fail-closed na borda: bloco so a fracao coberta pela mao ainda passa;
-    # erodir 1 bloco congela o vizinho de toda anomalia.
-    ok = cv2.erode(ok.astype(np.uint8), np.ones((3, 3), np.uint8), borderValue=1)
-    grown = cv2.resize(ok, (width, height), interpolation=cv2.INTER_NEAREST)
-    return grown.view(bool)
+    half = max(1, cells // 2)
+    ok = cv2.erode(
+        ok.astype(np.uint8),
+        np.ones((2 * half + 1, 2 * half + 1), np.uint8),
+        borderValue=1,
+    )
+    # Fator inteiro exato (sem esticar a ultima celula), recortado ao tamanho.
+    grown = cv2.resize(ok, None, fx=step, fy=step, interpolation=cv2.INTER_NEAREST)
+    return grown[:height, :width].view(bool)

@@ -97,6 +97,7 @@ class LayeredInkAccumulator:
         # Sem mascara de visibilidade nao ha evidencia negativa
         # confiavel — a guarda nao a inventa.
         had_visibility = visible is not None
+        frozen = None
         if paper_ok is not None:
             paper_ok = np.asarray(paper_ok, dtype=bool)
             if paper_ok.shape != prob.shape:
@@ -114,7 +115,9 @@ class LayeredInkAccumulator:
             if self._hold is None or self._hold.shape != prob.shape:
                 self._hold = np.zeros(prob.shape, dtype=np.uint8)
             np.subtract(self._hold, 1, out=self._hold, where=self._hold > 0)
-            self._hold[~paper_ok] = self._config.occlusion_hold_passes
+            # +1: a passada em que a evidencia some ainda e a 1a do hold; o
+            # decremento da passada seguinte nao pode soltar uma cedo.
+            self._hold[~paper_ok] = self._config.occlusion_hold_passes + 1
             frozen = ~paper_ok | (self._hold > 0)
             visible = ~frozen if visible is None else visible & ~frozen
         confirmed_before = self._confirmed > 0
@@ -192,6 +195,10 @@ class LayeredInkAccumulator:
             weak = confirmed_rule & ~strong & (mean >= cfg.t_low - eps)
             kept = hysteresis.keep_anchored(weak, strong | confirmed_before)
             confirmed_rule = strong | kept
+        if frozen is not None:
+            # Votos antigos da janela nao confirmam o que esta congelado:
+            # regiao suspeita de oclusao nao entra no canvas.
+            confirmed_rule &= ~frozen
         new_confirmed = confirmed_rule & ~confirmed_before
         new_confirmed_px = int(np.count_nonzero(new_confirmed))
         if new_confirmed_px:
@@ -287,6 +294,7 @@ class LayeredInkAccumulator:
             "provisional_ever_px": int(np.count_nonzero(self._provisional_ever)),
             "retracted_px_total": int(np.count_nonzero(self._retracted_ever)),
             "turn": turn,
+            "frozen_px": 0 if frozen is None else int(np.count_nonzero(frozen)),
         }
         if self._config.removal:
             result["removed_confirmed_px"] = removed_px

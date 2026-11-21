@@ -328,6 +328,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         # geometrica do follow e do portao de remocao).
         self._previous_corners = None
         self._paper_ref = None
+        self._spent_confirm_pass = False
         self._accumulator = accumulator.LayeredInkAccumulator(
             threshold=self._config.seen_threshold, config=self._config
         )
@@ -972,6 +973,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         scheduled_hand_state = self._hand_state
         self._last_pass_start = self._clock()
         pass_started_at = self._last_pass_start
+        self._spent_confirm_pass = False
         if self._confirm_passes > 0:
             # Se a passada retirada logo apos a saida da mao veio de um submit
             # anterior a saida ou ainda carrega mascara de oclusao pre-saida
@@ -994,6 +996,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 self._confirm_passes = self._post_exit_confirm_passes()
             else:
                 self._confirm_passes -= 1
+                self._spent_confirm_pass = True
         return (
             warped,
             generation,
@@ -1894,6 +1897,13 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     )[0]
                     > 0.999
                 )
+                if motion_decision == "correct":
+                    # A evidencia de papel segue o mesmo modelo afim da
+                    # probabilidade e da visibilidade.
+                    paper_ok = (
+                        motion_fix.warp_back(paper_ok.astype(np.uint8), nearest=True)
+                        > 0
+                    )
             result = self._accumulator.add(
                 prob,
                 visible,
@@ -1922,6 +1932,18 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # Contadores do descanso total: so a saida
             # CONFIRMADA interessa (provisoria tremula com o
             # warp e nao pode segurar a trabalhadora acordada).
+            if (
+                self._spent_confirm_pass
+                and result["frozen_px"]
+                and self._confirm_passes < self._post_exit_confirm_passes()
+                and self._confirm_masked_skips < votes._INK_VOTE_WINDOW
+            ):
+                # Pos-saida da mao: a guarda ainda congela regiao nesta
+                # passada, entao ela nao deu voto limpo. Devolve a
+                # passada da janela (limitado, como as mascaradas) para o
+                # descanso nao chegar antes do traco final confirmar.
+                self._confirm_masked_skips += 1
+                self._confirm_passes += 1
             self._generation_passes += 1
             if result["confirmed_changed"] or result["turn"] or motion_abstain:
                 # Passada vetada nao e quietude: a folha esta fora do

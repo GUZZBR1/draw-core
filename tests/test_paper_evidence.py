@@ -1,6 +1,7 @@
 """Guarda fotometrica de oclusao (issue #129)."""
 
 import numpy as np
+import pytest
 
 from draw.ink import accumulator as accumulator_mod
 from draw.ink import paper_evidence
@@ -179,3 +180,32 @@ def test_thick_blue_pen_stroke_is_not_mistaken_for_occlusion():
     image[20:140, 100:106] = (40, 40, 40)
     ok = paper_evidence.paper_exposed(image, ref)
     assert ok[30:60, 30:90].mean() > 0.9
+
+
+def test_hold_releases_exactly_after_the_configured_passes():
+    config = InkConfig(occlusion_hold_passes=3)
+    acc = accumulator_mod.LayeredInkAccumulator(config=config)
+    prob = _ink_prob()
+    _confirm(acc, prob)
+    ok_all = np.ones((H, W), bool)
+    blocked = ok_all.copy()
+    blocked[95:135, 145:215] = False
+    visible = np.ones((H, W), bool)
+    assert acc.add(prob, visible, paper_ok=blocked)["frozen_px"] > 0
+    frozen = [acc.add(prob, visible, paper_ok=ok_all)["frozen_px"] for _ in range(5)]
+    # Tres passadas depois da evidencia sumir ainda congeladas; a 4a solta.
+    assert all(px > 0 for px in frozen[:3])
+    assert frozen[3] == 0 and frozen[4] == 0
+
+
+@pytest.mark.parametrize("offset", [0, 5, 13, 21, 31])
+@pytest.mark.parametrize("width", [320, 850])
+def test_finger_wider_than_the_window_is_found_at_any_grid_offset(offset, width):
+    image = np.empty((256, width, 3), np.uint8)
+    image[:] = PAPER
+    ref = paper_evidence.paper_reference(image)
+    x0 = width - 80 - offset  # dedo de 40 px encostado na borda direita
+    image[64:192, x0 : x0 + 40] = (60, 62, 64)
+    ok = paper_evidence.paper_exposed(image, ref)
+    assert ok.shape == image.shape[:2]
+    assert not ok[80:176, x0 + 4 : x0 + 36].any()

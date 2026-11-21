@@ -113,3 +113,33 @@ def test_paper_really_erased_still_removes_with_guard(monkeypatch):
         assert snap.confirmed[WITNESS].all()
     finally:
         worker.stop()
+
+
+def test_black_frame_after_a_reference_freezes_instead_of_erasing(monkeypatch):
+    worker, ink, generation = _run(monkeypatch, InkConfig())
+    try:
+        ink.content = _prob(covered_ink=False)
+        black = np.zeros((H, W, 3), np.uint8)
+        for _ in range(14):
+            _pass(worker, generation, black)
+        snap = worker.poll(generation, 0)
+        assert snap.confirmed[COVERED].all()
+    finally:
+        worker.stop()
+
+
+def test_post_exit_confirm_window_is_refunded_while_the_guard_freezes(monkeypatch):
+    worker, ink, generation = _run(monkeypatch, InkConfig(post_exit_full_window=True))
+    try:
+        worker.set_hand_presence(True)
+        ink.content = _prob(covered_ink=False)
+        worker.set_hand_presence(False)
+        window = worker._post_exit_confirm_passes()
+        assert window > 1
+        for _ in range(2):
+            _pass(worker, generation, _hand_image())
+        # A guarda congelou as passadas pos-saida: a janela segue armada.
+        assert worker._confirm_passes >= 1
+        assert worker._confirm_masked_skips >= 1
+    finally:
+        worker.stop()
