@@ -149,7 +149,10 @@ def export_vectors(
     simplified = simplify_polylines(raw, epsilon)
     width_px = median_stroke_width(ink, skel)
     # Pseudo-pressão por traço: o width_px entra no SVG/DXF por LWPOLYLINE.
-    for line, w_px in zip(simplified, stroke_widths_px(ink, simplified), strict=True):
+    # Amostra no esqueleto cru (raw): nos vértices do Douglas-Peucker a
+    # mediana sai enviesada — pontas leem ~1 px e âncoras de junção,
+    # demais (Devin Review PR #122).
+    for line, w_px in zip(simplified, stroke_widths_px(ink, raw), strict=True):
         if w_px is not None:
             line["width_px"] = w_px
 
@@ -283,16 +286,28 @@ def main(argv=None):
     )
 
     # Prova: relê os DOIS arquivos do disco, rasteriza e compara com a máscara.
+    # Cada traço rasteriza na largura gravada no arquivo (grupo 43 /
+    # stroke-width) — largura global só cobre quem saiu sem width_px.
     sx, sy = result["scale_mm_per_px"]
     thickness = max(int(round(result["stroke_width_px"])), 1)
     ink = result["ink"]
-    raster_svg = rasterize(parse_svg_paths(svg_path), ink.shape, sx, sy, thickness)
-    raster_dxf = rasterize(
-        parse_dxf_polylines(dxf_path),
-        ink.shape,
-        sx,
-        sy,
-        thickness,
+
+    def _rasterize_weighted(parsed, widths, **kw):
+        raster = np.zeros(ink.shape, dtype=bool)
+        for (pts, closed), w_mm in zip(parsed, widths, strict=True):
+            th_px = (
+                thickness
+                if w_mm is None
+                else max(1, int(round(w_mm / (0.5 * (sx + sy)))))
+            )
+            raster |= rasterize([(pts, closed)], ink.shape, sx, sy, th_px, **kw)
+        return raster
+
+    widths_svg, widths_dxf = [], []
+    raster_svg = _rasterize_weighted(parse_svg_paths(svg_path, widths_svg), widths_svg)
+    raster_dxf = _rasterize_weighted(
+        parse_dxf_polylines(dxf_path, widths_dxf),
+        widths_dxf,
         flip_y=True,
         paper_h_mm=paper_h_mm,
     )

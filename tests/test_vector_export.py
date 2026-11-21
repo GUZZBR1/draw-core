@@ -4,6 +4,7 @@ import re
 
 import cv2
 import numpy as np
+import pytest
 
 from draw.exporters import export_vectors as ev
 from draw.exporters import vectorize as vz
@@ -141,6 +142,72 @@ def test_per_stroke_width_flows_to_svg_and_dxf(tmp_path):
     )
     assert len(w43) == 2
     assert w43[0] < w43[-1]
+
+
+def test_stroke_widths_px_samples_the_skeleton_not_dp_vertices():
+    """Amostrada só nos vértices do Douglas-Peucker, a largura sai
+    enviesada (ponta lê ~1 px): a prova do lab tem que medir no
+    esqueleto cru — Devin Review PR #122."""
+    ink = np.zeros((30, 100), dtype=bool)
+    ink[12:18, 5:95] = True  # faixa de 6 px
+    dense = [{"points": np.array([[x, 15.0] for x in range(5, 95)]), "closed": False}]
+    endpoints = [{"points": np.array([[5.0, 15.0], [94.0, 15.0]]), "closed": False}]
+    w_dense = ev.stroke_widths_px(ink, dense)[0]
+    w_tips = ev.stroke_widths_px(ink, endpoints)[0]
+    assert w_dense == pytest.approx(6.0, abs=0.5)
+    assert w_tips < w_dense / 2
+
+
+def test_parse_readback_captures_per_stroke_widths(tmp_path):
+    """A prova por traço relê a largura gravada: stroke-width do SVG e
+    grupo 43 do DXF voltam por entrada (Devin Review PR #122)."""
+    lines = [
+        {
+            "points": np.array([[5.0, 5.0], [50.0, 5.0]]),
+            "closed": False,
+            "width_px": 4.0,
+        },
+        {
+            "points": np.array([[5.0, 20.0], [50.0, 20.0]]),
+            "closed": False,
+            "width_px": 16.0,
+        },
+    ]
+    svg_path, dxf_path = tmp_path / "w.svg", tmp_path / "w.dxf"
+    ev.write_svg(lines, svg_path, 60, 60, 60.0, 60.0, 9.9)
+    ev.write_dxf(lines, dxf_path, 60, 60, 60.0, 60.0, 9.9)
+    w_svg, w_dxf = [], []
+    ev.parse_svg_paths(svg_path, w_svg)
+    ev.parse_dxf_polylines(dxf_path, w_dxf)
+    # escala uniforme 1 mm/px: o grupo 43 devolve width_px em mm
+    assert sorted(w_svg) == sorted(w_dxf) == [4.0, 16.0]
+
+
+def test_standalone_svg_writer_uses_per_stroke_width(tmp_path):
+    """O write_svg do vectorize (saída standalone) também honra o
+    width_px — não só o export_vectors.write_svg."""
+    lines = [
+        {
+            "points": np.array([[5.0, 5.0], [50.0, 5.0]]),
+            "closed": False,
+            "width_px": 2.0,
+        },
+        {
+            "points": np.array([[5.0, 20.0], [50.0, 20.0]]),
+            "closed": False,
+            "width_px": 12.0,
+        },
+    ]
+    svg_path = tmp_path / "s.svg"
+    vz.write_svg(lines, svg_path, epsilon=1.0, thinning="zhangsuen")
+    widths = sorted(
+        float(w)
+        for w in re.findall(
+            r'stroke-width="([\d.]+)"', svg_path.read_text(encoding="utf-8")
+        )
+    )
+    assert widths[0] < widths[-1]
+    assert widths[0] != 0.30  # o fixo antigo não pode sobrar
 
 
 def test_lines_without_width_px_keep_the_uniform_fallback(tmp_path):

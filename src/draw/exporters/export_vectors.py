@@ -526,34 +526,49 @@ def write_dxf(
 # ------------------------------------------------- prova (round-trip IoU)
 
 
-def parse_svg_paths(svg_path):
+def parse_svg_paths(svg_path, widths=None):
     """Lê de volta os <path> e os pontos isolados (<circle>) do SVG:
-    lista de (Nx2 mm, closed); um <circle> vira uma entrada de 1 ponto."""
+    lista de (Nx2 mm, closed); um <circle> vira uma entrada de 1 ponto.
+
+    Com `widths` (lista), anexa por entrada a largura escrita:
+    o stroke-width do <path> ou o diâmetro do <circle>; None quando
+    o atributo falta — a prova por traço depende dele.
+    """
     text = Path(svg_path).read_text(encoding="utf-8")
     out = []
-    for match in re.finditer(
-        r'<path d="([^"]+)"|<circle cx="([^"]+)" cy="([^"]+)"', text
-    ):
-        if match.group(1) is not None:
-            d = match.group(1)
+    for tag in re.findall(r"<(?:path|circle)[^>]*?/?>", text):
+        d_match = re.search(r'\bd="([^"]+)"', tag)
+        if d_match is not None:
+            d = d_match.group(1)
             nums = [float(v) for v in re.findall(r"-?\d+\.?\d*", d)]
             pts = np.array(nums, dtype=np.float64).reshape(-1, 2)
             out.append((pts, d.strip().upper().endswith("Z")))
-        else:
-            out.append(
-                (
-                    np.array(
-                        [[float(match.group(2)), float(match.group(3))]],
-                        dtype=np.float64,
-                    ),
-                    False,
-                )
+            if widths is not None:
+                w = re.search(r'stroke-width="([\d.]+)"', tag)
+                widths.append(float(w.group(1)) if w else None)
+            continue
+        cx = re.search(r'cx="([\d.]+)"', tag)
+        cy = re.search(r'cy="([\d.]+)"', tag)
+        if cx is None or cy is None:
+            continue
+        out.append(
+            (
+                np.array([[float(cx.group(1)), float(cy.group(1))]], dtype=np.float64),
+                False,
             )
+        )
+        if widths is not None:
+            r = re.search(r'\br="([\d.]+)"', tag)
+            widths.append(float(r.group(1)) * 2 if r else None)
     return out
 
 
-def parse_dxf_polylines(dxf_path):
-    """Lê de volta as LWPOLYLINE do DXF: lista de (Nx2 mm, closed)."""
+def parse_dxf_polylines(dxf_path, widths=None):
+    """Lê de volta as LWPOLYLINE do DXF: lista de (Nx2 mm, closed).
+
+    Com `widths` (lista), anexa por entidade o grupo 43 (largura
+    constante), None quando ausente.
+    """
     tokens = [
         t.strip() for t in Path(dxf_path).read_text(encoding="utf-8").splitlines()
     ]
@@ -565,12 +580,15 @@ def parse_dxf_polylines(dxf_path):
         if code == "0" and value == "LWPOLYLINE":
             verts = []
             closed = False
+            width = None
             j = i + 1
             pending_x = None
             while j < len(pairs) and pairs[j][0] != "0":
                 c, v = pairs[j]
                 if c == "70":
                     closed = v == "1"
+                elif c == "43":
+                    width = float(v)
                 elif c == "10":
                     pending_x = float(v)
                 elif c == "20" and pending_x is not None:
@@ -579,6 +597,8 @@ def parse_dxf_polylines(dxf_path):
                 j += 1
             if verts:
                 out.append((np.array(verts, dtype=np.float64), closed))
+                if widths is not None:
+                    widths.append(width)
             i = j
         else:
             i += 1

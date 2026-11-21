@@ -197,14 +197,18 @@ class InkConfig:
 
         Voto legado (o strict_vote medido afina tracos -27..48% e exige
         ink_auto_gain; para desenho a lápis a perda de grafite fino
-        pesa mais que a sujeira residual) + hysteresis/motion_veto para
-        a poeira. ruling_removal desligado: o removedor pode comer lápis
+        pesa mais que a sujeira residual) + motion_veto para a poeira
+        temporal. Sem hysteresis: o portão de âncora exige média >=
+        t_high (0,90) ou contato com tinta confirmada, e um traço de
+        lápis isolado a ~0,75 por três passadas passa o voto legado
+        (2,25 >= 1,9) mas morre sem âncora (Devin Review PR #122).
+        ruling_removal desligado: o removedor pode comer lápis
         deitado sobre a linha impressa (PR #56, recall do braço 8,6%).
         """
         return cls.strict_vote(
             LEGACY_VOTE_LEVEL,
             ruling_removal=False,
-            hysteresis=True,
+            hysteresis=False,
             motion_veto=True,
             pass_interval_s=pass_interval_s,
         )

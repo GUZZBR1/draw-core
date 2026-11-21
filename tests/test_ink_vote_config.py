@@ -1,5 +1,6 @@
 """Regra de voto configuravel (InkConfig.vote_*, strict_vote)."""
 
+import dataclasses
 import sys
 
 import numpy as np
@@ -210,9 +211,22 @@ def test_sketch_profile_keeps_the_legacy_vote_and_drops_ruling_removal():
     for field in ("vote_hit", "vote_score", "vote_score_strong", "seen_threshold"):
         assert getattr(cfg, field) == getattr(legacy, field)
     assert cfg.ruling_removal is False
-    assert cfg.hysteresis is True
+    # Sem hysteresis: o portão de âncora mata traço de lápis isolado
+    # (Devin Review PR #122) — ver teste de acumulador abaixo.
+    assert cfg.hysteresis is False
     assert cfg.motion_veto is True
     assert cfg.pass_interval_s == PRODUCTION_PASS_INTERVAL_S
+
+
+def test_sketch_confirms_an_isolated_faint_stroke_through_the_accumulator():
+    """Traço de lápis isolado a 0,75 passa o voto legado (2,25 >= 1,9)
+    mas morreria no portão de âncora da hysteresis (nenhum pixel com
+    média >= 0,90 e nenhuma tinta confirmada por perto — Devin Review
+    PR #122). sketch() tem que confirmá-lo; ligar a histerese de volta
+    tem que derrubá-lo."""
+    assert _confirmed_px(InkConfig.sketch(), 0.75, passes=3) > 0
+    gated = dataclasses.replace(InkConfig.sketch(), hysteresis=True)
+    assert _confirmed_px(gated, 0.75, passes=3) == 0
 
 
 def test_technical_profile_uses_the_measured_092_vote_level():
