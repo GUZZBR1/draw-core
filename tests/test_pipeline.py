@@ -985,3 +985,47 @@ def test_ink_page_carries_the_capture_timestamp_of_its_frame():
     assert stamps == sorted(stamps) and len(set(stamps)) == len(stamps)
     # carimbos de _packet: frame_number * 0.1
     assert all(abs(s * 10 - round(s * 10)) < 1e-6 for s in stamps)
+
+
+def test_off_frame_quad_padding_is_filled_with_the_paper_mean():
+    """Folha parcialmente fora do quadro: o preenchimento no frame só
+    alcança o que a câmera viu; o padding que o warp cria sobe com a
+    média do papel, não preto (review do PR #118)."""
+    quad = np.array(
+        [[-200.0, 100.0], [400.0, 100.0], [400.0, 400.0], [-200.0, 400.0]],
+        dtype=np.float32,
+    )
+    mask = np.zeros((720, 1280), np.uint8)
+    mask[100:400, :420] = 255  # folha segmentada, so o que a camera ve
+    frame = np.full((720, 1280, 3), 60, np.uint8)
+    frame[:, :420] = (200, 200, 200)
+    loop, _det, ink = _make_loop(
+        lambda _i: (quad.copy(), "paper", {"coverage_mask": mask})
+    )
+    _drive(loop, 40, frame=frame)
+    image = ink.pages[-1].image
+    left = image[:, : image.shape[1] // 3]  # fora do quadro: padding
+    assert left.mean() > 150, (
+        f"padding {left.mean():.1f} — a média do papel não chegou ao "
+        "recorte fora do quadro"
+    )
+
+
+def test_auto_gain_still_fills_off_sheet_inside_the_quad():
+    """Com ganho e cobertura juntos a máscara do quad não pode ser
+    consumida pelo &= do ganho — o preenchimento fora-folha dentro do
+    quad tem de continuar rodando (review do PR #118)."""
+    mask = _coverage_mask()  # papel só em x<300
+    frame = np.full((720, 1280, 3), 60, np.uint8)
+    frame[:, :300] = (200, 200, 200)
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", {"coverage_mask": mask}),
+        config=PipelineConfig(ink_auto_gain=True, detect_wake=False),
+    )
+    _drive(loop, 40, frame=frame)
+    image = ink.pages[-1].image
+    right = image[:, -image.shape[1] // 5 :]  # mesa dentro do quad
+    assert right.mean() > 150, (
+        f"fora-folha {right.mean():.1f} — o &= do ganho consumiu a "
+        "máscara do quad e o preenchimento não rodou"
+    )

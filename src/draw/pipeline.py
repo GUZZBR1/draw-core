@@ -424,12 +424,13 @@ class Pipeline:
                 # Sem cobertura (detecção clássica não a fornece) a mão
                 # ainda sai da conta: `visible` sozinha serve de
                 # máscara.
-                gain_mask = quad_mask
+                gain_mask = quad_mask.copy()
                 if coverage is not None:
                     gain_mask &= coverage
                 if visible is not None:
                     gain_mask &= visible
                 frame, self.last_ink_gain = exposure.apply_paper_gain(frame, gain_mask)
+            fill_color = None
             if coverage is not None and coverage.any():
                 # Fora da folha o warp é preto: a transição
                 # folha->preto é uma aresta artificial que o page_clean
@@ -441,12 +442,29 @@ class Pipeline:
                 # clareou o que a média vê (mesma ordem de antes).
                 paper = coverage & quad_mask
                 if paper.any():
+                    fill_color = frame[paper].mean(axis=0).astype(np.uint8)
                     filled = frame.copy()
-                    filled[quad_mask & ~coverage] = (
-                        frame[paper].mean(axis=0).astype(np.uint8)
-                    )
+                    filled[quad_mask & ~coverage] = fill_color
                     frame = filled
             ink_submit = self._warp_sheet(frame, warp_corners)
+            if fill_color is not None:
+                frame_h, frame_w = frame.shape[:2]
+                crosses = (
+                    warp_corners[:, 0].min() < 0
+                    or warp_corners[:, 0].max() > frame_w - 1
+                    or warp_corners[:, 1].min() < 0
+                    or warp_corners[:, 1].max() > frame_h - 1
+                )
+                if crosses:
+                    # Folha parcialmente fora do quadro: o warp só
+                    # preenche o que a câmera viu — o resto sobe preto.
+                    # Repõe a média do papel no padding, como o
+                    # preenchimento pós-warp do caminho antigo.
+                    valid = self._warp_sheet(
+                        np.full((frame_h, frame_w), 255, np.uint8),
+                        warp_corners,
+                    )
+                    ink_submit[valid == 0] = fill_color
         self.ink_worker.submit(
             contracts.WarpedPage(
                 ink_submit,

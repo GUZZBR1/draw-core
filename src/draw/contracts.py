@@ -234,6 +234,11 @@ class WarpedPage:
                 or mask.dtype not in (np.dtype(bool), np.dtype(np.uint8))
             ):
                 raise ValueError(f"{name} precisa ser máscara 2D bool/uint8 ou None")
+            if self.corners is None and mask.shape != self.image.shape[:2]:
+                raise ValueError(
+                    f"{name} sem corners segue a grade do warp: "
+                    f"{mask.shape} != {self.image.shape[:2]}"
+                )
             view = mask.view()
             view.flags.writeable = False
             object.__setattr__(self, name, view)

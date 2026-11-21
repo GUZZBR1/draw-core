@@ -513,11 +513,24 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 # porque ela e atraso real de atualizacao.
                 self._telemetry_replaced += 1
             self._telemetry_submits += 1
+            crop_clear = None
+            if visible is not None:
+                if corners is None:
+                    # Mascara na grade do warp: toda ela e recorte.
+                    crop_clear = bool(np.all(visible))
+                else:
+                    # Mascara de camera (issue #100): mao na mesa
+                    # fora do quad nao pode segurar a janela de
+                    # confirmacao pos-saida — a folha limpa e o que
+                    # esta limpo dentro do recorte (review do PR #118).
+                    crop = np.zeros(visible.shape, np.uint8)
+                    cv2.fillConvexPoly(crop, np.round(corners).astype(np.int32), 1)
+                    crop_clear = bool(visible[crop.astype(bool)].all())
             if (
                 self._hand_state is False
                 and self._awaiting_clear_post_exit
                 and self._post_exit_confirm_passes() > 1
-                and (visible is None or np.all(visible))
+                and (crop_clear is None or crop_clear)
             ):
                 # Primeira submissao pos-saida com visibilidade limpa (sem
                 # mascara de mao velha): re-arma a janela completa de
@@ -1175,7 +1188,12 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 )
             registered_prob, registered_visible = (
                 registration._register_ink_probability(
-                    prob, anchor, registration_corners, visible, visible_cam=visible_cam
+                    prob,
+                    anchor,
+                    registration_corners,
+                    visible,
+                    visible_cam=visible_cam,
+                    pass_corners=corners,
                 )
             )
             self._last_registration = (
@@ -1247,6 +1265,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                             registration_corners,
                             visible,
                             visible_cam=visible_cam,
+                            pass_corners=corners,
                         )
                     )
                     self._last_registration = (
@@ -1293,13 +1312,17 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         if not registration._registration_is_identity(reg_matrix):
                             if coverage_anchor is None:
                                 # Resample único câmera→âncora (issue
-                                # #100): M·C = A — a cobertura chega
-                                # à grade da âncora direto da fonte.
+                                # #100): M @ page_matrix(passada) — o
+                                # mesmo caminho da tinta; na banda
+                                # morta o quad de registro != o ao
+                                # vivo e A sozinha desalinha ~tau px
+                                # (review do PR #118).
                                 coverage_anchor = (
                                     cv2.warpPerspective(
                                         coverage_cam.astype(np.uint8),
-                                        registration._corners_page_matrix(
-                                            anchor, size[0], size[1]
+                                        reg_matrix
+                                        @ registration._corners_page_matrix(
+                                            corners, size[0], size[1]
                                         ),
                                         size,
                                         flags=cv2.INTER_NEAREST,
