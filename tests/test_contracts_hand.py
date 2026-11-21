@@ -2,9 +2,10 @@
 
 from dataclasses import FrozenInstanceError
 
+import numpy as np
 import pytest
 
-from draw.contracts import HandSample, HandSignature
+from draw.contracts import HandOcclusion, HandSample, HandSignature
 
 
 def test_hand_signature_valid_and_frozen():
@@ -39,3 +40,26 @@ def test_hand_sample_rejects_bad_fields():
         HandSample(present="talvez", moved=False)
     with pytest.raises(ValueError):
         HandSample(present=True, moved=1)
+
+
+def test_hand_occlusion_keeps_empty_distinct_from_missing_and_owns_masks():
+    camera_mask = np.zeros((3, 5), dtype=bool)
+    observation = HandOcclusion(4, 1.5, 2, camera_mask)
+    camera_mask[0, 0] = True
+
+    assert observation.occlusion_mask is not None
+    assert not observation.occlusion_mask.any()
+    assert observation.orientation_mask is None
+    assert not observation.occlusion_mask.flags.writeable
+    assert HandOcclusion(4, 1.5, 2).occlusion_mask is None
+
+
+def test_hand_occlusion_rejects_masks_on_different_camera_grids():
+    with pytest.raises(ValueError, match="mesma grade"):
+        HandOcclusion(
+            4,
+            1.5,
+            2,
+            np.zeros((3, 5), dtype=bool),
+            np.zeros((3, 4), dtype=bool),
+        )

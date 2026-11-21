@@ -534,3 +534,44 @@ class HandPresenceResult:
     captured_at: float
     source_id: int
     sample: HandSample
+
+
+@dataclass(frozen=True, slots=True)
+class HandOcclusion:
+    """Evidência de oclusão produzida para um quadro da câmera.
+
+    Máscaras booleanas na grade da captura. None é evidência
+    indisponível e uma máscara vazia é uma observação livre.
+    source_id identifica a geração da fonte, incluindo sua orientação.
+    present e moved seguem a semântica de HandSample.
+    """
+
+    frame_sequence: int
+    captured_at: float
+    source_id: int
+    occlusion_mask: np.ndarray | None = None
+    orientation_mask: np.ndarray | None = None
+    present: bool | None = None
+    moved: bool = False
+
+    def __post_init__(self):
+        if self.frame_sequence < 0 or self.source_id < 0:
+            raise ValueError("frame_sequence e source_id precisam ser >= 0")
+        if not isinstance(self.captured_at, (int, float)) or not np.isfinite(
+            self.captured_at
+        ):
+            raise ValueError("captured_at precisa ser finito")
+        HandSample(self.present, self.moved)
+        shape = None
+        for name in ("occlusion_mask", "orientation_mask"):
+            mask = getattr(self, name)
+            if mask is None:
+                continue
+            if not isinstance(mask, np.ndarray) or mask.ndim != 2 or mask.dtype != bool:
+                raise ValueError(f"{name} precisa ser uma máscara 2D bool")
+            if shape is not None and shape != mask.shape:
+                raise ValueError("as máscaras precisam usar a mesma grade de câmera")
+            shape = mask.shape
+            snapshot = mask.copy()
+            snapshot.flags.writeable = False
+            object.__setattr__(self, name, snapshot)

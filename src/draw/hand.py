@@ -35,7 +35,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .contracts import HandSignature
+from .contracts import FramePacket, HandOcclusion, HandSignature
 
 # O caminho convencional e resolvido a partir da RAIZ DO REPO, como
 # o do detector neural e o do pagina->limpa; era relativo ao CWD e
@@ -58,6 +58,18 @@ _PRESENCE_MAX_WIDTH = 640
 # passado o teto, _closed sinaliza e quem estava em voo fecha ao
 # retornar.
 _CLOSE_LOCK_TIMEOUT_S = 2.0
+# Baixa luz (issue #129): o MediaPipe perde a mao em frame escuro. Abaixo
+# desta luminancia media (amostra com stride) o frame ganha uma correcao
+# gama leve rumo a _DARK_TARGET_MEAN antes da deteccao; frame normal nao
+# paga nada alem da amostra. _DARK_MIN_GAMMA limita o realce (ruido).
+_DARK_MEAN = 70.0
+_DARK_TARGET_MEAN = 110.0
+_DARK_MIN_GAMMA = 0.45
+_DARK_SAMPLE_STRIDE = 8
+# Retencao curta: ate _HOLD_FRAMES deteccoes seguidas sem mao reaproveitam
+# a ultima mao vista (queda curta do detector nao libera a folha). So vale
+# para o mesmo tamanho de frame; "indisponivel" nunca e retido.
+_HOLD_FRAMES = 3
 
 
 def _resolve_model_path(model_path):
@@ -68,6 +80,25 @@ def _resolve_model_path(model_path):
         if Path(candidate).exists():
             return str(candidate)
     return None
+
+
+def _lift_dark(frame):
+    """Gama leve so em frame escuro; frame normal volta intacto."""
+    sample = frame[::_DARK_SAMPLE_STRIDE, ::_DARK_SAMPLE_STRIDE]
+    if sample.ndim == 3 and sample.shape[2] == 3:
+        # Mesma luminancia (BT.601) do cinza do diagnostico ao vivo:
+        # a media dos canais deslocaria o corte em cena com dominante.
+        mean = float(
+            cv2.cvtColor(np.ascontiguousarray(sample), cv2.COLOR_BGR2GRAY).mean()
+        )
+    else:
+        mean = float(sample.mean())
+    if mean >= _DARK_MEAN or mean < 1.0:
+        return frame
+    gamma = np.log(_DARK_TARGET_MEAN / 255.0) / np.log(mean / 255.0)
+    gamma = float(np.clip(gamma, _DARK_MIN_GAMMA, 1.0))
+    table = (255.0 * (np.arange(256) / 255.0) ** gamma).astype(np.uint8)
+    return cv2.LUT(frame, table)
 
 
 def hand_model_available(model_path=None):
@@ -142,6 +173,11 @@ class HandMasker:
         self._unavailable = False
         self._video_unavailable = False
         self._last_video_ts = -1
+        self._held_hands = None
+        self._held_shape = None
+        self._held_misses = 0
+        self.last_detection_held = False
+        self._observed_source_id = None
         self._warned = False
         self._closed = False
         self._lock = threading.RLock()
@@ -314,13 +350,44 @@ class HandMasker:
         """
         with self._lock:
             try:
-                return self._landmarks_locked(frame, max_width, timestamp_ms)
+                return self._retain(
+                    self._landmarks_locked(frame, max_width, timestamp_ms), frame
+                )
             finally:
                 # Se o close() passou sem o lock durante esta
                 # chamada, o fechamento acontece aqui, na saida
                 # de quem estava em voo.
                 if self._closed:
                     self._close_landmarkers()
+
+    def reset_retention(self):
+        """Descarta a mao retida (troca de fonte/camera/rotacao): marcos
+        de outra vista nao descrevem a nova, mesmo com o mesmo tamanho."""
+        with self._lock:
+            self._held_hands = None
+            self._held_shape = None
+            self._held_misses = 0
+            self.last_detection_held = False
+
+    def _retain(self, hands, frame):
+        """Histerese de presenca: sem mao por ate _HOLD_FRAMES deteccoes
+        seguidas, devolve a ultima mao vista (mesmo tamanho de frame)."""
+        self.last_detection_held = False
+        if hands is None:
+            return None
+        shape = frame.shape[:2]
+        if hands:
+            self._held_hands = hands
+            self._held_shape = shape
+            self._held_misses = 0
+            return hands
+        if self._held_hands is not None and self._held_shape == shape:
+            self._held_misses += 1
+            if self._held_misses <= _HOLD_FRAMES:
+                self.last_detection_held = True
+                return self._held_hands
+        self._held_hands = None
+        return hands
 
     def _landmarks_locked(self, frame, max_width, timestamp_ms):
         """O corpo de _landmarks, rodando sob o lock do masker."""
@@ -337,7 +404,7 @@ class HandMasker:
                 (max_width, int(round(frame.shape[0] * scale))),
                 interpolation=cv2.INTER_AREA,
             )
-        rgb = cv2.cvtColor(work, cv2.COLOR_BGR2RGB)
+        rgb = cv2.cvtColor(_lift_dark(work), cv2.COLOR_BGR2RGB)
         image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         result = None
         if use_video:
@@ -390,6 +457,21 @@ class HandMasker:
             cv2.MORPH_ELLIPSE, (2 * _DILATE_PX + 1, 2 * _DILATE_PX + 1)
         )
         return cv2.dilate(mask, kernel)
+
+    def observe(self, packet: FramePacket, *, source_id: int) -> HandOcclusion:
+        """Publica a máscara IMAGE com a identidade da captura."""
+        if source_id != self._observed_source_id:
+            # Outra fonte/vista: marcos retidos da anterior nao valem.
+            if self._observed_source_id is not None:
+                self.reset_retention()
+            self._observed_source_id = source_id
+        mask = self.mask(packet.image)
+        return HandOcclusion(
+            frame_sequence=packet.sequence,
+            captured_at=packet.captured_at,
+            source_id=source_id,
+            occlusion_mask=None if mask is None else mask != 0,
+        )
 
     def presence_signature(self, frame, timestamp_ms=None):
         """Assinatura de presenca sem construir mascara nenhuma.
