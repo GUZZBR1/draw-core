@@ -318,7 +318,9 @@ def simplify_polylines(polylines, epsilon):
             .astype(np.float64)
         )
         if len(approx) >= 2:
-            out.append({"points": approx, "closed": line["closed"]})
+            # Preserva chaves extras (width_px, t_*, meta): a largura por
+            # traço morre aqui se o dict for reconstruído do zero.
+            out.append({**line, "points": approx})
         else:
             out.append(line)
     return out
@@ -332,7 +334,33 @@ def median_stroke_width(ink, skel):
     return float(2.0 * np.median(dt[skel]))
 
 
+def stroke_widths_px(ink, polylines):
+    """Largura por traço em px (pseudo-pressão): 2 x mediana do
+    distanceTransform amostrado nos pontos de cada polilinha."""
+    dt = cv2.distanceTransform(ink.astype(np.uint8), cv2.DIST_L2, 5)
+    h, w = ink.shape
+    widths = []
+    for line in polylines:
+        pts = np.asarray(line["points"]).reshape(-1, 2)
+        if not len(pts):
+            widths.append(None)
+            continue
+        xs = np.clip(np.round(pts[:, 0]).astype(int), 0, w - 1)
+        ys = np.clip(np.round(pts[:, 1]).astype(int), 0, h - 1)
+        widths.append(float(2.0 * np.median(dt[ys, xs])))
+    return widths
+
+
 # -------------------------------------------------------------- escritas
+
+
+def _line_width_mm(line, sx, sy, default_mm):
+    """Largura do traço em mm: o width_px da vetorização quando presente
+    (a média das escalas por eixo, como stroke_width_mm do pipeline)."""
+    width_px = line.get("width_px")
+    if width_px is None:
+        return default_mm
+    return float(width_px) * 0.5 * (sx + sy)
 
 
 def _export_scale(img_w, img_h, paper_w_mm, paper_h_mm, scale=None, formats=None):
@@ -380,11 +408,12 @@ def write_svg(
     ]
     for line in polylines:
         pts = line["points"]
+        w_mm = _line_width_mm(line, sx, sy, stroke_w_mm)
         if len(pts) == 1:
             cx, cy = pts[0][0] * sx, pts[0][1] * sy
             lines.append(
                 f'<circle cx="{cx:.2f}" cy="{cy:.2f}" '
-                f'r="{max(stroke_w_mm / 2, 0.1):.2f}" fill="#000"/>'
+                f'r="{max(w_mm / 2, 0.1):.2f}" fill="#000"/>'
             )
             continue
         d = "M " + " L ".join(f"{x * sx:.2f} {y * sy:.2f}" for x, y in pts)
@@ -392,7 +421,7 @@ def write_svg(
             d += " Z"
         lines.append(
             f'<path d="{d}" fill="none" stroke="#000" '
-            f'stroke-width="{stroke_w_mm:.2f}" stroke-linecap="round" '
+            f'stroke-width="{w_mm:.2f}" stroke-linecap="round" '
             f'stroke-linejoin="round"/>'
         )
     lines.append("</svg>")
@@ -486,7 +515,7 @@ def write_dxf(
             "70",
             "1" if line["closed"] else "0",
             "43",
-            f"{stroke_w_mm:.3f}",
+            f"{_line_width_mm(line, sx, sy, stroke_w_mm):.3f}",
         ]
         for x, y in pts:
             out += ["10", f"{x:.3f}", "20", f"{y:.3f}"]
@@ -497,34 +526,49 @@ def write_dxf(
 # ------------------------------------------------- prova (round-trip IoU)
 
 
-def parse_svg_paths(svg_path):
+def parse_svg_paths(svg_path, widths=None):
     """Lê de volta os <path> e os pontos isolados (<circle>) do SVG:
-    lista de (Nx2 mm, closed); um <circle> vira uma entrada de 1 ponto."""
+    lista de (Nx2 mm, closed); um <circle> vira uma entrada de 1 ponto.
+
+    Com `widths` (lista), anexa por entrada a largura escrita:
+    o stroke-width do <path> ou o diâmetro do <circle>; None quando
+    o atributo falta — a prova por traço depende dele.
+    """
     text = Path(svg_path).read_text(encoding="utf-8")
     out = []
-    for match in re.finditer(
-        r'<path d="([^"]+)"|<circle cx="([^"]+)" cy="([^"]+)"', text
-    ):
-        if match.group(1) is not None:
-            d = match.group(1)
+    for tag in re.findall(r"<(?:path|circle)[^>]*?/?>", text):
+        d_match = re.search(r'\bd="([^"]+)"', tag)
+        if d_match is not None:
+            d = d_match.group(1)
             nums = [float(v) for v in re.findall(r"-?\d+\.?\d*", d)]
             pts = np.array(nums, dtype=np.float64).reshape(-1, 2)
             out.append((pts, d.strip().upper().endswith("Z")))
-        else:
-            out.append(
-                (
-                    np.array(
-                        [[float(match.group(2)), float(match.group(3))]],
-                        dtype=np.float64,
-                    ),
-                    False,
-                )
+            if widths is not None:
+                w = re.search(r'stroke-width="([\d.]+)"', tag)
+                widths.append(float(w.group(1)) if w else None)
+            continue
+        cx = re.search(r'cx="([\d.]+)"', tag)
+        cy = re.search(r'cy="([\d.]+)"', tag)
+        if cx is None or cy is None:
+            continue
+        out.append(
+            (
+                np.array([[float(cx.group(1)), float(cy.group(1))]], dtype=np.float64),
+                False,
             )
+        )
+        if widths is not None:
+            r = re.search(r'\br="([\d.]+)"', tag)
+            widths.append(float(r.group(1)) * 2 if r else None)
     return out
 
 
-def parse_dxf_polylines(dxf_path):
-    """Lê de volta as LWPOLYLINE do DXF: lista de (Nx2 mm, closed)."""
+def parse_dxf_polylines(dxf_path, widths=None):
+    """Lê de volta as LWPOLYLINE do DXF: lista de (Nx2 mm, closed).
+
+    Com `widths` (lista), anexa por entidade o grupo 43 (largura
+    constante), None quando ausente.
+    """
     tokens = [
         t.strip() for t in Path(dxf_path).read_text(encoding="utf-8").splitlines()
     ]
@@ -536,12 +580,15 @@ def parse_dxf_polylines(dxf_path):
         if code == "0" and value == "LWPOLYLINE":
             verts = []
             closed = False
+            width = None
             j = i + 1
             pending_x = None
             while j < len(pairs) and pairs[j][0] != "0":
                 c, v = pairs[j]
                 if c == "70":
                     closed = v == "1"
+                elif c == "43":
+                    width = float(v)
                 elif c == "10":
                     pending_x = float(v)
                 elif c == "20" and pending_x is not None:
@@ -550,32 +597,95 @@ def parse_dxf_polylines(dxf_path):
                 j += 1
             if verts:
                 out.append((np.array(verts, dtype=np.float64), closed))
+                if widths is not None:
+                    widths.append(width)
             i = j
         else:
             i += 1
     return out
 
 
-def rasterize(mm_polylines, shape, sx, sy, thickness_px, flip_y=False, paper_h_mm=None):
-    """Desenha polilinhas (mm) de volta na grade de pixels da página."""
+def rasterize(
+    mm_polylines,
+    shape,
+    sx,
+    sy,
+    thickness_px,
+    flip_y=False,
+    paper_h_mm=None,
+    thicknesses_px=None,
+):
+    """Desenha polilinhas (mm) de volta na grade de pixels da página.
+
+    `thicknesses_px` (opcional, alinhado a mm_polylines) dá a espessura
+    de cada entidade — a prova por traço usa uma única varredura de
+    página em vez de uma por traço.
+    """
     raster = np.zeros(shape, dtype=np.uint8)
-    for pts_mm, closed in mm_polylines:
+    for i, (pts_mm, closed) in enumerate(mm_polylines):
+        th_px = thickness_px if thicknesses_px is None else thicknesses_px[i]
         pts = pts_mm.copy()
         if flip_y:
             pts[:, 1] = paper_h_mm - pts[:, 1]
         px = np.round(pts / np.array([sx, sy])).astype(np.int32)
         if len(px) == 1:
-            cv2.circle(raster, tuple(px[0]), max(thickness_px // 2, 0), 1, -1)
+            cv2.circle(raster, tuple(px[0]), max(th_px // 2, 0), 1, -1)
         else:
             cv2.polylines(
                 raster,
                 [px.reshape(-1, 1, 2)],
                 bool(closed),
                 1,
-                thickness=max(int(thickness_px), 1),
+                thickness=max(int(th_px), 1),
                 lineType=cv2.LINE_AA,
             )
     return raster > 0
+
+
+def weighted_segments(mm_polylines, widths_mm, sx, sy, thickness_px):
+    """Expande entidades em segmentos com espessura px própria (prova).
+
+    Sob escala anisotrópica cada segmento leva a espessura da SUA
+    perpendicular — um cotovelo com espessura única distorce uma das
+    pernas. Vértices todos idênticos viram um ponto (write_dxf duplica
+    o vértice do ponto); sem largura gravada, o fallback global.
+    """
+    parts, ths = [], []
+    for (pts, closed), w_mm in zip(mm_polylines, widths_mm, strict=True):
+        if len(pts) >= 2 and np.allclose(pts, pts[0]):
+            pts = pts[:1]
+        if w_mm is None or len(pts) < 2:
+            parts.append((pts, closed))
+            scale = 0.5 * (sx + sy)
+            ths.append(
+                thickness_px if w_mm is None else max(1, int(round(w_mm / scale)))
+            )
+            continue
+        for i in range(len(pts) if closed else len(pts) - 1):
+            seg = np.array([pts[i], pts[(i + 1) % len(pts)]])
+            if np.allclose(seg[0], seg[1]):
+                continue
+            parts.append((seg, False))
+            ths.append(max(1, int(round(w_mm / stroke_scale_mm_per_px(seg, sx, sy)))))
+    return parts, ths
+
+
+def stroke_scale_mm_per_px(pts_mm, sx, sy):
+    """Escala mm/px da ESPESSURA do traço sob escala anisotrópica.
+
+    A largura projeta na perpendicular ao eixo do traço: horizontal
+    segue sy, vertical segue sx — a média (sx+sy)/2 engorda/fina o
+    traço quando os eixos diferem (Devin Review PR #122). A norma
+    euclidiana mantém o diagonal com a espessura certa também em grid
+    uniforme; uma curva sob escala anisotrópica ainda recebe uma única
+    espessura aproximada pelo seu eixo principal.
+    """
+    if len(pts_mm) < 2:
+        return 0.5 * (sx + sy)
+    cov = np.cov(np.asarray(pts_mm, dtype=np.float64).T)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    u = eigvecs[:, int(np.argmax(eigvals))]
+    return float(np.hypot(u[1] * sx, u[0] * sy))
 
 
 def iou(a, b):

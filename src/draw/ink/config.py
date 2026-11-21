@@ -11,6 +11,11 @@ LEGACY_VOTE_LEVEL = 1.9 / 3
 PRODUCTION_VOTE_LEVEL = 0.85
 PRODUCTION_PASS_INTERVAL_S = 0.15
 
+# Nível de voto do perfil técnico/CAD (medido na bancada do strict_vote:
+# 0,92 com ganho -> escrita 109%, pauta 48% do legado sem ganho — traco
+# mais fino ainda, aceitável e até desejado em linhas de CAD).
+TECHNICAL_VOTE_LEVEL = 0.92
+
 
 @dataclass(frozen=True, slots=True)
 class InkConfig:
@@ -99,6 +104,11 @@ class InkConfig:
     # 6,7/s em 3,1; 0,10 s -> 9,9/s em 4,3 (o fp32 em mosaico de hoje, a
     # 0,25 s: 3,9/s em 4,9). Opt-in ate a validacao ao vivo com a mao.
     pass_interval_s: float | None = None
+    # Janela completa de confirmacao apos a saida da mao (worker). Sem ela,
+    # o voto legado gasta 1 passada assumindo que o traco ja foi lido uma
+    # vez com a mao presente; um traco revelado so depois da saida fica
+    # aquem do voto e o descanso total o congela (Devin Review PR #122).
+    post_exit_full_window: bool = False
 
     def __post_init__(self):
         if not 0.0 < self.t_low < self.t_high <= 1.0:
@@ -184,4 +194,50 @@ class InkConfig:
             hysteresis=True,
             motion_veto=True,
             pass_interval_s=pass_interval_s,
+        )
+
+    @classmethod
+    def sketch(cls, *, pass_interval_s=PRODUCTION_PASS_INTERVAL_S):
+        """Perfil esboço/lápis: fidelidade primeiro.
+
+        Voto legado (o strict_vote medido afina tracos -27..48% e exige
+        ink_auto_gain; para desenho a lápis a perda de grafite fino
+        pesa mais que a sujeira residual) + motion_veto para a poeira
+        temporal. Sem hysteresis: o portão de âncora exige média >=
+        t_high (0,90) ou contato com tinta confirmada, e um traço de
+        lápis isolado a ~0,75 por três passadas passa o voto legado
+        (2,25 >= 1,9) mas morre sem âncora (Devin Review PR #122).
+        ruling_removal desligado: o removedor pode comer lápis
+        deitado sobre a linha impressa (PR #56, recall do braço 8,6%).
+        post_exit_full_window: o atalho de 1 passada pos-saida assume
+        uma leitura com a mao presente; traco so revelado depois da
+        saida precisa da janela inteira (Devin Review PR #122).
+        """
+        return cls.strict_vote(
+            LEGACY_VOTE_LEVEL,
+            ruling_removal=False,
+            hysteresis=False,
+            motion_veto=True,
+            pass_interval_s=pass_interval_s,
+            post_exit_full_window=True,
+        )
+
+    @classmethod
+    def technical(
+        cls,
+        *,
+        vote_level=TECHNICAL_VOTE_LEVEL,
+        pass_interval_s=PRODUCTION_PASS_INTERVAL_S,
+        ruling_removal=True,
+    ):
+        """Perfil técnico/CAD: vetores mais limpos para export DXF.
+
+        Voto mais estrito (0,92 medido: escrita 109%, pauta 48% — quase
+        zera a pauta residual) + removedor de pauta; o traço mais fino
+        é desejado em linhas de construção.
+        """
+        return cls.production(
+            vote_level=vote_level,
+            pass_interval_s=pass_interval_s,
+            ruling_removal=ruling_removal,
         )

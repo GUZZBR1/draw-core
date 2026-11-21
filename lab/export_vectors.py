@@ -38,7 +38,9 @@ from draw.exporters.export_vectors import (  # noqa: E402
     parse_svg_paths,
     rasterize,
     simplify_polylines,
+    stroke_widths_px,
     trace_polylines,
+    weighted_segments,
     write_dxf,
     write_svg,
     zhang_suen_thin,
@@ -147,6 +149,13 @@ def export_vectors(
     raw = trace_polylines(skel)
     simplified = simplify_polylines(raw, epsilon)
     width_px = median_stroke_width(ink, skel)
+    # Pseudo-pressão por traço: o width_px entra no SVG/DXF por LWPOLYLINE.
+    # Amostra no esqueleto cru (raw): nos vértices do Douglas-Peucker a
+    # mediana sai enviesada — pontas leem ~1 px e âncoras de junção,
+    # demais (Devin Review PR #122).
+    for line, w_px in zip(simplified, stroke_widths_px(ink, raw), strict=True):
+        if w_px is not None:
+            line["width_px"] = w_px
 
     return {
         "ink": ink,
@@ -278,16 +287,24 @@ def main(argv=None):
     )
 
     # Prova: relê os DOIS arquivos do disco, rasteriza e compara com a máscara.
+    # Cada traço rasteriza na largura gravada no arquivo (grupo 43 /
+    # stroke-width) — largura global só cobre quem saiu sem width_px.
     sx, sy = result["scale_mm_per_px"]
     thickness = max(int(round(result["stroke_width_px"])), 1)
     ink = result["ink"]
-    raster_svg = rasterize(parse_svg_paths(svg_path), ink.shape, sx, sy, thickness)
-    raster_dxf = rasterize(
-        parse_dxf_polylines(dxf_path),
-        ink.shape,
-        sx,
-        sy,
-        thickness,
+
+    def _rasterize_weighted(parsed, widths, **kw):
+        # Uma varredura de página por arquivo; weighted_segments expande
+        # em segmentos com a espessura da SUA perpendicular (cotovelos
+        # sob escala anisotrópica) e colapsa pontos duplicados do DXF.
+        parts, ths = weighted_segments(parsed, widths, sx, sy, thickness)
+        return rasterize(parts, ink.shape, sx, sy, thickness, thicknesses_px=ths, **kw)
+
+    widths_svg, widths_dxf = [], []
+    raster_svg = _rasterize_weighted(parse_svg_paths(svg_path, widths_svg), widths_svg)
+    raster_dxf = _rasterize_weighted(
+        parse_dxf_polylines(dxf_path, widths_dxf),
+        widths_dxf,
         flip_y=True,
         paper_h_mm=paper_h_mm,
     )

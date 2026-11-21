@@ -1,5 +1,6 @@
 """Regra de voto configuravel (InkConfig.vote_*, strict_vote)."""
 
+import dataclasses
 import sys
 
 import numpy as np
@@ -8,7 +9,12 @@ import pytest
 from draw import app as app_module
 from draw.ink import accumulator as accumulator_mod
 from draw.ink import votes
-from draw.ink.config import LEGACY_VOTE_LEVEL, InkConfig
+from draw.ink.config import (
+    LEGACY_VOTE_LEVEL,
+    PRODUCTION_PASS_INTERVAL_S,
+    TECHNICAL_VOTE_LEVEL,
+    InkConfig,
+)
 from draw.ink.worker import PageCleanWorker
 
 H, W = 40, 60
@@ -194,3 +200,72 @@ def test_main_combines_ink_vote_gain_and_rotation(monkeypatch):
     )
     assert kwargs["pipeline_config"].ink.seen_threshold == 0.7
     assert kwargs["rotation"] == 180
+
+
+def test_sketch_profile_keeps_the_legacy_vote_and_drops_ruling_removal():
+    """Esboço/lápis: campos de voto idênticos ao legado (fidelidade do
+    grafite fino), com os mecanismos de produção ligados e a remoção de
+    pauta desligada (PR #56: ela pode comer lápis sobre a linha)."""
+    cfg = InkConfig.sketch()
+    legacy = InkConfig()
+    for field in ("vote_hit", "vote_score", "vote_score_strong", "seen_threshold"):
+        assert getattr(cfg, field) == getattr(legacy, field)
+    assert cfg.ruling_removal is False
+    # Sem hysteresis: o portão de âncora mata traço de lápis isolado
+    # (Devin Review PR #122) — ver teste de acumulador abaixo.
+    assert cfg.hysteresis is False
+    assert cfg.motion_veto is True
+    assert cfg.pass_interval_s == PRODUCTION_PASS_INTERVAL_S
+
+
+def test_sketch_confirms_an_isolated_faint_stroke_through_the_accumulator():
+    """Traço de lápis isolado a 0,75 passa o voto legado (2,25 >= 1,9)
+    mas morreria no portão de âncora da hysteresis (nenhum pixel com
+    média >= 0,90 e nenhuma tinta confirmada por perto — Devin Review
+    PR #122). sketch() tem que confirmá-lo; ligar a histerese de volta
+    tem que derrubá-lo."""
+    assert _confirmed_px(InkConfig.sketch(), 0.75, passes=3) > 0
+    gated = dataclasses.replace(InkConfig.sketch(), hysteresis=True)
+    assert _confirmed_px(gated, 0.75, passes=3) == 0
+
+
+def test_technical_profile_uses_the_measured_092_vote_level():
+    """Técnico/CAD: o nível medido 0,92 mantém a escrita (109%) e quase
+    zera a pauta residual (48%) — vetores mais limpos para DXF."""
+    cfg = InkConfig.technical()
+    shift = TECHNICAL_VOTE_LEVEL - LEGACY_VOTE_LEVEL
+    assert cfg.vote_score_strong == pytest.approx(1.9 + 3 * shift)
+    assert cfg.ruling_removal is True
+    assert cfg.hysteresis is True
+    assert cfg.motion_veto is True
+    assert cfg.pass_interval_s == PRODUCTION_PASS_INTERVAL_S
+
+
+def test_main_preset_flag_builds_the_profile_config(monkeypatch):
+    seen = []
+    monkeypatch.setattr(app_module, "run", lambda **kw: seen.append(kw))
+    monkeypatch.setattr(sys, "argv", ["draw", "--preset", "sketch"])
+    app_module.main()
+    assert seen[-1]["pipeline_config"].ink == InkConfig.sketch()
+    monkeypatch.setattr(sys, "argv", ["draw", "--preset", "ruled"])
+    app_module.main()
+    assert seen[-1]["pipeline_config"].ink == InkConfig.production()
+    monkeypatch.setattr(
+        sys, "argv", ["draw", "--preset", "technical", "--ink-interval", "0.25"]
+    )
+    app_module.main()
+    # --ink-interval compõe sobre qualquer perfil (cadência é ortogonal).
+    assert seen[-1]["pipeline_config"].ink == InkConfig.technical(pass_interval_s=0.25)
+
+
+def test_main_preset_rejects_conflicting_flags(monkeypatch):
+    monkeypatch.setattr(app_module, "run", lambda **kw: None)
+    for argv in (
+        ["draw", "--preset", "sketch", "--ink-vote", "0.9"],
+        ["draw", "--preset", "ruled", "--legacy-ink"],
+        ["draw", "--markers", "--preset", "sketch"],
+    ):
+        monkeypatch.setattr(sys, "argv", argv)
+        with pytest.raises(SystemExit) as error:
+            app_module.main()
+        assert error.value.code == 2

@@ -490,6 +490,13 @@ def warp_sheet_uvmap(frame, uvmap, corners=None, destination=None):
     poucos pontos válidos (<20%, medidos no trecho que cai DENTRO da
     grade de saída), cai na homografia de
     `corners`. Devolve None se não houver nem mapa útil nem cantos.
+
+    Contrato dormente: hoje nada produz o uvmap — ele espera o modelo
+    de folha v4. O produtor certo é um ONNX leve treinado no
+    draw-training quando a lombada incomodar na mesa real; NÃO
+    page-dewarp/lmmx: o ajuste cúbico dele depende de linhas de texto
+    impresso (spans), falha em esboço/circuito e exige scipy, proibido
+    no runtime.
     """
     if destination is None:
         destination = [

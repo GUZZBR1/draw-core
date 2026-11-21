@@ -1,9 +1,13 @@
 """Testes leves de exporters/export_vectors.py (ponte SVG/DXF sem ximgproc)."""
 
+import re
+
 import cv2
 import numpy as np
+import pytest
 
 from draw.exporters import export_vectors as ev
+from draw.exporters import vectorize as vz
 
 
 def _synthetic_page():
@@ -101,3 +105,165 @@ def test_parse_svg_paths_roundtrips_isolated_point(tmp_path):
     # round-trip mm -> px (escala por eixo): o ponto volta para (30, 20) px
     scale = np.array([210.0 / 60, 297.0 / 60])
     assert np.allclose(singles[0][0] / scale, [30.0, 20.0], atol=0.2)
+
+
+def test_per_stroke_width_flows_to_svg_and_dxf(tmp_path):
+    """Pseudo-pressão por traço: o width_px que a vetorização anota vira
+    o stroke-width do SVG e o grupo 43 do DXF por LWPOLYLINE — em vez de
+    uma largura global igual para toda a página."""
+    ink = np.zeros((80, 200), dtype=bool)
+    ink[10:13, 10:190] = True  # traço fino ~3 px
+    ink[40:52, 10:190] = True  # traço grosso ~12 px
+    polylines = vz.vectorize_mask(ink, epsilon=1.0)
+    assert len(polylines) == 2
+    widths = sorted(p["width_px"] for p in polylines)
+    assert widths[0] < widths[-1] / 2
+
+    svg_path = tmp_path / "w.svg"
+    dxf_path = tmp_path / "w.dxf"
+    # stroke_w_mm=9.9 é o fallback: nao pode aparecer no arquivo quando
+    # o width_px por traço está presente.
+    ev.write_svg(polylines, svg_path, 200, 80, 210.0, 297.0, 9.9)
+    ev.write_dxf(polylines, dxf_path, 200, 80, 210.0, 297.0, 9.9)
+
+    svg_widths = sorted(
+        float(w)
+        for w in re.findall(
+            r'stroke-width="([\d.]+)"', svg_path.read_text(encoding="utf-8")
+        )
+    )
+    assert len(svg_widths) == 2
+    assert svg_widths[0] < svg_widths[-1]
+    assert 9.9 not in svg_widths
+
+    dxf_lines = dxf_path.read_text(encoding="utf-8").splitlines()
+    w43 = sorted(
+        float(dxf_lines[i + 1]) for i, code in enumerate(dxf_lines) if code == "43"
+    )
+    assert len(w43) == 2
+    assert w43[0] < w43[-1]
+
+
+def test_stroke_widths_px_samples_the_skeleton_not_dp_vertices():
+    """Amostrada só nos vértices do Douglas-Peucker, a largura sai
+    enviesada (ponta lê ~1 px): a prova do lab tem que medir no
+    esqueleto cru — Devin Review PR #122."""
+    ink = np.zeros((30, 100), dtype=bool)
+    ink[12:18, 5:95] = True  # faixa de 6 px
+    dense = [{"points": np.array([[x, 15.0] for x in range(5, 95)]), "closed": False}]
+    endpoints = [{"points": np.array([[5.0, 15.0], [94.0, 15.0]]), "closed": False}]
+    w_dense = ev.stroke_widths_px(ink, dense)[0]
+    w_tips = ev.stroke_widths_px(ink, endpoints)[0]
+    assert w_dense == pytest.approx(6.0, abs=0.5)
+    assert w_tips < w_dense / 2
+
+
+def test_parse_readback_captures_per_stroke_widths(tmp_path):
+    """A prova por traço relê a largura gravada: stroke-width do SVG e
+    grupo 43 do DXF voltam por entrada (Devin Review PR #122)."""
+    lines = [
+        {
+            "points": np.array([[5.0, 5.0], [50.0, 5.0]]),
+            "closed": False,
+            "width_px": 4.0,
+        },
+        {
+            "points": np.array([[5.0, 20.0], [50.0, 20.0]]),
+            "closed": False,
+            "width_px": 16.0,
+        },
+    ]
+    svg_path, dxf_path = tmp_path / "w.svg", tmp_path / "w.dxf"
+    ev.write_svg(lines, svg_path, 60, 60, 60.0, 60.0, 9.9)
+    ev.write_dxf(lines, dxf_path, 60, 60, 60.0, 60.0, 9.9)
+    w_svg, w_dxf = [], []
+    ev.parse_svg_paths(svg_path, w_svg)
+    ev.parse_dxf_polylines(dxf_path, w_dxf)
+    # escala uniforme 1 mm/px: o grupo 43 devolve width_px em mm
+    assert sorted(w_svg) == sorted(w_dxf) == [4.0, 16.0]
+
+
+def test_standalone_svg_writer_uses_per_stroke_width(tmp_path):
+    """O write_svg do vectorize (saída standalone) também honra o
+    width_px — não só o export_vectors.write_svg."""
+    lines = [
+        {
+            "points": np.array([[5.0, 5.0], [50.0, 5.0]]),
+            "closed": False,
+            "width_px": 2.0,
+        },
+        {
+            "points": np.array([[5.0, 20.0], [50.0, 20.0]]),
+            "closed": False,
+            "width_px": 12.0,
+        },
+    ]
+    svg_path = tmp_path / "s.svg"
+    vz.write_svg(lines, svg_path, epsilon=1.0, thinning="zhangsuen")
+    widths = sorted(
+        float(w)
+        for w in re.findall(
+            r'stroke-width="([\d.]+)"', svg_path.read_text(encoding="utf-8")
+        )
+    )
+    assert widths[0] < widths[-1]
+    assert widths[0] != 0.30  # o fixo antigo não pode sobrar
+
+
+def test_stroke_scale_mm_per_px_diagonal_matches_axis_on_uniform_grid():
+    """Round-trip da espessura (Devin Review PR #122): num grid
+    uniforme 1 mm = 1 px em qualquer ângulo — o diagonal não pode
+    afinar; fora do uniforme, a perpendicular manda."""
+    assert ev.stroke_scale_mm_per_px(np.array([[0, 0], [10, 0]]), 2, 4) == 4
+    assert ev.stroke_scale_mm_per_px(np.array([[0, 0], [0, 10]]), 2, 4) == 2
+    uni = ev.stroke_scale_mm_per_px(np.array([[0, 0], [10, 10]]), 3, 3)
+    assert uni == pytest.approx(3.0)
+    # Diagonal anisotropica: hypot(0,5.2, 0,5.4) = raiz de 10
+    aniso = ev.stroke_scale_mm_per_px(np.array([[0, 0], [10, 10]]), 2, 4)
+    assert aniso == pytest.approx(np.sqrt(10.0))
+
+
+def test_weighted_segments_gives_each_elbow_leg_its_own_thickness():
+    """Cotovelo sob escala anisotropica (Devin Review PR #122): a perna
+    horizontal mede pela perpendicular sy, a vertical por sx — uma
+    unica espessura por traço distorceria uma delas."""
+    elbow = np.array([[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]])
+    parts, ths = ev.weighted_segments([(elbow, False)], [4.0], 2.0, 4.0, 7)
+    assert len(parts) == 2
+    assert ths == [1, 2]  # 4 mm / sy=4 na horizontal, 4 mm / sx=2 na vertical
+
+
+def test_weighted_segments_collapses_the_dxf_duplicated_dot():
+    """write_dxf grava o ponto isolado com dois vértices idênticos:
+    sem colapsar, o único segmento degenerado era pulado e o ponto
+    sumia da prova DXF (Devin Review PR #122)."""
+    dot = np.array([[5.0, 5.0], [5.0, 5.0]])
+    parts, ths = ev.weighted_segments([(dot, False)], [2.0], 1.0, 1.0, 7)
+    assert len(parts) == 1 and len(parts[0][0]) == 1
+    # A largura registrada (2 mm → 2 px) tem de chegar ao raster —
+    # sem a checagem o teste passava até com o fallback de 7 px
+    # (Devin Review PR #122).
+    assert ths == [2]
+    raster = ev.rasterize(parts, (20, 20), 1.0, 1.0, 7, thicknesses_px=ths)
+    raster_fallback = ev.rasterize(parts, (20, 20), 1.0, 1.0, 7, thicknesses_px=[7])
+    # O ponto de 2 px tem de renderizar menor que o de 7 px — sem a
+    # comparação, rasterize podia ignorar ths e usar o fallback
+    # (Devin Review PR #122).
+    assert 0 < int(raster.sum()) < int(raster_fallback.sum())
+
+
+def test_lines_without_width_px_keep_the_uniform_fallback(tmp_path):
+    """Polilinhas sem anotação (caminhos que não passam por
+    vectorize_mask/stroke_widths_px) seguem com a largura global."""
+    lines = [
+        {"points": np.array([[0.0, 0.0], [40.0, 40.0]]), "closed": False},
+        {"points": np.array([[50.0, 10.0]]), "closed": False},
+    ]
+    svg_path = tmp_path / "u.svg"
+    dxf_path = tmp_path / "u.dxf"
+    ev.write_svg(lines, svg_path, 60, 60, 210.0, 297.0, 0.5)
+    ev.write_dxf(lines, dxf_path, 60, 60, 210.0, 297.0, 0.5)
+    assert 'stroke-width="0.50"' in svg_path.read_text(encoding="utf-8")
+    dxf_lines = dxf_path.read_text(encoding="utf-8").splitlines()
+    w43 = [dxf_lines[i + 1] for i, code in enumerate(dxf_lines) if code == "43"]
+    assert set(w43) == {"0.500"}

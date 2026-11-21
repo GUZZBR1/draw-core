@@ -1114,6 +1114,10 @@ def classify_primitive(polyline):
     if "t_start_ms" in polyline:
         meta["t_start_ms"] = polyline["t_start_ms"]
         meta["t_end_ms"] = polyline["t_end_ms"]
+    if "width_px" in polyline:
+        # stroke_w_mm, não width_mm: o retângulo já usa width_mm para a
+        # largura geométrica da caixa — colidir os dois o apagaria.
+        meta["stroke_w_mm"] = round(float(polyline["width_px"]) * MM_PER_PX, 3)
 
     if len(pts) == 1:
         return {
@@ -1296,12 +1300,21 @@ def vectorize_mask(
     if order_strokes or stamps is not None:
         raw = annotate_and_order_polylines(raw, stamps=stamps)
     out = []
+    # Largura por traço amostrada no esqueleto cru (pseudo-pressão para os
+    # exportadores): um distanceTransform da máscara limpa por vetorização.
+    dt_width = cv2.distanceTransform(work.astype(np.uint8), cv2.DIST_L2, 5)
+    w_h, w_w = work.shape[:2]
     for line in raw:
         pts = simplify(line["points"], epsilon, line["closed"])
         item = {"points": pts, "closed": line["closed"]}
         if "t_start_ms" in line:
             item["t_start_ms"] = line["t_start_ms"]
             item["t_end_ms"] = line["t_end_ms"]
+        rpts = np.asarray(line["points"]).reshape(-1, 2)
+        if len(rpts):
+            xs = np.clip(np.round(rpts[:, 0]).astype(int), 0, w_w - 1)
+            ys = np.clip(np.round(rpts[:, 1]).astype(int), 0, w_h - 1)
+            item["width_px"] = round(float(2.0 * np.median(dt_width[ys, xs])), 2)
         out.append(item)
     return out
 
@@ -1414,43 +1427,50 @@ def write_svg(polylines, out_path, epsilon, thinning, primitives=None):
     if primitives is not None:
         for prim in primitives:
             kind = prim["type"]
+            # stroke_w_mm medido na vetorização (meta de classify_primitive);
+            # sem ele, as larguras fixas de sempre.
+            w = prim.get("stroke_w_mm")
             if kind == "point":
                 lines.append(
                     f'<circle cx="{prim["x_mm"]:.2f}" cy="{prim["y_mm"]:.2f}" '
-                    f'r="0.30" fill="#000"/>'
+                    f'r="{max((w or 0.60) / 2, 0.10):.2f}" fill="#000"/>'
                 )
             elif kind == "line":
                 lines.append(
                     f'<line x1="{prim["x1_mm"]:.2f}" y1="{prim["y1_mm"]:.2f}" '
                     f'x2="{prim["x2_mm"]:.2f}" y2="{prim["y2_mm"]:.2f}" '
-                    f'stroke="#000" stroke-width="0.35" stroke-linecap="round"/>'
+                    f'stroke="#000" stroke-width="{w or 0.35:.2f}" '
+                    f'stroke-linecap="round"/>'
                 )
             elif kind == "circle":
                 lines.append(
                     f'<circle cx="{prim["cx_mm"]:.2f}" cy="{prim["cy_mm"]:.2f}" '
                     f'r="{prim["r_mm"]:.2f}" fill="none" stroke="#000" '
-                    f'stroke-width="0.35"/>'
+                    f'stroke-width="{w or 0.35:.2f}"/>'
                 )
             elif kind == "rectangle":
                 coords = " ".join(f"{x:.2f},{y:.2f}" for x, y in prim["corners_mm"])
                 lines.append(
                     f'<polygon data-primitive="rectangle" points="{coords}" '
-                    f'fill="none" stroke="#000" stroke-width="0.35"/>'
+                    f'fill="none" stroke="#000" stroke-width="{w or 0.35:.2f}"/>'
                 )
             else:
                 coords = " ".join(f"{x:.2f},{y:.2f}" for x, y in prim["points_mm"])
                 tag = "polygon" if kind == "polygon" else "polyline"
                 lines.append(
                     f'<{tag} points="{coords}" fill="none" stroke="#000" '
-                    f'stroke-width="0.30"/>'
+                    f'stroke-width="{w or 0.30:.2f}"/>'
                 )
     else:
         for line in polylines:
             pts = line["points"]
+            w_px = line.get("width_px")
+            w_mm = None if w_px is None else float(w_px) * MM_PER_PX
             if len(pts) == 1:
                 cx, cy = pts[0][0] * MM_PER_PX_X, pts[0][1] * MM_PER_PX_Y
                 lines.append(
-                    f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="0.30" fill="#000"/>'
+                    f'<circle cx="{cx:.2f}" cy="{cy:.2f}" '
+                    f'r="{max((w_mm or 0.60) / 2, 0.10):.2f}" fill="#000"/>'
                 )
                 continue
             coords = " ".join(
@@ -1459,7 +1479,7 @@ def write_svg(polylines, out_path, epsilon, thinning, primitives=None):
             tag = "polygon" if line["closed"] else "polyline"
             lines.append(
                 f'<{tag} points="{coords}" fill="none" stroke="#000" '
-                f'stroke-width="0.30"/>'
+                f'stroke-width="{w_mm or 0.30:.2f}"/>'
             )
     lines.append("</svg>")
     Path(out_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
