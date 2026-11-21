@@ -102,8 +102,16 @@ def test_simplify_closed_collapse_does_not_repeat_anchor():
     assert len(out) == len(np.unique(out, axis=0)) == 2
 
 
-def test_simplify_closed_keeps_vertices_when_one_arc_collapses():
-    """Só um arco colapsado: nenhum vértice duplicado nem perdido."""
+def test_simplify_closed_mixed_collapsed_arc_keeps_interior_vertex():
+    """Um arco colapsa (s2 com 2 vértices) e o outro mantém o vértice
+    interno: o resultado é o triângulo, sem repetir a âncora inicial."""
+    pts = np.array([[0, 0], [5, 3], [10, 0], [5, 0.2]], dtype=np.float64)
+    out = ev.simplify(pts, 1.0, True)
+    assert out.tolist() == [[0, 0], [5, 3], [10, 0]]
+
+
+def test_simplify_closed_no_arc_collapses_keeps_all_vertices():
+    """Nenhum arco colapsa (3 vértices em cada): nada duplicado nem perdido."""
     pts = np.array([[0, 0], [5, 0.2], [10, 0], [10, 10], [0, 10]], dtype=np.float64)
     out = ev.simplify(pts, 1.0, True)
     assert len(out) == len(np.unique(out, axis=0))
