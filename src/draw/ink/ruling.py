@@ -67,6 +67,7 @@ _PROB_MIN_RUN = 12  # colunas mínimas contínuas para proteger um braço
 # Um cruzamento de caneta também engrossa todas, mas só por poucas colunas; por
 # isso a faixa exige >= _GUTTER_MIN_W colunas seguidas com a maioria das linhas
 # grossas, e nela a espessura apagável sobe de _GUTTER_EXTRA px.
+_MIN_VISIBLE = 2 * _SUPPORT_W  # colunas na imagem p/ valer uma linha extrapolada
 _GUTTER_FRAC = 0.6  # fração das linhas grossas na coluna
 _GUTTER_MIN_W = 16  # colunas contínuas (mais largo que qualquer traço de caneta)
 _GUTTER_EDGE_RUN = 3  # colunas bastam num trecho que encosta na divisa
@@ -534,7 +535,12 @@ def _drop_unsupported(prob, seg, has=None):
     cnt_in = np.pad(inside, pad).reshape(k, n, _SUPPORT_W).sum(axis=2)
     width = np.minimum(_SUPPORT_W, x - np.arange(n) * _SUPPORT_W)  # largura real
     win_in = cnt_in >= 0.5 * width[None, :]
-    n_in = np.maximum(win_in.sum(axis=1), 1)
+    # A janela parcial final só entra na conta quando tem tinta: um resto vazio
+    # (a metade não é múltipla de _SUPPORT_W) não pode diluir o suporte das
+    # janelas inteiras.
+    partial = width < _SUPPORT_W
+    counted = win_in & (win_has | ~partial[None, :])
+    n_in = np.maximum(counted.sum(axis=1), 1)
     frac = (win_has & win_in).sum(axis=1) / n_in
     first = has.argmax(axis=1)
     last = x - 1 - has[:, ::-1].argmax(axis=1)
@@ -542,6 +548,9 @@ def _drop_unsupported(prob, seg, has=None):
         inside.sum(axis=1), 1
     )
     ok = np.minimum(frac, span / _MIN_SPAN * _MIN_SUPPORT) >= _MIN_SUPPORT
+    # Um trecho visível curto não se distingue de uma marca de caneta alinhada:
+    # sem pelo menos duas janelas de vista, a linha prevista não autoriza apagar.
+    ok &= inside.sum(axis=1) >= _MIN_VISIBLE
     keep = ~seg.extended | ok
     if keep.all():
         return seg

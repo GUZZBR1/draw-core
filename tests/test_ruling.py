@@ -575,17 +575,43 @@ def test_uneven_shadow_shoulders_do_not_exempt_the_whole_fold():
     assert (out[:, 566:634] > 0.5).sum() == 0
 
 
-def test_an_extrapolated_line_seen_only_in_the_last_partial_window_is_kept():
-    """Linha inclinada que so entra na imagem nas ultimas 35 colunas da trilha
-    e tem tinta nas ultimas 24 (a janela parcial final): o suporte conta essa
-    janela pela largura real (review #139)."""
-    xs = np.arange(600)
-    paths = np.stack([np.full(600, 100.0), 599.0 - (xs - 565.0)]).astype(np.float32)
-    seg = ruling.Segment(0, 600, paths, 40.0, np.array([False, True]))
+def _two_line_segment(n, second):
+    paths = np.stack([np.full(n, 100.0), second]).astype(np.float32)
+    return ruling.Segment(0, n, paths, 40.0, np.array([False, True]))
+
+
+def test_a_dash_on_a_predicted_line_clipped_to_the_last_columns_is_not_ruling():
+    """Linha prevista que so aparece nas ultimas 30 colunas, com um traco de
+    27 sobre ela: sozinho ele nao autoriza apagar (review #139)."""
+    x = np.arange(600)
+    seg = _two_line_segment(600, 599.0 - (x - 570.0))
     prob = np.zeros((600, 600), np.float32)
     prob[99:101, :] = 0.95
-    for x in range(576, 600):
-        y = int(round(paths[1, x]))
-        prob[y : y + 2, x] = 0.95
-    out = ruling._drop_unsupported(prob, seg)
-    assert out.paths.shape[0] == 2
+    for c in range(572, 600):
+        r = int(round(seg.paths[1, c]))
+        prob[r : r + 2, c] = 0.95
+    assert ruling._drop_unsupported(prob, seg).paths.shape[0] == 1
+
+
+def test_a_blank_partial_window_does_not_dilute_the_support_of_a_gapped_rule():
+    """Metade de 422 px (8 janelas + 38 vazios): tinta em 3 das 8 janelas
+    inteiras (37,5%) continua valendo (review #139)."""
+    seg = _two_line_segment(422, np.full(422, 200.0))
+    prob = np.zeros((600, 422), np.float32)
+    prob[99:101, :] = 0.95
+    for w in (0, 4, 7):
+        prob[200:202, w * 48 : w * 48 + 48] = 0.95
+    assert ruling._drop_unsupported(prob, seg).paths.shape[0] == 2
+
+
+def test_a_tilted_line_visible_over_three_windows_counts_its_partial_tail():
+    """Linha inclinada que entra a meio da trilha (120 colunas visiveis), com
+    tinta na janela inteira final e no resto parcial."""
+    xs = np.arange(600)
+    seg = _two_line_segment(600, 599.0 - (xs - 480.0))
+    prob = np.zeros((600, 600), np.float32)
+    prob[99:101, :] = 0.95
+    for c in range(528, 600):
+        r = int(round(seg.paths[1, c]))
+        prob[r : r + 2, c] = 0.95
+    assert ruling._drop_unsupported(prob, seg).paths.shape[0] == 2
