@@ -23,6 +23,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from draw import app as app_module  # noqa: E402
 from draw import config  # noqa: E402
 from draw import paper as paper_module  # noqa: E402
+from draw import selfcheck as selfcheck_module  # noqa: E402
+from draw import ui as ui_module  # noqa: E402
 from draw.infra import manifest as manifest_module  # noqa: E402
 from draw.perception import PRESENCE_VETO_LOGIT  # noqa: E402
 
@@ -226,7 +228,7 @@ def test_check_models_avisa_modelo_ausente(monkeypatch, tmp_path, capsys):
         "ensure_models",
         lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("offline")),
     )
-    assert app_module._check_models() is True
+    assert selfcheck_module._check_models() is True
     out = capsys.readouterr().out
     assert "modelo_ausente_xyz.onnx" in out
     assert "Release" in out
@@ -261,7 +263,7 @@ def test_check_models_baixa_modelo_ausente_e_valida(monkeypatch, tmp_path, capsy
         return [target]
 
     monkeypatch.setattr(manifest_module, "ensure_models", fake_ensure)
-    assert app_module._check_models() is True
+    assert selfcheck_module._check_models() is True
     out = capsys.readouterr().out
     assert "PASS: page_clean_unet.onnx confere com o manifesto" in out
 
@@ -300,7 +302,7 @@ def test_check_models_falha_em_limiar_invalido(monkeypatch, tmp_path, capsys):
     )
     monkeypatch.setattr(manifest_module, "DEFAULT_MODELS_DIR", tmp_path)
     monkeypatch.setattr(manifest_module, "verify_model", lambda path, **kw: entry)
-    assert app_module._check_models() is False
+    assert selfcheck_module._check_models() is False
     out = capsys.readouterr().out
     assert "FAIL" in out and "runtime_threshold" in out
     assert "PASS" not in out
@@ -322,7 +324,7 @@ def test_check_models_falha_em_divergencia(monkeypatch, tmp_path, capsys):
         "verify_model",
         lambda path, **kw: (_ for _ in ()).throw(RuntimeError("sha diverge")),
     )
-    assert app_module._check_models() is False
+    assert selfcheck_module._check_models() is False
     assert "FAIL" in capsys.readouterr().out
 
 
@@ -407,38 +409,38 @@ def test_save_stamp_unico_por_processo():
 
 
 def test_require_gui_backend_levanta_sem_highgui(monkeypatch):
-    monkeypatch.setattr(app_module, "_gui_backend_compiled", lambda: False)
+    monkeypatch.setattr(selfcheck_module, "_gui_backend_compiled", lambda: False)
     with pytest.raises(RuntimeError, match=r"draw-core\[gui\]"):
-        app_module._require_gui_backend()
+        selfcheck_module._require_gui_backend()
 
 
 def test_require_gui_backend_levanta_sem_display(monkeypatch):
     import subprocess
 
-    monkeypatch.setattr(app_module, "_gui_backend_compiled", lambda: True)
+    monkeypatch.setattr(selfcheck_module, "_gui_backend_compiled", lambda: True)
 
     def _aborted(*a, **kw):
         # O Qt morre por sinal sem display: rc != 0, sem excecao.
         return subprocess.CompletedProcess(a[0], -6, "", "")
 
-    monkeypatch.setattr(app_module.subprocess, "run", _aborted)
+    monkeypatch.setattr(selfcheck_module.subprocess, "run", _aborted)
     with pytest.raises(RuntimeError, match="display"):
-        app_module._require_gui_backend()
+        selfcheck_module._require_gui_backend()
 
 
 def test_require_gui_backend_ok_com_display(monkeypatch):
     import subprocess
 
     calls = []
-    monkeypatch.setattr(app_module, "_gui_backend_compiled", lambda: True)
+    monkeypatch.setattr(selfcheck_module, "_gui_backend_compiled", lambda: True)
     monkeypatch.setattr(
-        app_module.subprocess,
+        selfcheck_module.subprocess,
         "run",
         lambda cmd, **kw: (
             calls.append(cmd) or subprocess.CompletedProcess(cmd, 0, "", "")
         ),
     )
-    app_module._require_gui_backend()
+    selfcheck_module._require_gui_backend()
     # A sonda de janela roda isolada: Qt pode abortar o filho, nunca o app.
     assert len(calls) == 1
     assert calls[0][1] == "-c"
@@ -454,14 +456,14 @@ def test_gui_backend_compiled_le_buildinfo(monkeypatch):
         "  Media I/O:\n"
         "    JPEG:                        YES\n"
     )
-    monkeypatch.setattr(app_module.cv2, "getBuildInformation", lambda: fake_info)
-    assert app_module._gui_backend_compiled() is True
+    monkeypatch.setattr(selfcheck_module.cv2, "getBuildInformation", lambda: fake_info)
+    assert selfcheck_module._gui_backend_compiled() is True
 
     headless = fake_info.replace("YES (ver 5.15.13)", "NO").replace(
         "JPEG:                        YES", "JPEG:                        NO"
     )
-    monkeypatch.setattr(app_module.cv2, "getBuildInformation", lambda: headless)
-    assert app_module._gui_backend_compiled() is False
+    monkeypatch.setattr(selfcheck_module.cv2, "getBuildInformation", lambda: headless)
+    assert selfcheck_module._gui_backend_compiled() is False
 
 
 def test_check_models_divergencia_nao_estrita_vira_aviso(monkeypatch, tmp_path, capsys):
@@ -480,47 +482,47 @@ def test_check_models_divergencia_nao_estrita_vira_aviso(monkeypatch, tmp_path, 
         "verify_model",
         lambda path, **kw: (_ for _ in ()).throw(RuntimeError("sha diverge")),
     )
-    assert app_module._check_models() is True
+    assert selfcheck_module._check_models() is True
     out = capsys.readouterr().out
     assert "AVISO" in out and "confere com o manifesto" not in out
 
 
 def test_run_check_fora_do_linux_degrada(monkeypatch, capsys):
     seen = {}
-    monkeypatch.setattr(app_module.sys, "platform", "darwin")
-    monkeypatch.setattr(app_module, "_require_gui_backend", lambda: None)
-    monkeypatch.setattr(app_module, "_check_models", lambda: True)
+    monkeypatch.setattr(selfcheck_module.sys, "platform", "darwin")
+    monkeypatch.setattr(selfcheck_module, "_require_gui_backend", lambda: None)
+    monkeypatch.setattr(selfcheck_module, "_check_models", lambda: True)
     monkeypatch.setattr(
-        app_module,
+        selfcheck_module,
         "_check_camera_open",
         lambda source, label: seen.setdefault("open", (source, label)) or True,
     )
     # Sem /dev/video* e sem grp no caminho: nao deve explodir.
-    assert app_module.run_check(0) == 0
+    assert selfcheck_module.run_check(0) == 0
     assert seen["open"] == (0, "camera 0")
     assert "AVISO" in capsys.readouterr().out
 
 
 def test_run_check_avisa_sem_backend_gui(monkeypatch, capsys):
     monkeypatch.setattr(
-        app_module,
+        selfcheck_module,
         "_require_gui_backend",
         lambda: (_ for _ in ()).throw(RuntimeError("sem GUI")),
     )
-    monkeypatch.setattr(app_module, "_check_models", lambda: True)
-    monkeypatch.setattr(app_module, "_check_camera_open", lambda *a: False)
-    monkeypatch.setattr(app_module.sys, "platform", "darwin")
-    assert app_module.run_check(0) == 1
+    monkeypatch.setattr(selfcheck_module, "_check_models", lambda: True)
+    monkeypatch.setattr(selfcheck_module, "_check_camera_open", lambda *a: False)
+    monkeypatch.setattr(selfcheck_module.sys, "platform", "darwin")
+    assert selfcheck_module.run_check(0) == 1
     assert "draw-core[gui]" in capsys.readouterr().out
 
 
 def test_gui_backend_compiled_gui_none(monkeypatch):
     monkeypatch.setattr(
-        app_module.cv2,
+        selfcheck_module.cv2,
         "getBuildInformation",
         lambda: "General configuration\n  GUI: NONE\n  Media I/O:\n    JPEG: YES\n",
     )
-    assert app_module._gui_backend_compiled() is False
+    assert selfcheck_module._gui_backend_compiled() is False
 
 
 def test_gui_backend_compiled_secao_irma_nao_conta(monkeypatch):
@@ -535,8 +537,8 @@ def test_gui_backend_compiled_secao_irma_nao_conta(monkeypatch):
         "    JPEG:                        YES\n"
         "    PNG:                         YES\n"
     )
-    monkeypatch.setattr(app_module.cv2, "getBuildInformation", lambda: info)
-    assert app_module._gui_backend_compiled() is False
+    monkeypatch.setattr(selfcheck_module.cv2, "getBuildInformation", lambda: info)
+    assert selfcheck_module._gui_backend_compiled() is False
 
 
 class _PacedStallFeed:
@@ -607,7 +609,7 @@ def _patch_marker_run(monkeypatch, feed, keys):
         return next(key_iter, ord("q"))
 
     monkeypatch.setattr(app_module, "_require_gui_backend", lambda: None)
-    monkeypatch.setattr(app_module, "_open_window", lambda fullscreen: None)
+    monkeypatch.setattr(ui_module, "_open_window", lambda fullscreen: None)
     monkeypatch.setattr(app_module.cv2, "resizeWindow", lambda *a, **k: None)
     monkeypatch.setattr(app_module, "open_capture", lambda *a, **k: feed)
     monkeypatch.setattr(paper_module, "warp_paper", fake_warp)
@@ -652,7 +654,7 @@ def test_markers_stall_apos_quadro_sem_folha_nao_salva(monkeypatch, tmp_path, ca
 
 
 def _reset_camera_menu(monkeypatch, current=0):
-    state = app_module._camera_menu
+    state = ui_module._camera_menu
     monkeypatch.setitem(state, "open", False)
     monkeypatch.setitem(state, "items", [])
     monkeypatch.setitem(state, "current", current)
@@ -662,133 +664,133 @@ def _reset_camera_menu(monkeypatch, current=0):
 
 
 def test_camera_label_formats_each_kind_of_source():
-    assert app_module._camera_label(2) == "Camera 2"
-    assert app_module._camera_label("http://192.168.0.10:8080/video") == (
+    assert ui_module._camera_label(2) == "Camera 2"
+    assert ui_module._camera_label("http://192.168.0.10:8080/video") == (
         "Rede: 192.168.0.10:8080"
     )
-    assert app_module._camera_label("captures/sessao.drawcap") == "sessao.drawcap"
+    assert ui_module._camera_label("captures/sessao.drawcap") == "sessao.drawcap"
 
 
 def test_list_cameras_adds_the_current_source_when_it_is_not_a_device(monkeypatch):
     monkeypatch.setattr(
-        app_module, "_video_nodes", lambda: ["/dev/video0", "/dev/video2"]
+        ui_module, "_video_nodes", lambda: ["/dev/video0", "/dev/video2"]
     )
-    assert app_module._list_cameras(0) == [("Camera 0", 0), ("Camera 2", 2)]
+    assert ui_module._list_cameras(0) == [("Camera 0", 0), ("Camera 2", 2)]
     url = "http://host/video"
-    assert app_module._list_cameras(url)[0] == ("Rede: host", url)
+    assert ui_module._list_cameras(url)[0] == ("Rede: host", url)
 
 
 def test_camera_click_opens_the_menu_and_selects_another_camera(monkeypatch):
     state = _reset_camera_menu(monkeypatch)
     monkeypatch.setattr(
-        app_module, "_video_nodes", lambda: ["/dev/video0", "/dev/video2"]
+        ui_module, "_video_nodes", lambda: ["/dev/video0", "/dev/video2"]
     )
-    monkeypatch.setattr(app_module, "_window_size", lambda: (1600, 640))
-    layout = app_module._camera_layout()
+    monkeypatch.setattr(ui_module, "_window_size", lambda: (1600, 640))
+    layout = ui_module._camera_layout()
     cx, cy, _ = layout["dot"]
-    assert app_module._camera_click(cx, cy) is True
+    assert ui_module._camera_click(cx, cy) is True
     assert state["open"] and len(state["items"]) == 2
-    layout = app_module._camera_layout()
+    layout = ui_module._camera_layout()
     rx, ry, _, _ = layout["rows"][1]
-    assert app_module._camera_click(rx + 3, ry + 3) is True
+    assert ui_module._camera_click(rx + 3, ry + 3) is True
     assert not state["open"] and state["request"] == 2
 
 
 def test_camera_click_on_the_current_camera_or_outside_requests_nothing(monkeypatch):
     state = _reset_camera_menu(monkeypatch)
     monkeypatch.setattr(
-        app_module, "_video_nodes", lambda: ["/dev/video0", "/dev/video2"]
+        ui_module, "_video_nodes", lambda: ["/dev/video0", "/dev/video2"]
     )
-    monkeypatch.setattr(app_module, "_window_size", lambda: (1600, 640))
-    cx, cy, _ = app_module._camera_layout()["dot"]
-    app_module._camera_click(cx, cy)
-    rx, ry, _, _ = app_module._camera_layout()["rows"][0]
-    assert app_module._camera_click(rx + 3, ry + 3) is True
+    monkeypatch.setattr(ui_module, "_window_size", lambda: (1600, 640))
+    cx, cy, _ = ui_module._camera_layout()["dot"]
+    ui_module._camera_click(cx, cy)
+    rx, ry, _, _ = ui_module._camera_layout()["rows"][0]
+    assert ui_module._camera_click(rx + 3, ry + 3) is True
     assert state["request"] is None and not state["open"]
-    app_module._camera_click(cx, cy)
-    assert app_module._camera_click(5, 5) is False
+    ui_module._camera_click(cx, cy)
+    assert ui_module._camera_click(5, 5) is False
     assert not state["open"] and state["request"] is None
 
 
 def _reset_settings(monkeypatch):
-    state = app_module._settings
+    state = ui_module._settings
     monkeypatch.setitem(state, "open", False)
     monkeypatch.setitem(
-        state, "on", {key: False for key, _ in app_module._SETTINGS_ITEMS}
+        state, "on", {key: False for key, _ in ui_module._SETTINGS_ITEMS}
     )
-    monkeypatch.setitem(app_module._camera_menu, "open", False)
-    monkeypatch.setattr(app_module, "_window_size", lambda: (1600, 640))
+    monkeypatch.setitem(ui_module._camera_menu, "open", False)
+    monkeypatch.setattr(ui_module, "_window_size", lambda: (1600, 640))
     return state
 
 
 def test_settings_click_opens_and_toggles_options_without_closing(monkeypatch):
     state = _reset_settings(monkeypatch)
-    cx, cy, _ = app_module._settings_layout()["gear"]
-    assert app_module._settings_click(cx, cy) is True and state["open"]
-    rx, ry, _, _ = app_module._settings_layout()["rows"][1]
-    assert app_module._settings_click(rx + 3, ry + 3) is True
+    cx, cy, _ = ui_module._settings_layout()["gear"]
+    assert ui_module._settings_click(cx, cy) is True and state["open"]
+    rx, ry, _, _ = ui_module._settings_layout()["rows"][1]
+    assert ui_module._settings_click(rx + 3, ry + 3) is True
     assert state["open"] and state["on"]["latency"] is True
-    assert app_module._settings_click(rx + 3, ry + 3) is True
+    assert ui_module._settings_click(rx + 3, ry + 3) is True
     assert state["on"]["latency"] is False
-    assert app_module._settings_click(5, 5) is False and not state["open"]
+    assert ui_module._settings_click(5, 5) is False and not state["open"]
 
 
 def test_hud_values_only_show_what_is_enabled(monkeypatch):
     state = _reset_settings(monkeypatch)
-    monkeypatch.setitem(app_module._hud, "captured_at", None)
-    monkeypatch.setitem(app_module._hud, "fps", 14.5)
-    monkeypatch.setitem(app_module._mouse, "pos", (10, 20))
-    assert app_module._hud_values() == {"probe": None, "latency": None, "fps": None}
+    monkeypatch.setitem(ui_module._hud, "captured_at", None)
+    monkeypatch.setitem(ui_module._hud, "fps", 14.5)
+    monkeypatch.setitem(ui_module._mouse, "pos", (10, 20))
+    assert ui_module._hud_values() == {"probe": None, "latency": None, "fps": None}
     state["on"].update(probe=True, fps=True)
-    values = app_module._hud_values()
+    values = ui_module._hud_values()
     assert values["probe"] == (10, 20) and values["fps"] == 14.5
 
 
 def test_apply_fullscreen_only_calls_cv2_when_the_option_changes(monkeypatch):
     calls = []
     monkeypatch.setattr(
-        app_module.cv2, "setWindowProperty", lambda *args: calls.append(args)
+        ui_module.cv2, "setWindowProperty", lambda *args: calls.append(args)
     )
-    monkeypatch.setattr(app_module, "_fullscreen_applied", [False])
-    monkeypatch.setitem(app_module._settings["on"], "fullscreen", False)
-    app_module._apply_fullscreen()
+    monkeypatch.setattr(ui_module, "_fullscreen_applied", [False])
+    monkeypatch.setitem(ui_module._settings["on"], "fullscreen", False)
+    ui_module._apply_fullscreen()
     assert calls == []
-    app_module._settings["on"]["fullscreen"] = True
-    app_module._apply_fullscreen()
-    app_module._apply_fullscreen()
-    assert [c[2] for c in calls] == [app_module.cv2.WINDOW_FULLSCREEN]
-    app_module._settings["on"]["fullscreen"] = False
-    app_module._apply_fullscreen()
-    assert [c[2] for c in calls][-1] == app_module.cv2.WINDOW_NORMAL
+    ui_module._settings["on"]["fullscreen"] = True
+    ui_module._apply_fullscreen()
+    ui_module._apply_fullscreen()
+    assert [c[2] for c in calls] == [ui_module.cv2.WINDOW_FULLSCREEN]
+    ui_module._settings["on"]["fullscreen"] = False
+    ui_module._apply_fullscreen()
+    assert [c[2] for c in calls][-1] == ui_module.cv2.WINDOW_NORMAL
     assert len(calls) == 2
 
 
 def test_mouse_events_are_mapped_back_to_layout_coordinates(monkeypatch):
-    monkeypatch.setitem(app_module._view_map, "scale", 0.5)
-    monkeypatch.setitem(app_module._view_map, "offset", (100, 40))
-    monkeypatch.setitem(app_module._mouse, "pos", None)
-    app_module._on_mouse(app_module.cv2.EVENT_MOUSEMOVE, 300, 200, 0, None)
-    assert app_module._mouse["pos"] == (400, 320)
+    monkeypatch.setitem(ui_module._view_map, "scale", 0.5)
+    monkeypatch.setitem(ui_module._view_map, "offset", (100, 40))
+    monkeypatch.setitem(ui_module._mouse, "pos", None)
+    ui_module._on_mouse(ui_module.cv2.EVENT_MOUSEMOVE, 300, 200, 0, None)
+    assert ui_module._mouse["pos"] == (400, 320)
 
 
 def test_window_size_uses_the_real_rect_down_to_a_small_floor(monkeypatch):
-    monkeypatch.setattr(app_module, "_window_sized", {True})
-    monkeypatch.setattr(app_module, "_window_rect", lambda: (400, 200))
-    assert app_module._window_size() == (400, 200)
-    monkeypatch.setattr(app_module, "_window_rect", lambda: (300, 100))
-    assert app_module._window_size() == (1600, 640)
+    monkeypatch.setattr(ui_module, "_window_sized", {True})
+    monkeypatch.setattr(ui_module, "_window_rect", lambda: (400, 200))
+    assert ui_module._window_size() == (400, 200)
+    monkeypatch.setattr(ui_module, "_window_rect", lambda: (300, 100))
+    assert ui_module._window_size() == (1600, 640)
 
 
 def _stub_show_gui(monkeypatch, moves):
     """Stub do backend de janela para exercitar _show sem display."""
-    monkeypatch.setattr(app_module.cv2, "resizeWindow", lambda *a, **k: None)
-    monkeypatch.setattr(app_module.cv2, "imshow", lambda *a, **k: None)
-    monkeypatch.setattr(app_module.cv2, "setWindowProperty", lambda *a, **k: None)
-    monkeypatch.setattr(app_module.cv2, "moveWindow", lambda *a, **k: moves.append(a))
-    monkeypatch.setattr(app_module, "_window_rect", lambda: (1600, 640))
-    monkeypatch.setattr(app_module, "_window_sized", set())
-    monkeypatch.setattr(app_module, "_window_place_until", [0.0])
-    monkeypatch.setattr(app_module, "_fullscreen_applied", [True])
+    monkeypatch.setattr(ui_module.cv2, "resizeWindow", lambda *a, **k: None)
+    monkeypatch.setattr(ui_module.cv2, "imshow", lambda *a, **k: None)
+    monkeypatch.setattr(ui_module.cv2, "setWindowProperty", lambda *a, **k: None)
+    monkeypatch.setattr(ui_module.cv2, "moveWindow", lambda *a, **k: moves.append(a))
+    monkeypatch.setattr(ui_module, "_window_rect", lambda: (1600, 640))
+    monkeypatch.setattr(ui_module, "_window_sized", set())
+    monkeypatch.setattr(ui_module, "_window_place_until", [0.0])
+    monkeypatch.setattr(ui_module, "_fullscreen_applied", [True])
 
 
 def test_show_posiciona_a_janela_ate_o_prazo(monkeypatch):
@@ -801,17 +803,17 @@ def test_show_posiciona_a_janela_ate_o_prazo(monkeypatch):
     moves = []
     _stub_show_gui(monkeypatch, moves)
     now = [1000.0]
-    monkeypatch.setattr(app_module, "time", SimpleNamespace(monotonic=lambda: now[0]))
-    monkeypatch.setitem(app_module._settings["on"], "fullscreen", False)
+    monkeypatch.setattr(ui_module, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setitem(ui_module._settings["on"], "fullscreen", False)
     frame = np.zeros((640, 1600, 3), np.uint8)
-    app_module._show(frame)
+    ui_module._show(frame)
     assert moves == []
-    app_module._show(frame)
+    ui_module._show(frame)
     assert moves == [
-        (app_module._WINDOW, app_module._WINDOW_PLACE_X, app_module._WINDOW_PLACE_Y)
+        (ui_module._WINDOW, ui_module._WINDOW_PLACE_X, ui_module._WINDOW_PLACE_Y)
     ]
-    now[0] += app_module._WINDOW_PLACE_SECONDS + 1.0
-    app_module._show(frame)
+    now[0] += ui_module._WINDOW_PLACE_SECONDS + 1.0
+    ui_module._show(frame)
     assert len(moves) == 1
 
 
@@ -825,12 +827,12 @@ def test_show_nao_move_a_janela_em_fullscreen(monkeypatch):
     """
     moves = []
     _stub_show_gui(monkeypatch, moves)
-    monkeypatch.setitem(app_module._settings["on"], "fullscreen", True)
+    monkeypatch.setitem(ui_module._settings["on"], "fullscreen", True)
     frame = np.zeros((640, 1600, 3), np.uint8)
     for _ in range(5):
-        app_module._show(frame)
+        ui_module._show(frame)
     assert moves == []
-    assert app_module._window_place_until[0] > 0.0
+    assert ui_module._window_place_until[0] > 0.0
 
 
 def test_show_nao_reabre_posicionamento_ao_sair_do_fullscreen(monkeypatch):
@@ -838,13 +840,13 @@ def test_show_nao_reabre_posicionamento_ao_sair_do_fullscreen(monkeypatch):
     moves = []
     _stub_show_gui(monkeypatch, moves)
     now = [1000.0]
-    monkeypatch.setattr(app_module, "time", SimpleNamespace(monotonic=lambda: now[0]))
-    monkeypatch.setitem(app_module._settings["on"], "fullscreen", True)
+    monkeypatch.setattr(ui_module, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setitem(ui_module._settings["on"], "fullscreen", True)
     frame = np.zeros((640, 1600, 3), np.uint8)
-    app_module._show(frame)
-    now[0] += app_module._WINDOW_PLACE_SECONDS + 1.0
-    app_module._settings["on"]["fullscreen"] = False
-    app_module._show(frame)
+    ui_module._show(frame)
+    now[0] += ui_module._WINDOW_PLACE_SECONDS + 1.0
+    ui_module._settings["on"]["fullscreen"] = False
+    ui_module._show(frame)
     assert moves == []
 
 
@@ -857,12 +859,12 @@ def test_start_wsl_foreground_helper_so_dispara_powershell_em_wsl(monkeypatch):
     SetForegroundWindow.
     """
     calls = []
-    monkeypatch.setattr(app_module.camera_module, "is_wsl", lambda: False)
-    monkeypatch.setattr(app_module.subprocess, "Popen", lambda *a, **k: calls.append(a))
-    assert app_module._start_wsl_foreground_helper("Draw 4242") is None
+    monkeypatch.setattr(ui_module.camera_module, "is_wsl", lambda: False)
+    monkeypatch.setattr(ui_module.subprocess, "Popen", lambda *a, **k: calls.append(a))
+    assert ui_module._start_wsl_foreground_helper("Draw 4242") is None
     assert calls == []
-    monkeypatch.setattr(app_module.camera_module, "is_wsl", lambda: True)
-    app_module._start_wsl_foreground_helper("Draw 4242")
+    monkeypatch.setattr(ui_module.camera_module, "is_wsl", lambda: True)
+    ui_module._start_wsl_foreground_helper("Draw 4242")
     assert len(calls) == 1
     argv = calls[0][0]
     assert argv[0] == "powershell.exe"
@@ -878,23 +880,23 @@ def test_publish_usa_titulo_unico_por_lancamento(monkeypatch):
     namespaces separados.
     """
     titles = []
-    monkeypatch.setattr(app_module.camera_module, "is_wsl", lambda: True)
-    monkeypatch.setattr(app_module.cv2, "setWindowTitle", lambda w, t: titles.append(t))
-    monkeypatch.setattr(app_module, "_window_token", [None])
-    monkeypatch.setattr(app_module, "_window_title_restore_at", [0.0])
+    monkeypatch.setattr(ui_module.camera_module, "is_wsl", lambda: True)
+    monkeypatch.setattr(ui_module.cv2, "setWindowTitle", lambda w, t: titles.append(t))
+    monkeypatch.setattr(ui_module, "_window_token", [None])
+    monkeypatch.setattr(ui_module, "_window_title_restore_at", [0.0])
     launched = []
     monkeypatch.setattr(
-        app_module, "_start_wsl_foreground_helper", lambda t: launched.append(t)
+        ui_module, "_start_wsl_foreground_helper", lambda t: launched.append(t)
     )
-    app_module._publish_unique_title_and_raise()
+    ui_module._publish_unique_title_and_raise()
     assert re.fullmatch(r"Draw \d+-[0-9a-f]{6}", titles[0])
     assert launched == titles
 
 
 @pytest.mark.slow
 @pytest.mark.skipif(
-    not app_module.camera_module.is_wsl()
-    or not app_module._gui_backend_compiled()
+    not ui_module.camera_module.is_wsl()
+    or not selfcheck_module._gui_backend_compiled()
     or not os.environ.get("DISPLAY")
     or shutil.which("powershell.exe") is None,
     reason="fumaca de foreground so roda em WSLg com GUI e powershell",
@@ -906,10 +908,10 @@ def test_foreground_helper_levanta_a_janela_real_no_wslg():
     token), nao por titulo: janela ja ativa ou outra janela chamada
     "Draw" em foreground nao aprovam o teste.
     """
-    token = f"{app_module._WINDOW} smoke-{os.getpid()}-x1"
-    cv2.namedWindow(app_module._WINDOW, cv2.WINDOW_NORMAL)
-    cv2.setWindowTitle(app_module._WINDOW, token)
-    cv2.imshow(app_module._WINDOW, np.zeros((120, 320, 3), np.uint8))
+    token = f"{ui_module._WINDOW} smoke-{os.getpid()}-x1"
+    cv2.namedWindow(ui_module._WINDOW, cv2.WINDOW_NORMAL)
+    cv2.setWindowTitle(ui_module._WINDOW, token)
+    cv2.imshow(ui_module._WINDOW, np.zeros((120, 320, 3), np.uint8))
     proc = None
     try:
         for _ in range(60):  # realiza a janela e deixa o RAIL mapear
@@ -940,7 +942,7 @@ def test_foreground_helper_levanta_a_janela_real_no_wslg():
         )
         target = int(found.stdout.strip() or "0")
         assert target != 0, "janela do token nao apareceu no Windows (RAIL)"
-        proc = app_module._start_wsl_foreground_helper(token)
+        proc = ui_module._start_wsl_foreground_helper(token)
         assert proc is not None
         ps_fg = (
             "$s='using System;using System.Runtime.InteropServices;"
@@ -970,39 +972,39 @@ def test_show_restaura_o_titulo_depois_do_prazo_do_helper(monkeypatch):
     moves = []
     _stub_show_gui(monkeypatch, moves)
     now = [1000.0]
-    monkeypatch.setattr(app_module, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(ui_module, "time", SimpleNamespace(monotonic=lambda: now[0]))
     titles = []
-    monkeypatch.setattr(app_module.cv2, "setWindowTitle", lambda w, t: titles.append(t))
-    monkeypatch.setattr(app_module, "_window_token", ["Draw 4242"])
-    monkeypatch.setattr(app_module, "_window_title_restore_at", [now[0] + 10.0])
+    monkeypatch.setattr(ui_module.cv2, "setWindowTitle", lambda w, t: titles.append(t))
+    monkeypatch.setattr(ui_module, "_window_token", ["Draw 4242"])
+    monkeypatch.setattr(ui_module, "_window_title_restore_at", [now[0] + 10.0])
     frame = np.zeros((640, 1600, 3), np.uint8)
-    app_module._show(frame)
+    ui_module._show(frame)
     assert titles == []
     now[0] += 11.0
-    app_module._show(frame)
-    assert titles == [app_module._WINDOW]
-    assert app_module._window_token[0] is None
+    ui_module._show(frame)
+    assert titles == [ui_module._WINDOW]
+    assert ui_module._window_token[0] is None
 
 
 def test_camera_menu_with_many_cameras_scrolls_and_selects_absolute_rows(monkeypatch):
     state = _reset_camera_menu(monkeypatch)
-    monkeypatch.setattr(app_module, "_window_size", lambda: (1600, 640))
+    monkeypatch.setattr(ui_module, "_window_size", lambda: (1600, 640))
     monkeypatch.setattr(
-        app_module,
+        ui_module,
         "_list_cameras",
         lambda current: [(f"Camera {i}", i) for i in range(30)],
     )
     monkeypatch.setitem(state, "scroll", 0)
-    cx, cy, _ = app_module._camera_layout()["dot"]
-    assert app_module._camera_click(cx, cy) is True
-    fx = app_module._camera_fx()
-    layout = app_module._camera_layout()
+    cx, cy, _ = ui_module._camera_layout()["dot"]
+    assert ui_module._camera_click(cx, cy) is True
+    fx = ui_module._camera_fx()
+    layout = ui_module._camera_layout()
     assert len(fx["items"]) == layout["visible"] < 30
     monkeypatch.setitem(state, "scroll", 3)
-    layout = app_module._camera_layout()
+    layout = ui_module._camera_layout()
     assert layout["first"] == 3
     rx, ry, _, _ = layout["rows"][0]
-    assert app_module._camera_click(rx + 3, ry + 3) is True
+    assert ui_module._camera_click(rx + 3, ry + 3) is True
     assert state["request"] == 3
 
 
@@ -1019,16 +1021,16 @@ def test_open_ready_source_requires_a_first_frame(monkeypatch):
         def release(self):
             _Dead.released += 1
 
-    monkeypatch.setattr(app_module, "open_capture", lambda *a, **k: _Dead())
+    monkeypatch.setattr(ui_module, "open_capture", lambda *a, **k: _Dead())
     with pytest.raises(RuntimeError, match="nao entregou quadros"):
-        app_module._open_ready_source("x", ready_seconds=0.3)
+        ui_module._open_ready_source("x", ready_seconds=0.3)
 
     class _Live(_Dead):
         def read(self):
             return True, np.zeros((8, 8, 3), np.uint8)
 
-    monkeypatch.setattr(app_module, "open_capture", lambda *a, **k: _Live())
-    source = app_module._open_ready_source("x", ready_seconds=2.0)
+    monkeypatch.setattr(ui_module, "open_capture", lambda *a, **k: _Live())
+    source = ui_module._open_ready_source("x", ready_seconds=2.0)
     try:
         assert source.wait_next(0, timeout=1.0) is not None
     finally:
@@ -1038,41 +1040,41 @@ def test_open_ready_source_requires_a_first_frame(monkeypatch):
 def test_waiting_view_keeps_the_controls_available():
     from draw import view as view_module
 
-    waiting = app_module._waiting_view()
+    waiting = ui_module._waiting_view()
     view = view_module.compose_view(waiting, view_module.blank_sheet())
     assert waiting.shape == (720, 1280, 3) and view.shape == (640, 1600, 3)
 
 
 def test_camera_menu_arrows_scroll_within_bounds_without_selecting(monkeypatch):
     state = _reset_camera_menu(monkeypatch)
-    monkeypatch.setattr(app_module, "_window_size", lambda: (1600, 640))
+    monkeypatch.setattr(ui_module, "_window_size", lambda: (1600, 640))
     monkeypatch.setattr(
-        app_module,
+        ui_module,
         "_list_cameras",
         lambda current: [(f"Camera {i}", i) for i in range(30)],
     )
-    cx, cy, _ = app_module._camera_layout()["dot"]
-    app_module._camera_click(cx, cy)
-    layout = app_module._camera_layout()
+    cx, cy, _ = ui_module._camera_layout()["dot"]
+    ui_module._camera_click(cx, cy)
+    layout = ui_module._camera_layout()
     ux, uy, _, _ = layout["scroll_up"]
     dx, dy, _, _ = layout["scroll_down"]
-    assert app_module._camera_click(ux + 2, uy + 2) is True and state["scroll"] == 0
+    assert ui_module._camera_click(ux + 2, uy + 2) is True and state["scroll"] == 0
     for _ in range(100):
-        assert app_module._camera_click(dx + 2, dy + 2) is True
-    layout = app_module._camera_layout()
+        assert ui_module._camera_click(dx + 2, dy + 2) is True
+    layout = ui_module._camera_layout()
     assert state["scroll"] == 30 - layout["visible"] == layout["first"]
     assert state["open"] and state["request"] is None
-    assert app_module._camera_click(ux + 2, uy + 2) is True
+    assert ui_module._camera_click(ux + 2, uy + 2) is True
     assert state["scroll"] == 30 - layout["visible"] - 1, "sobe 1 de imediato"
 
 
 def test_mouse_wheel_events_are_ignored_by_the_handler(monkeypatch):
-    monkeypatch.setitem(app_module._view_map, "scale", 1.0)
-    monkeypatch.setitem(app_module._view_map, "offset", (0, 0))
-    monkeypatch.setitem(app_module._mouse, "pos", None)
+    monkeypatch.setitem(ui_module._view_map, "scale", 1.0)
+    monkeypatch.setitem(ui_module._view_map, "offset", (0, 0))
+    monkeypatch.setitem(ui_module._mouse, "pos", None)
     _reset_camera_menu(monkeypatch)
-    app_module._camera_menu["open"] = True
-    app_module._on_mouse(app_module.cv2.EVENT_MOUSEWHEEL, 5, 5, 7 << 16, None)
+    ui_module._camera_menu["open"] = True
+    ui_module._on_mouse(ui_module.cv2.EVENT_MOUSEWHEEL, 5, 5, 7 << 16, None)
 
 
 def test_main_orientation_paisagem_deita_a_grade(monkeypatch):
@@ -1176,7 +1178,7 @@ def test_run_warns_when_spread_mode_has_no_neural_detector(
 
     monkeypatch.setattr(app_module, "_apply_opencv_thread_cap", lambda: None)
     monkeypatch.setattr(app_module, "_require_gui_backend", lambda: None)
-    monkeypatch.setattr(app_module, "_open_window", lambda _fullscreen: None)
+    monkeypatch.setattr(ui_module, "_open_window", lambda _fullscreen: None)
     monkeypatch.setattr(app_module, "_provision_official_models", lambda *_args: None)
     monkeypatch.setattr(app_module, "_DEFAULT_SHEET_MODEL", tmp_path / "missing.onnx")
     monkeypatch.setattr(app_module.cv2, "destroyAllWindows", lambda: None)

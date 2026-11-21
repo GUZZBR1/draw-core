@@ -9,6 +9,7 @@ import pytest
 
 from draw import app as app_module
 from draw import camera as camera_module
+from draw import ui as ui_module
 from draw.camera import INPUT_ROTATIONS, LatestFrameCapture
 
 
@@ -99,15 +100,15 @@ def test_camera_switch_keeps_the_rotation(monkeypatch, tmp_path):
 
     feed = _PacedStallFeed([_frame(), _frame()])
     _patch_marker_run(monkeypatch, feed, [ord("q")])
-    monkeypatch.setattr(app_module, "_open_ready_source", fake_open)
-    monkeypatch.setitem(app_module._camera_menu, "request", None)
+    monkeypatch.setattr(ui_module, "_open_ready_source", fake_open)
+    monkeypatch.setitem(ui_module._camera_menu, "request", None)
     base_wait = app_module.cv2.waitKey
     state = {"n": 0}
 
     def wait(ms):
         state["n"] += 1
         if state["n"] == 1:
-            app_module._camera_menu["request"] = 1
+            ui_module._camera_menu["request"] = 1
         elif state["n"] == 3:
             deadline = time.monotonic() + 3.0
             while not calls and time.monotonic() < deadline:
