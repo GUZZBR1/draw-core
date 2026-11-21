@@ -445,6 +445,8 @@ def test_reset_source_publishes_clear():
     calls = []
     pipe = pipeline_module.Pipeline.__new__(pipeline_module.Pipeline)
     pipe._on_ink = calls.append
+    pipe._source_id = 0
+    pipe.ink_worker = type("I", (), {"set_hand_presence": lambda *_: None})()
     pipe.tracker = type("T", (), {"reset": lambda self: None})()
     pipe.corner_history = type("C", (), {"clear": lambda self: None})()
     pipe.reset_source(1.0)

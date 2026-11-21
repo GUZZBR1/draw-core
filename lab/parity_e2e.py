@@ -80,19 +80,17 @@ class _SyncPresence:
         # medida e o relatório precisa dizer isso.
         self.real_samples = 0
 
-    def submit(self, frame, timestamp_ms):
+    def submit(self, frame, captured_at, *, source_id):
+        from draw.contracts import HandPresenceResult
+
         self._seq += 1
-        sample = self._presence.sample(frame, timestamp_ms)
-        if hasattr(sample, "present"):
-            present, moved = sample.present, sample.moved
-        else:
-            present, moved = sample
-        self._result = (self._seq, present, moved)
-        if present is not None:
+        sample = self._presence.sample(frame, captured_at * 1000.0, source_id=source_id)
+        self._result = HandPresenceResult(self._seq, captured_at, source_id, sample)
+        if sample.present is not None:
             self.real_samples += 1
 
     def poll(self, after_seq):
-        if self._result is None or self._result[0] <= after_seq:
+        if self._result is None or self._result.sequence <= after_seq:
             return None
         return self._result
 

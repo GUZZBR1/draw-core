@@ -274,12 +274,15 @@ class Pipeline:
         self.sheet_present = False
         self.clean_hand_present = None
         self.hand_presence_seq = 0
+        self._source_id = 0
         # Máscara neural da última detecção, em coordenadas de cena
         # (config.coverage). Retificada com a homografia de cada
         # warp de tinta, vira a cobertura que impede mesa vazada no
         # retificado de virar voto de tinta nova.
         self._coverage_mask = None
         self._hand_mask_det = None
+        self._hand_mask_captured_at = None
+        self._hand_mask_needs_refresh = False
 
         self.tracker = tracker.SheetTracker()
         self._detect_wake = (
@@ -423,6 +426,14 @@ class Pipeline:
             camera_mask = self.hand_masker.mask(frame)
             if camera_mask is not None:
                 visible = camera_mask == 0
+        if (
+            self._config.seg_hand_occlusion
+            and self._hand_mask_needs_refresh
+            and visible is None
+        ):
+            # Uma oclusão expirada é evidência indisponível. Só um sinal
+            # deste quadro pode liberar votos enquanto o detector a renova.
+            return
         if self._config.seg_hand_occlusion and self._hand_mask_det is not None:
             # seg_hand_occlusion: a classe mão do segmentador vira
             # segundo sinal de oclusão. Sem ela, a mão sobre a
@@ -577,8 +588,9 @@ class Pipeline:
         preservada: o canvas reinicia, como ao virar a folha, e a
         primeira folha da camera nova abre uma geracao limpa (a geracao
         antiga e invalidada: um snapshot dela ainda nao lido nao volta
-        para a tela nem para o Save). Resultados de deteccao capturados antes de since (em voo na
-        camera antiga) tambem sao descartados.
+        para a tela nem para o Save). Resultados de detecção ou de
+        presença capturados antes de since são descartados. Presença
+        também precisa pertencer à nova geração da fonte.
         """
         self.ink_session_open = False
         self.clean_recovery_pending = False
@@ -607,15 +619,77 @@ class Pipeline:
         self.display_gray = None
         self._coverage_mask = None
         self._hand_mask_det = None
+        self._hand_mask_captured_at = None
+        self._hand_mask_needs_refresh = False
+        self._source_id += 1
         self._detections_since = since
+        self.clean_hand_present = None
+        self.ink_worker.set_hand_presence(None)
         want_shape = (config_module.PAPER_H, config_module.PAPER_W, 3)
         buf = getattr(self, "canvas_buffer", None)
         if buf is not None and buf.shape != want_shape:
             self.canvas_buffer = np.empty(want_shape, dtype=np.uint8)
 
+    def _hand_mask_expired(self, mask_at, captured_at):
+        # Um heartbeat limita a idade do cache também durante o despertar.
+        # O quadro exatamente no limite ainda usa o último resultado (por
+        # exemplo, quando a captura e o heartbeat rodam ambos a 1 Hz).
+        return (
+            self._detect_wake is not None
+            and mask_at is not None
+            and captured_at - mask_at > self._config.detect_wake_interval_s + 1e-9
+        )
+
+    def _update_hand_mask(self, detection, captured_at):
+        if detection is None:
+            mask = self._hand_mask_det
+            mask_at = self._hand_mask_captured_at
+        else:
+            mask = detection.hand_mask
+            mask_at = detection.captured_at if mask is not None else None
+        expired = self._hand_mask_expired(mask_at, captured_at)
+        if detection is None and not expired:
+            return
+
+        hand_absent = self.clean_hand_present is False
+        had_hand_mask = (
+            hand_absent
+            and self._hand_mask_det is not None
+            and self._hand_mask_det.any()
+        )
+        before_exit = (
+            self._detect_wake is not None
+            and hand_absent
+            and self._hand_exit_at is not None
+            and mask_at is not None
+            and mask_at < self._hand_exit_at
+            and mask.any()
+        )
+        if mask is not None and not expired and not before_exit:
+            self._hand_mask_needs_refresh = False
+        elif (expired and mask.any()) or (
+            self._hand_mask_expired(self._hand_mask_captured_at, captured_at)
+            and self._hand_mask_det.any()
+        ):
+            self._hand_mask_needs_refresh = True
+
+        woke_for_stale_mask = before_exit and not self._stale_hand_woke
+        if woke_for_stale_mask:
+            self._stale_hand_woke = True
+            self._detect_wake.wake()
+        if expired or before_exit:
+            mask, mask_at = None, None
+        self._hand_mask_det = mask
+        self._hand_mask_captured_at = mask_at
+
+        if woke_for_stale_mask or (had_hand_mask and (mask is None or not mask.any())):
+            # Reabre a confirmação se a passada anterior ainda ocultava o traço.
+            self.ink_worker.set_hand_presence(True)
+            self.ink_worker.set_hand_presence(False)
+
     @property
     def last_hand_mask(self):
-        """Ultima mascara semantica de mao publicada pelo detector, ou None."""
+        """Máscara semântica mais recente ainda válida, ou None."""
         return self._hand_mask_det
 
     def step(self, packet):
@@ -640,46 +714,6 @@ class Pipeline:
             detected_verdict = det_result.verdict
             det_captured_at = det_result.captured_at
             self.detect_ms = det_result.detect_ms
-            # A máscara de mão do detector alimenta a oclusão
-            # semântica (seg_hand_occlusion) mesmo com a cobertura
-            # desligada — no legado as duas vinham na mesma flag,
-            # aqui são sinais separados. Um resultado sem máscara
-            # limpa a evidência velha em vez de deixar oclusão
-            # defasada.
-            had_hand_mask = self._hand_mask_det is not None and np.any(
-                self._hand_mask_det
-            )
-            self._hand_mask_det = det_result.hand_mask
-            has_hand_mask = self._hand_mask_det is not None and np.any(
-                self._hand_mask_det
-            )
-            if (
-                self._detect_wake is not None
-                and self.clean_hand_present is False
-                and not self._stale_hand_woke
-                and has_hand_mask
-                and self._hand_exit_at is not None
-                and det_captured_at is not None
-                and det_captured_at < self._hand_exit_at
-            ):
-                # Heartbeat capturado ANTES de a mao sair chegou atrasado
-                # com mascara de mao velha: descarta a mascara defasada e
-                # acorda o detector uma unica vez neste episodio de ausencia.
-                self._hand_mask_det = None
-                self._stale_hand_woke = True
-                self._detect_wake.wake()
-                # Re-arma a confirmacao caso a trabalhadora ja tenha gasto
-                # a passada de confirmacao sob mascara velha e descansado.
-                self.ink_worker.set_hand_presence(True)
-                self.ink_worker.set_hand_presence(False)
-            elif (
-                self.clean_hand_present is False and had_hand_mask and not has_hand_mask
-            ):
-                # A deteccao pos-saida acabou de limpar a mascara de mao que
-                # ainda cobria a pagina: re-arma a janela de confirmacao para
-                # garantir as passadas limpas completas sobre o traco novo.
-                self.ink_worker.set_hand_presence(True)
-                self.ink_worker.set_hand_presence(False)
             if self._config.coverage:
                 # A máscara de cobertura acompanha o quad que saiu
                 # dela — chegou junto, guarda junto; sem ela limpa
@@ -690,6 +724,7 @@ class Pipeline:
             detected_corners, detected_verdict = None, None
             det_captured_at = None
             ran_detection = False
+        self._update_hand_mask(det_result, packet.captured_at)
         base_should_detect = self.tracker.should_detect(self.frame_number)
         if self._detect_wake is not None:
             should_detect = self._detect_wake.should_detect(
@@ -729,7 +764,7 @@ class Pipeline:
                     self.tracker.corners,
                     ref_frame,
                     det_captured_at,
-                    hand_mask=self._hand_mask_det,
+                    hand_mask=det_result.hand_mask,
                     missed=self.tracker.missed,
                     has_pending=self.tracker.has_pending,
                 )
@@ -810,19 +845,21 @@ class Pipeline:
                 else None
             )
             if hp_result is not None:
+                self.hand_presence_seq = hp_result.sequence
+            if (
+                hp_result is not None
+                and hp_result.source_id == self._source_id
+                and hp_result.captured_at >= self._detections_since
+            ):
                 prev_hand_present = self.clean_hand_present
-                (
-                    self.hand_presence_seq,
-                    self.clean_hand_present,
-                    clean_hand_moved,
-                ) = hp_result
+                self.clean_hand_present = hp_result.sample.present
                 self.ink_worker.set_hand_presence(
                     self.clean_hand_present,
-                    moved=clean_hand_moved,
+                    moved=hp_result.sample.moved,
                 )
                 if self.clean_hand_present is False:
                     if prev_hand_present is not False:
-                        self._hand_exit_at = packet.captured_at
+                        self._hand_exit_at = hp_result.captured_at
                         self._stale_hand_woke = False
                     if (
                         not self._stale_hand_woke
@@ -866,9 +903,9 @@ class Pipeline:
             self.display_gray = gray_now
         if ran_detection and self.tracker.corners is not None:
             if self.hand_presence_worker is not None:
-                # Submete com o carimbo de captura: e ele
-                # que alimenta o modo VIDEO do landmarker.
-                self.hand_presence_worker.submit(frame, packet.captured_at * 1000.0)
+                self.hand_presence_worker.submit(
+                    frame, packet.captured_at, source_id=self._source_id
+                )
             if not self.ink_session_open:
                 # Folha nova na cena: canvas e geometria recomecam.
                 self.clean_mask = None
@@ -948,7 +985,9 @@ class Pipeline:
                 )
             if settled_due:
                 if self.hand_presence_worker is not None:
-                    self.hand_presence_worker.submit(frame, packet.captured_at * 1000.0)
+                    self.hand_presence_worker.submit(
+                        frame, packet.captured_at, source_id=self._source_id
+                    )
                 ink_corners = np.median(np.stack(self.corner_history), axis=0).astype(
                     np.float32
                 )

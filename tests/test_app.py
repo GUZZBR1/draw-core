@@ -117,6 +117,33 @@ def test_logit_fraco_deixa_o_classico_falar(classic):
     assert classic["calls"] == 1
 
 
+def test_classico_sem_fit_neural_ainda_publica_a_mascara_de_mao(classic):
+    """O fit neural de cantos falhou mas a segmentação rodou: a
+    máscara de mão sobe junto ao resultado clássico — sem ela, uma
+    oclusão vencida nunca renova e a tinta congela até a neural
+    voltar a fechar quad (review do PR #121)."""
+    classic["result"] = (_corners(), "paper")
+    neural = _FakeNeural(None, None, logit=-1.0, mask=None)
+    neural.last_hand_mask = np.zeros((30, 40), np.uint8)  # all-clear
+    corners, verdict, trace, extras = app_module._detect_sheet_combined_traced(
+        _frame(), neural
+    )
+    assert trace["source"] == "classic" and corners is not None
+    assert extras["hand_mask"].shape == _frame().shape[:2]
+    assert not extras["hand_mask"].any()
+
+
+def test_veto_neural_tambem_publica_a_mascara_de_mao(classic):
+    """Mesmo no veto a evidência de oclusão vale: a mão pode estar
+    sobre a mesa sem folha."""
+    neural = _FakeNeural(None, None, logit=PRESENCE_VETO_LOGIT, mask=None)
+    neural.last_hand_mask = np.zeros((30, 40), np.uint8)
+    neural.last_hand_mask[10:12, 10:12] = 255
+    _, _, trace, extras = app_module._detect_sheet_combined_traced(_frame(), neural)
+    assert trace["source"] == "veto"
+    assert extras["hand_mask"].any()
+
+
 def test_presenca_sem_posicao_devolve_paper_sem_cantos(classic):
     neural = _FakeNeural(None, None, logit=2.0, mask=None)
     corners, verdict, trace, _ = app_module._detect_sheet_combined_traced(

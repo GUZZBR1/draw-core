@@ -209,19 +209,24 @@ def _detect_sheet_combined_traced(frame, neural_detector):
                         interpolation=cv2.INTER_NEAREST,
                     )
                 extras["coverage_mask"] = coverage_mask
-            # Máscara semântica de mão (mesma remessa, mesmo frame):
-            # segundo sinal de oclusão para o canal visible do voto
-            # de tinta.
-            hand_mask = getattr(neural_detector, "last_hand_mask", None)
-            if hand_mask is not None:
-                frame_h, frame_w = frame.shape[:2]
-                if hand_mask.shape != (frame_h, frame_w):
-                    hand_mask = cv2.resize(
-                        hand_mask,
-                        (frame_w, frame_h),
-                        interpolation=cv2.INTER_NEAREST,
-                    )
-                extras["hand_mask"] = hand_mask
+        # Máscara semântica de mão (mesma remessa, mesmo frame):
+        # segundo sinal de oclusão para o canal visible do voto de
+        # tinta. Sobe em TODO desfecho neural — o fit de cantos pode
+        # falhar numa cena onde a segmentação ainda produziu a
+        # evidência, e o resultado clássico precisa dela para
+        # renovar a oclusão vencida e destravar a tinta (review do
+        # PR #121). hand_mask ausente continua significando
+        # "evidência indisponível", distinto de "sem mão".
+        hand_mask = getattr(neural_detector, "last_hand_mask", None)
+        if hand_mask is not None:
+            frame_h, frame_w = frame.shape[:2]
+            if hand_mask.shape != (frame_h, frame_w):
+                hand_mask = cv2.resize(
+                    hand_mask,
+                    (frame_w, frame_h),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+            extras["hand_mask"] = hand_mask
         logit = neural_detector.last_presence_logit
         trace["presence_logit"] = None if logit is None else float(logit)
         trace["neural_corners"] = _corners_json(corners)
