@@ -154,6 +154,129 @@ def test_worker_publishes_erasure_through_the_real_path():
     assert not worker._at_rest() or worker._accumulator._removal_streak.max() == 0
 
 
+def test_erasure_advances_on_unobstructed_page_without_hand_mask():
+    """Caminho clássico (detecção de folha sem modelo de mão): com a
+    página à vista e a guarda confirmando papel, a remoção corre — o
+    "sem bloco" fotométrico vira evidência de visibilidade, não buraco
+    (Devin Review do PR #144)."""
+    prob = ink()
+    page = np.full((*prob.shape, 3), 220, dtype=np.uint8)
+    erased = prob.copy()
+    erased[65:75, 65:85] = 0
+
+    class _MutablePageClean:
+        threshold = 0.7
+
+        def __init__(self):
+            self.prob = prob
+
+        def ink_prob(self, _image):
+            return self.prob
+
+    clock = rr.SceneClock()
+    page_clean = _MutablePageClean()
+    worker = rr.make_ink_worker(page_clean, clock)
+    generation = worker.new_generation()
+    corners = rr.base_quad(prob.shape)
+    for current in [prob] * 16 + [erased] * 10:
+        page_clean.prob = current
+        clock.now += 1
+        worker.submit(WarpedPage(page, generation, corners))
+        assert worker.pump()
+        assert worker.error is None
+    assert not worker._accumulator._confirmed[65:75, 65:85].any()
+    assert np.all(worker._accumulator._confirmed[15:45, 15:55])
+    records = worker.telemetry_snapshot()["records"]
+    assert sum(r["removed_confirmed_px"] for r in records) == 200
+
+
+def test_worker_confirms_fill_after_sustained_ink_evidence():
+    """E2E do preenchimento: depois que a referência do papel claro
+    está de pé, uma área pintada de escuro confirma como tinta — a
+    guarda para de vetar adições com a evidência sustentada, em vez
+    de congelar a região para sempre (Devin Review do PR #144)."""
+    shape = (120, 160)
+    paper = np.full((*shape, 3), 220, dtype=np.uint8)
+    filled = paper.copy()
+    filled[24:96, 24:96] = 60
+    prob_fill = np.zeros(shape, np.float32)
+    prob_fill[24:96, 24:96] = 0.95
+
+    class _MutablePageClean:
+        threshold = 0.7
+
+        def __init__(self):
+            self.prob = np.zeros(shape, np.float32)
+
+        def ink_prob(self, _image):
+            return self.prob
+
+    clock = rr.SceneClock()
+    page_clean = _MutablePageClean()
+    worker = rr.make_ink_worker(page_clean, clock)
+    generation = worker.new_generation()
+    corners = rr.base_quad(shape)
+
+    def pass_page(image, prob):
+        page_clean.prob = prob
+        clock.now += 1
+        worker.submit(WarpedPage(image, generation, corners))
+        assert worker.pump()
+        assert worker.error is None
+
+    for _ in range(3):
+        pass_page(paper, np.zeros(shape, np.float32))
+    for _ in range(occlusion_mod._FILL_RECOVERY_PASSES - 1):
+        pass_page(filled, prob_fill)
+        assert not worker._accumulator._confirmed[24:96, 24:96].any()
+    for _ in range(4):
+        pass_page(filled, prob_fill)
+    assert worker._accumulator._confirmed[24:96, 24:96].all()
+
+
+def test_page_recovery_defers_when_shadow_covers_prior_ink():
+    """O bloqueio fotométrico também rege o reencontro: a sombra que
+    o detector de mão perdeu esconde a tinta anterior — a identidade
+    adia em vez de condenar a página (Devin Review do PR #144)."""
+    shape = (120, 160)
+    paper = np.full((*shape, 3), 220, dtype=np.uint8)
+    prob = np.zeros(shape, np.float32)
+    prob[40:50, 60:140] = 0.95  # traço comprido dentro da futura sombra
+    shadowed = paper.copy()
+    shadowed[24:96, 48:144] = 60  # bloco 3x4 tiles sobre o traço
+    dark = np.zeros(shape, np.float32)
+
+    class _MutablePageClean:
+        threshold = 0.7
+
+        def __init__(self):
+            self.prob = prob
+
+        def ink_prob(self, _image):
+            return self.prob
+
+    clock = rr.SceneClock()
+    page_clean = _MutablePageClean()
+    worker = rr.make_ink_worker(page_clean, clock)
+    generation = worker.new_generation()
+    corners = rr.base_quad(shape)
+    for _ in range(6):
+        page_clean.prob = prob
+        clock.now += 1
+        worker.submit(WarpedPage(paper, generation, corners))
+        assert worker.pump()
+        assert worker.error is None
+
+    generation = worker.new_generation(preserve_identity=True)
+    page_clean.prob = dark
+    clock.now += 1
+    worker.submit(WarpedPage(shadowed, generation, corners))
+    assert worker.pump()
+    assert worker.error is None
+    event = worker.telemetry_snapshot()["page_identity_events"][-1]
+    assert event["decision"] == "deferred_occlusion"
+
+
 def test_witness_floor_unblocks_stale_canvas():
     """retained < 65% mas >= piso: a testemunha existe e a remocao corre.
 
@@ -256,6 +379,82 @@ def test_paper_exposure_guard_freezes_a_dark_block_when_hand_mask_misses():
     colored_object[24:96, 24:96] = (255, 200, 190)  # quase mesma luminância
     color_exposed = color_guard.observe(colored_object, visible)
     assert not color_exposed.visible[30:60, 30:60].any()
+
+
+def test_global_dimming_is_absorbed_not_blocked():
+    """Queda global de >20% (luz da sala, auto-exposição): as
+    referências cedem ao nível novo — a página não congela atrás de
+    um bloco único (Devin Review do PR #144)."""
+    guard = occlusion_mod.PaperExposureGuard()
+    bright = np.full((120, 160, 3), 220, dtype=np.uint8)
+    visible = np.ones(bright.shape[:2], dtype=bool)
+    assert guard.observe(bright, visible).paper_exposed is True
+
+    dim = np.full((120, 160, 3), 150, dtype=np.uint8)
+    assessment = guard.observe(dim, visible)
+    assert assessment.visible is None
+    assert assessment.paper_exposed is True
+
+    # Com o nível novo absorvido, um bloco escuro real segue lido
+    # como oclusão — a absorção não anestesia a guarda.
+    shadow = dim.copy()
+    shadow[24:96, 24:96] = 60
+    assessment = guard.observe(shadow, visible)
+    assert assessment.visible is not None
+    assert not assessment.visible[60, 60]
+
+
+def test_fill_region_recovers_additions_but_never_proves_paper():
+    """Preenchimento: o veto de adição cai com evidência de tinta
+    sustentada e a mão fora do tile; o de remoção fica — papel
+    exposto nunca é provado sobre o preenchimento."""
+    guard = occlusion_mod.PaperExposureGuard()
+    paper = np.full((120, 168, 3), 210, dtype=np.uint8)
+    for _ in range(2):
+        assert guard.observe(paper).paper_exposed is True
+
+    filled = paper.copy()
+    filled[24:96, 0:72] = 60  # tiles (1:4, 0:3): o preenchimento
+    filled[24:96, 96:168] = 60  # tiles (1:4, 4:7): oclusor escuro
+    ink = np.zeros((120, 168), np.float32)
+    ink[24:96, 0:72] = 0.95  # o modelo lê o preenchimento como tinta
+
+    first = guard.observe(filled, ink_prob=ink)
+    assert not first.visible[48, 48]
+    assert not first.visible[48, 120]
+    for _ in range(occlusion_mod._FILL_RECOVERY_PASSES - 1):
+        last = guard.observe(filled, ink_prob=ink)
+    assert last.visible[48, 48]
+    assert not last.visible[48, 120]
+    assert not last.paper_exposed[48, 48]
+    assert not last.paper_exposed[48, 120]
+
+
+def test_fill_streak_only_counts_with_a_clear_hand():
+    """A contagem de evidência não anda com a mão sobre o tile —
+    a adoção do preenchimento exige a mão fora do caminho."""
+    guard = occlusion_mod.PaperExposureGuard()
+    paper = np.full((96, 96, 3), 210, dtype=np.uint8)
+    guard.observe(paper)
+
+    filled = paper.copy()
+    filled[24:96, 24:96] = 60
+    ink = np.zeros((96, 96), np.float32)
+    ink[24:96, 24:96] = 0.95
+    hand = np.ones((96, 96), dtype=bool)
+    hand[24:96, 24:96] = False
+    for _ in range(occlusion_mod._FILL_RECOVERY_PASSES + 1):
+        covered = guard.observe(filled, hand, ink_prob=ink)
+    assert not covered.visible[48, 48]
+
+    clear = np.ones((96, 96), dtype=bool)
+    for _ in range(occlusion_mod._FILL_RECOVERY_PASSES):
+        last = guard.observe(filled, clear, ink_prob=ink)
+    # A única anomalia era o preenchimento: adotado, o bloco esvazia e
+    # a guarda volta ao "à vista" (None) — mas papel exposto continua
+    # não provado sobre ele.
+    assert last.visible is None
+    assert not last.paper_exposed[48, 48]
 
 
 def test_uncertain_photometry_does_not_advance_removal_streak():

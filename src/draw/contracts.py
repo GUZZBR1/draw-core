@@ -570,3 +570,38 @@ class HandOcclusion:
             snapshot = mask.copy()
             snapshot.flags.writeable = False
             object.__setattr__(self, name, snapshot)
+
+
+@dataclass(frozen=True, slots=True)
+class ExposureAssessment:
+    """Veredito fotométrico de uma passada da trabalhadora de tinta.
+
+    Produzido pelo guarda de exposição do warp (ink/occlusion) e
+    consumido pelo voto: máscaras independentes porque adicionar e
+    remover tinta pedem provas diferentes. visible é máscara 2D
+    bool/uint8 na grade do warp — True onde a imagem sustenta
+    evidência — ou None quando a guarda não encontrou região
+    bloqueada (não é "evidência indisponível": imagem sem fotometria
+    confiável devolve None no observe inteiro). paper_exposed é
+    bool (página inteira verificada) ou máscara 2D — True onde a
+    imagem prova papel exposto, o requisito separado da remoção de
+    tinta confirmada.
+    """
+
+    visible: np.ndarray | None
+    paper_exposed: np.ndarray | bool
+
+    def __post_init__(self):
+        for name in ("visible", "paper_exposed"):
+            mask = getattr(self, name)
+            if mask is None or isinstance(mask, (bool, np.bool_)):
+                continue
+            if (
+                not isinstance(mask, np.ndarray)
+                or mask.ndim != 2
+                or mask.dtype not in (np.dtype(bool), np.dtype(np.uint8))
+            ):
+                raise ValueError(f"{name} precisa ser bool ou máscara 2D bool/uint8")
+            view = mask.view()
+            view.flags.writeable = False
+            object.__setattr__(self, name, view)

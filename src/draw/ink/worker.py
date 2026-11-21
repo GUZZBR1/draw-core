@@ -185,6 +185,66 @@ def _crop_all_visible(visible, corners):
     return bool(visible[crop.astype(bool)].all())
 
 
+def _exposure_masks_in_geometry(
+    assessment, reg_anchor, reg_corners, shape, motion_fix=None, fill_clear=False
+):
+    """As máscaras fotométricas da guarda na grade de registro pedida.
+
+    A guarda mede o warp desta passada; quem julga identidade e quem
+    vota vivem na grade da âncora da geração. O par (âncora, quad de
+    registro) tem que ser o MESMO que registrou a prob — na passada de
+    re-ancoragem eles já são a âncora nova, e transformar pela âncora
+    velha cobre os pixels errados (Devin Review do PR #144). Com
+    motion_fix a correção medida acompanha a evidência, como na prob
+    registrada. fill_clear materializa o "tudo à vista" do veredito
+    quando a guarda é a única fonte de visibilidade da passada: sem
+    máscara alguma o acumulador não tem evidência para a remoção, e o
+    materializado antes do warp mantém o fora-do-quad mascarado.
+    """
+    if assessment is None:
+        return None, None
+    photo_visible = assessment.visible
+    exposed = assessment.paper_exposed
+    if photo_visible is None and fill_clear:
+        photo_visible = np.ones(shape, dtype=bool)
+    if reg_anchor is not None and reg_corners is not None:
+        matrix = registration._registration_matrix(reg_anchor, reg_corners, shape)
+        if not registration._registration_is_identity(matrix):
+            size = (shape[1], shape[0])
+            if photo_visible is not None:
+                photo_visible = (
+                    cv2.warpPerspective(
+                        photo_visible.astype(np.uint8),
+                        matrix,
+                        size,
+                        flags=cv2.INTER_NEAREST,
+                        borderValue=0,
+                    )
+                    > 0
+                )
+            if isinstance(exposed, (bool, np.bool_)):
+                exposed = np.full(shape, exposed, dtype=bool)
+            exposed = (
+                cv2.warpPerspective(
+                    exposed.astype(np.uint8),
+                    matrix,
+                    size,
+                    flags=cv2.INTER_NEAREST,
+                    borderValue=0,
+                )
+                > 0
+            )
+    if motion_fix is not None:
+        if photo_visible is not None:
+            photo_visible = (
+                motion_fix.warp_back(photo_visible.astype(np.uint8), nearest=True) > 0
+            )
+        if isinstance(exposed, (bool, np.bool_)):
+            exposed = np.full(shape, exposed, dtype=bool)
+        exposed = motion_fix.warp_back(exposed.astype(np.uint8), nearest=True) > 0
+    return photo_visible, exposed
+
+
 def _merge_deltas(records):
     """Uniao (OR) dos deltas incrementais de registros contiguos."""
     boxes = [r[3] for r in records if r[3] is not None]
@@ -1229,7 +1289,9 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     self._ruling.reset()
                     self._ruling_generation = generation
                 prob = self._ruling.apply(prob, visible)
-            exposure = self._paper_exposure.observe(photometric_image, visible)
+            exposure = self._paper_exposure.observe(
+                photometric_image, visible, ink_prob=prob
+            )
             # Cobertura de folha (cobertura de folha do loop) viaja em
             # canal proprio ate depois do registro: o veto nao e
             # cego nem se confunde com oclusao de mao — ver o
@@ -1356,6 +1418,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             camera_prob = registered_prob
             camera_corners = registration_corners
             motion_decision = None
+            motion_fix = None
             if (
                 self._motion is not None
                 and not recovering
@@ -1588,6 +1651,27 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 if identity_reference is not None:
                     candidate = registered_prob
                     identity_visible = registered_visible
+                    if exposure is not None and exposure.visible is not None:
+                        # O bloqueio fotométrico também rege o
+                        # reencontro: a sombra que o detector de mão
+                        # perdeu não pode contar contra a página —
+                        # a tinta anterior escondida por ela deixa
+                        # de derrubar o recall (Devin Review do PR
+                        # #144). As máscaras entram na MESMA grade
+                        # do candidato: o par que registrou esta
+                        # passada, antes da arbitragem/follow.
+                        identity_photo, _unused_exposed = _exposure_masks_in_geometry(
+                            exposure,
+                            anchor,
+                            registration_corners,
+                            prob.shape,
+                            (motion_fix if motion_decision == "correct" else None),
+                        )
+                        identity_visible = (
+                            identity_photo
+                            if identity_visible is None
+                            else identity_visible & identity_photo
+                        )
                     if identity_corners is not None and corners is not None:
                         identity_geometry_registered = True
                     prior = identity_reference > 0
@@ -1942,59 +2026,28 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 self._last_registration = None
             paper_exposed = None
             if exposure is not None:
-                photo_visible = exposure.visible
-                paper_exposed = exposure.paper_exposed
-                if (
-                    not vote_unregistered
-                    and anchor is not None
-                    and registration_corners is not None
-                ):
-                    photo_matrix = registration._registration_matrix(
-                        anchor, registration_corners, prob.shape
-                    )
-                    if not registration._registration_is_identity(photo_matrix):
-                        size = (prob.shape[1], prob.shape[0])
-                        if photo_visible is not None:
-                            photo_visible = (
-                                cv2.warpPerspective(
-                                    photo_visible.astype(np.uint8),
-                                    photo_matrix,
-                                    size,
-                                    flags=cv2.INTER_NEAREST,
-                                    borderValue=0,
-                                )
-                                > 0
-                            )
-                        if isinstance(paper_exposed, (bool, np.bool_)):
-                            paper_exposed = np.full(
-                                prob.shape, paper_exposed, dtype=bool
-                            )
-                        paper_exposed = (
-                            cv2.warpPerspective(
-                                paper_exposed.astype(np.uint8),
-                                photo_matrix,
-                                size,
-                                flags=cv2.INTER_NEAREST,
-                                borderValue=0,
-                            )
-                            > 0
-                        )
-                if motion_decision == "correct" and not vote_unregistered:
-                    if photo_visible is not None:
-                        photo_visible = (
-                            motion_fix.warp_back(
-                                photo_visible.astype(np.uint8), nearest=True
-                            )
-                            > 0
-                        )
-                    if isinstance(paper_exposed, (bool, np.bool_)):
-                        paper_exposed = np.full(prob.shape, paper_exposed, dtype=bool)
-                    paper_exposed = (
-                        motion_fix.warp_back(
-                            paper_exposed.astype(np.uint8), nearest=True
-                        )
-                        > 0
-                    )
+                # O par de registro é o da passada que VOTA
+                # (_last_registration), não o medido antes da
+                # arbitragem/follow: na passada de re-ancoragem a prob
+                # já está na âncora nova e a âncora velha cobriria os
+                # pixels errados. Sem máscara de visibilidade própria
+                # (caminho clássico, sem modelo de mão) o "sem bloco"
+                # da guarda é materializado em máscara — senão o
+                # acumulador nunca tem evidência para a remoção e o
+                # apagamento congela na página limpa.
+                last_reg = self._last_registration
+                photo_visible, paper_exposed = _exposure_masks_in_geometry(
+                    exposure,
+                    None if last_reg is None else last_reg[0],
+                    None if last_reg is None else last_reg[1],
+                    prob.shape,
+                    (
+                        motion_fix
+                        if motion_decision == "correct" and not vote_unregistered
+                        else None
+                    ),
+                    fill_clear=visible is None,
+                )
                 if photo_visible is not None:
                     visible = (
                         photo_visible if visible is None else visible & photo_visible

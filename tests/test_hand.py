@@ -248,6 +248,28 @@ def test_mask_holds_last_hand_for_three_detection_misses(monkeypatch, tmp_path):
     assert released is not None and not released.any()
 
 
+def test_mask_holds_a_missing_hand_when_another_remains(monkeypatch, tmp_path):
+    """Duas mãos -> uma: a pegada da que sumiu não vira papel à vista
+    no mesmo frame; persistindo a queda, a cena nova é aceita."""
+    two = _landmarks_result(hand_count=2)
+    one = _landmarks_result(hand_count=1)
+    _log, _created = _install_fake_mediapipe(
+        monkeypatch, results=[two, one, one, one, one]
+    )
+    masker = hand_module.HandMasker(_model(tmp_path), verify=None)
+    frame = np.zeros((80, 100, 3), dtype=np.uint8)
+
+    both = masker.mask(frame)
+    assert both is not None and both[:, 60:].any()
+    for _ in range(hand_module._MASK_HOLD_FRAMES):
+        held = masker.mask(frame)
+        assert held is not None and held[:, 60:].any()
+
+    released = masker.mask(frame)
+    assert released is not None and released.any()
+    assert not released[:, 60:].any()
+
+
 def test_detected_hand_fills_scaled_hull_and_forearm(monkeypatch, tmp_path):
     _install_fake_mediapipe(monkeypatch)
     masker = hand_module.HandMasker(_model(tmp_path), verify=None)
@@ -424,3 +446,13 @@ def test_observe_keeps_image_mask_and_capture_identity(monkeypatch, tmp_path):
     np.testing.assert_array_equal(result.occlusion_mask, expected)
     assert result.orientation_mask is None
     assert result.present is None
+
+
+def test_observe_sends_capture_timestamp_to_video_inference(monkeypatch, tmp_path):
+    """O carimbo da captura (ms) deve chegar ao detect_for_video —
+    a identidade do frame é que alinha a trilha do landmarker VIDEO."""
+    log, _created = _install_fake_mediapipe(monkeypatch)
+    frame = np.zeros((100, 150, 3), dtype=np.uint8)
+    with hand_module.HandMasker(_model(tmp_path), verify=None) as masker:
+        masker.observe(FramePacket(frame, 3.0, 7), source_id=5)
+    assert ("video", 3000) in log

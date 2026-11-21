@@ -1,9 +1,9 @@
 """Photometric guard for page regions darkened by hands or shadows."""
 
-from dataclasses import dataclass
-
 import cv2
 import numpy as np
+
+from ..contracts import ExposureAssessment
 
 _REFERENCE_TILE_PX = 24
 _PAGE_REFERENCE_PERCENTILE = 70.0
@@ -11,14 +11,24 @@ _MIN_DARKENING = 5.0
 _DARKENING_FRACTION = 0.20
 _CHROMA_CHANGE = 0.20
 _VISIBLE_TILE_FRACTION = 0.85
-
-
-@dataclass(frozen=True, slots=True)
-class ExposureAssessment:
-    """Independent masks for additions and confirmed-ink removal."""
-
-    visible: np.ndarray | None
-    paper_exposed: np.ndarray | bool
+# Um deslocamento fotométrico da página inteira (luz da sala caindo,
+# auto-exposição da câmera, balanço de branco) move a quase totalidade
+# dos tiles de uma vez — não é oclusão local. Quando a parcela anômala
+# dos tiles avaliáveis chega a _GLOBAL_SHIFT_FRACTION as referências
+# cedem ao nível novo, em vez de congelar a página num único bloco:
+# a referência que só sobe não distingue uma queda global de >20% de
+# um occluder, e sem esta saída a página inteira virava veto
+# (Devin Review do PR #144).
+_GLOBAL_SHIFT_FRACTION = 0.8
+_GLOBAL_SHIFT_MIN_TILES = 4
+# Recuperação por preenchimento: um bloco escuro que o modelo lê como
+# tinta, passada após passada e com a mão fora do tile, é conteúdo da
+# página — não oclusor. Até _FILL_RECOVERY_PASSES seguidas o veto de
+# adição vale como sempre; depois ele cai só para o voto de adição.
+# A remoção segue exigindo papel exposto, que o preenchimento nunca
+# produz: o tile continua anômalo para o segundo veredito.
+_FILL_INK_TILE_SUPPORT = 0.5
+_FILL_RECOVERY_PASSES = 4
 
 
 class PaperExposureGuard:
@@ -28,10 +38,12 @@ class PaperExposureGuard:
     hand or shadow covers it. This guard uses the warped camera image, not
     the hand model, and turns such regions into unknown evidence. Its
     brightness reference only moves upward, so a brief shadow cannot become
-    the new baseline. A coarse chroma reference also rejects objects whose
-    brightness resembles the paper. The low-resolution references keep the
-    per-pass cost small and make fine pen strokes too small to trigger the
-    guard.
+    the new baseline — except when nearly the whole visible page changes
+    at once, which is a global illumination shift, not an occluder: then
+    the references follow the scene instead of blocking the page. A coarse
+    chroma reference also rejects objects whose brightness resembles the
+    paper. The low-resolution references keep the per-pass cost small and
+    make fine pen strokes too small to trigger the guard.
     """
 
     def __init__(self):
@@ -42,16 +54,23 @@ class PaperExposureGuard:
         self._color_reference = None
         self._page_reference = None
         self._page_color_reference = None
+        self._ink_streak = None
 
-    def observe(self, image, visible=None):
+    def observe(self, image, visible=None, ink_prob=None):
         """Return separate masks for safe additions and paper exposure.
 
         Only uint8 camera images carry reliable photometric evidence. An
         unsupported image fails closed for erasure at the accumulator
         boundary, while preserving existing callers that provide only ink
-        probabilities. A thin mark can change paper luminance without looking
-        like an object block: it remains available for drawing, but its pixels
-        still cannot prove that prior ink disappeared.
+        probabilities. A thin mark can change paper luminance without
+        looking like an object block: it remains available for drawing,
+        but its pixels still cannot prove that prior ink disappeared.
+
+        `ink_prob` (o mapa de probabilidade desta passada, na mesma
+        grade) alimenta a recuperação por preenchimento: um bloco que o
+        modelo lê como tinta por _FILL_RECOVERY_PASSES passadas, sempre
+        com o tile à vista, deixa de vetar adições. Sem o mapa o veto é
+        permanente, como antes.
         """
         if not isinstance(image, np.ndarray) or image.dtype != np.uint8:
             return None
@@ -93,6 +112,7 @@ class PaperExposureGuard:
             )
             self._page_reference = None
             self._page_color_reference = None
+            self._ink_streak = np.zeros(current.shape, dtype=np.uint8)
 
         known = np.isfinite(self._reference)
         candidates = current[updateable]
@@ -134,10 +154,47 @@ class PaperExposureGuard:
                     np.linalg.norm(chroma - expected_color, axis=2) > _CHROMA_CHANGE
                 )
 
+        anomalous = darkened | color_anomaly
+        updateable_px = int(np.count_nonzero(updateable))
+        shifted = int(np.count_nonzero(anomalous & updateable))
+        if shifted >= _GLOBAL_SHIFT_MIN_TILES and shifted >= (
+            _GLOBAL_SHIFT_FRACTION * updateable_px
+        ):
+            # Quase toda a página à vista mudou junta: é a iluminação
+            # global, não um oclusor. As referências cedem ao nível
+            # novo de uma vez; sem isso o quarto escurecido congelava
+            # a página atrás de um bloco único.
+            self._reference[updateable] = current[updateable]
+            if self._color_reference is not None:
+                self._color_reference[updateable] = chroma[updateable]
+            anomalous = np.zeros(current.shape, dtype=bool)
+
+        # Recuperação por preenchimento: o streak conta as passadas
+        # seguidas em que o tile anômalo, à vista, é lido como tinta
+        # pelo modelo. A mão sobre o tile (updateable False) não
+        # deixa a contagem andar — a adoção só acontece com a mão
+        # fora do caminho ou quando a cena não tem máscara alguma.
+        supported = np.zeros(current.shape, dtype=bool)
+        if ink_prob is not None and np.any(anomalous):
+            ink_prob = np.asarray(ink_prob, dtype=np.float32)
+            if ink_prob.shape == (height, width):
+                supported = (
+                    anomalous
+                    & updateable
+                    & (
+                        cv2.resize(ink_prob, size, interpolation=cv2.INTER_AREA)
+                        >= _FILL_INK_TILE_SUPPORT
+                    )
+                )
+        self._ink_streak[supported] = np.minimum(
+            self._ink_streak[supported].astype(np.uint16) + 1, 255
+        ).astype(np.uint8)
+        self._ink_streak[~supported] = 0
+        adopted = self._ink_streak >= _FILL_RECOVERY_PASSES
+
         # The removal test uses every anomalous tile. For additions, require
         # a two-dimensional block before suppressing pixels; a thin dark pen
         # stroke is not an object or a shadow boundary.
-        anomalous = darkened | color_anomaly
         block = np.zeros(anomalous.shape, dtype=np.uint8)
         if np.any(anomalous):
             count, labels, stats, _ = cv2.connectedComponentsWithStats(
@@ -147,6 +204,8 @@ class PaperExposureGuard:
                 _x, _y, block_width, block_height, area = stats[label]
                 if block_width >= 3 and block_height >= 3 and area >= 9:
                     block[labels == label] = 1
+        if np.any(adopted):
+            block[adopted] = 0
         if np.any(block):
             block = cv2.dilate(block, np.ones((3, 3), dtype=np.uint8))
 

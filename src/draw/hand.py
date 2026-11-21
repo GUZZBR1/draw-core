@@ -159,6 +159,7 @@ class HandMasker:
         self._closed = False
         self._lock = threading.RLock()
         self._last_hand_mask = None
+        self._last_hand_count = 0
         self._mask_misses = 0
 
     def close(self):
@@ -201,6 +202,7 @@ class HandMasker:
         self._unavailable = True
         self._video_unavailable = True
         self._last_hand_mask = None
+        self._last_hand_count = 0
         self._mask_misses = 0
 
     def _dispose_fresh(self, landmarker):
@@ -410,6 +412,8 @@ class HandMasker:
         em cada passada. Sem ele, mantém o comportamento IMAGE existente.
         Em até três resultados sem mão/indisponíveis, a última máscara é
         mantida e cresce um pouco para cobrir movimento durante a falha.
+        Quando só uma das mãos some, a pegada dela é retida pela mesma
+        janela sobre a máscara das que restaram.
         """
         with self._lock:
             hands = self._landmarks(
@@ -433,8 +437,30 @@ class HandMasker:
                 cv2.MORPH_ELLIPSE, (2 * _DILATE_PX + 1, 2 * _DILATE_PX + 1)
             )
             mask = cv2.dilate(mask, kernel)
-            self._last_hand_mask = mask.copy()
-            self._mask_misses = 0
+            if (
+                self._last_hand_mask is not None
+                and self._last_hand_mask.shape == mask.shape
+                and len(hands) < self._last_hand_count
+                and self._mask_misses < _MASK_HOLD_FRAMES
+            ):
+                # Só uma das mãos sumiu: a que ficou não apaga a
+                # pegada da outra de imediato — o detector pisca
+                # por mão, e a tinta sob a que sumiu não pode virar
+                # papel visível num frame. A base retida cresce
+                # como na falha total; persistindo a queda além do
+                # teto, a cena nova é aceita e vira a referência.
+                self._mask_misses += 1
+                grow = _MASK_HOLD_GROW_PX * self._mask_misses
+                hold_kernel = cv2.getStructuringElement(
+                    cv2.MORPH_ELLIPSE, (2 * grow + 1, 2 * grow + 1)
+                )
+                mask = cv2.bitwise_or(
+                    mask, cv2.dilate(self._last_hand_mask, hold_kernel)
+                )
+            else:
+                self._last_hand_mask = mask.copy()
+                self._last_hand_count = len(hands)
+                self._mask_misses = 0
             return mask
 
     def _held_mask(self, shape):
