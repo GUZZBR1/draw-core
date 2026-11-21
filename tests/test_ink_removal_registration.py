@@ -31,6 +31,16 @@ def confirmed(acc, prob):
     return result["confirmed"].copy()
 
 
+class _MutablePageClean:
+    threshold = 0.7
+
+    def __init__(self, prob):
+        self.prob = prob
+
+    def ink_prob(self, _image):
+        return self.prob
+
+
 def test_erasure_is_published_and_does_not_resurrect():
     acc = accumulator_mod.LayeredInkAccumulator()
     prob = ink()
@@ -126,17 +136,8 @@ def test_worker_publishes_erasure_through_the_real_path():
     erased = prob.copy()
     erased[65:75, 65:85] = 0
 
-    class _MutablePageClean:
-        threshold = 0.7
-
-        def __init__(self):
-            self.prob = prob
-
-        def ink_prob(self, _image):
-            return self.prob
-
     clock = rr.SceneClock()
-    page_clean = _MutablePageClean()
+    page_clean = _MutablePageClean(prob)
     worker = rr.make_ink_worker(page_clean, clock)
     generation = worker.new_generation()
     corners = rr.base_quad(prob.shape)
@@ -164,17 +165,8 @@ def test_erasure_advances_on_unobstructed_page_without_hand_mask():
     erased = prob.copy()
     erased[65:75, 65:85] = 0
 
-    class _MutablePageClean:
-        threshold = 0.7
-
-        def __init__(self):
-            self.prob = prob
-
-        def ink_prob(self, _image):
-            return self.prob
-
     clock = rr.SceneClock()
-    page_clean = _MutablePageClean()
+    page_clean = _MutablePageClean(prob)
     worker = rr.make_ink_worker(page_clean, clock)
     generation = worker.new_generation()
     corners = rr.base_quad(prob.shape)
@@ -202,17 +194,8 @@ def test_worker_confirms_fill_after_sustained_ink_evidence():
     prob_fill = np.zeros(shape, np.float32)
     prob_fill[24:96, 24:96] = 0.95
 
-    class _MutablePageClean:
-        threshold = 0.7
-
-        def __init__(self):
-            self.prob = np.zeros(shape, np.float32)
-
-        def ink_prob(self, _image):
-            return self.prob
-
     clock = rr.SceneClock()
-    page_clean = _MutablePageClean()
+    page_clean = _MutablePageClean(np.zeros(shape, np.float32))
     worker = rr.make_ink_worker(page_clean, clock)
     generation = worker.new_generation()
     corners = rr.base_quad(shape)
@@ -246,17 +229,8 @@ def test_page_recovery_defers_when_shadow_covers_prior_ink():
     shadowed[24:96, 48:144] = 60  # bloco 3x4 tiles sobre o traço
     dark = np.zeros(shape, np.float32)
 
-    class _MutablePageClean:
-        threshold = 0.7
-
-        def __init__(self):
-            self.prob = prob
-
-        def ink_prob(self, _image):
-            return self.prob
-
     clock = rr.SceneClock()
-    page_clean = _MutablePageClean()
+    page_clean = _MutablePageClean(prob)
     worker = rr.make_ink_worker(page_clean, clock)
     generation = worker.new_generation()
     corners = rr.base_quad(shape)
@@ -629,17 +603,8 @@ def test_hand_mask_dropouts_cannot_erase_or_add_hand_edges_and_exit_confirms():
     covered_old = hand_edge.copy()
     covered_old[90:106, 90:120] = 0.0
 
-    class _MutablePageClean:
-        threshold = 0.7
-
-        def __init__(self):
-            self.prob = old
-
-        def ink_prob(self, _image):
-            return self.prob
-
     clock = rr.SceneClock()
-    page_clean = _MutablePageClean()
+    page_clean = _MutablePageClean(old)
     worker = rr.make_ink_worker(page_clean, clock, config=InkConfig(removal=True))
     generation = worker.new_generation()
     corners = rr.base_quad(shape)
@@ -728,17 +693,8 @@ def test_fill_recovery_keeps_the_worker_awake_past_the_exit_window():
     prob_fill = np.zeros(shape, np.float32)
     prob_fill[24:96, 24:96] = 0.95
 
-    class _MutablePageClean:
-        threshold = 0.7
-
-        def __init__(self):
-            self.prob = np.zeros(shape, np.float32)
-
-        def ink_prob(self, _image):
-            return self.prob
-
     clock = rr.SceneClock()
-    page_clean = _MutablePageClean()
+    page_clean = _MutablePageClean(np.zeros(shape, np.float32))
     worker = rr.make_ink_worker(page_clean, clock)
     generation = worker.new_generation()
     corners = rr.base_quad(shape)
@@ -788,17 +744,8 @@ def test_page_recovery_ignores_false_ink_inside_the_photometric_veto():
     ghost = prob.copy()
     ghost[30:90, 60:130] = 0.95  # "tinta" lida sob a sombra
 
-    class _MutablePageClean:
-        threshold = 0.7
-
-        def __init__(self):
-            self.prob = prob
-
-        def ink_prob(self, _image):
-            return self.prob
-
     clock = rr.SceneClock()
-    page_clean = _MutablePageClean()
+    page_clean = _MutablePageClean(prob)
     worker = rr.make_ink_worker(page_clean, clock)
     generation = worker.new_generation()
     corners = rr.base_quad(shape)
@@ -817,3 +764,29 @@ def test_page_recovery_ignores_false_ink_inside_the_photometric_veto():
     assert worker.error is None
     event = worker.telemetry_snapshot()["page_identity_events"][-1]
     assert event["decision"] == "same_page"
+
+
+def test_wrong_shape_visible_fails_closed_instead_of_open():
+    """Máscara em geometria errada é bug do chamador: veta tudo —
+    a passada não vota tinta de graça onde a oclusão está em dúvida."""
+    acc = accumulator_mod.LayeredInkAccumulator()
+    prob = ink()
+    bad = np.ones((10, 10), bool)
+    for _ in range(6):
+        result = acc.add(prob, bad)
+    assert not result["confirmed"].any()
+
+
+def test_wrong_shape_visible_returns_none_and_keeps_recovery_state():
+    """Máscara fora da grade do warp: abstém sem varrer streaks."""
+    guard = occlusion_mod.PaperExposureGuard()
+    page = np.full((96, 144, 3), 220, np.uint8)
+    page[24:72, 24:72] = (60, 62, 64)
+    ink_prob = np.zeros((96, 144), np.float32)
+    ink_prob[24:72, 24:72] = 0.95
+    visible = np.ones((96, 144), bool)
+    guard.observe(page, visible, ink_prob=ink_prob, ink_support_threshold=0.7)
+    streak = guard._ink_streak.copy()
+    assert streak.any()
+    assert guard.observe(page, np.ones((8, 8), bool), ink_prob=ink_prob) is None
+    np.testing.assert_array_equal(guard._ink_streak, streak)

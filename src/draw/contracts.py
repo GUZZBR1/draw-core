@@ -594,7 +594,15 @@ class ExposureAssessment:
     def __post_init__(self):
         for name in ("visible", "paper_exposed"):
             mask = getattr(self, name)
-            if mask is None or isinstance(mask, (bool, np.bool_)):
+            if mask is None:
+                continue
+            # Escalar so vale para paper_exposed (veredito da página
+            # inteira); visible e sempre máscara ou None.
+            if isinstance(mask, (bool, np.bool_)):
+                if name == "visible":
+                    raise ValueError(
+                        "visible precisa ser None ou máscara 2D bool/uint8"
+                    )
                 continue
             if (
                 not isinstance(mask, np.ndarray)

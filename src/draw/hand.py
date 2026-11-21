@@ -469,6 +469,13 @@ class HandMasker:
             if hands is None:
                 return None
             if not hands:
+                # Ausência real (hold de marcos expirado): a pegada
+                # retida é antiga demais para valer — reatá-la numa
+                # detecção parcial futura vetaria uma região que a
+                # mão já deixou.
+                self._last_hand_mask = None
+                self._last_hand_count = 0
+                self._mask_misses = 0
                 return np.zeros(frame.shape[:2], dtype=np.uint8)
 
             mask = np.zeros(frame.shape[:2], dtype=np.uint8)
@@ -490,13 +497,7 @@ class HandMasker:
                     self._last_hand_mask is not None
                     and self._last_hand_mask.shape == mask.shape
                 ):
-                    grow = _MASK_HOLD_GROW_PX * self._mask_misses
-                    hold_kernel = cv2.getStructuringElement(
-                        cv2.MORPH_ELLIPSE, (2 * grow + 1, 2 * grow + 1)
-                    )
-                    mask = cv2.bitwise_or(
-                        mask, cv2.dilate(self._last_hand_mask, hold_kernel)
-                    )
+                    mask = self._merge_held(mask)
                 return mask
             if (
                 self._last_hand_mask is not None
@@ -505,18 +506,20 @@ class HandMasker:
                 and self._mask_misses < _MASK_HOLD_FRAMES
             ):
                 self._mask_misses += 1
-                grow = _MASK_HOLD_GROW_PX * self._mask_misses
-                hold_kernel = cv2.getStructuringElement(
-                    cv2.MORPH_ELLIPSE, (2 * grow + 1, 2 * grow + 1)
-                )
-                mask = cv2.bitwise_or(
-                    mask, cv2.dilate(self._last_hand_mask, hold_kernel)
-                )
+                mask = self._merge_held(mask)
             else:
                 self._last_hand_mask = mask.copy()
                 self._last_hand_count = len(hands)
                 self._mask_misses = 0
             return mask
+
+    def _merge_held(self, mask):
+        """Une a pegada retida (dilatada pelos misses) à máscara."""
+        grow = _MASK_HOLD_GROW_PX * self._mask_misses
+        hold_kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (2 * grow + 1, 2 * grow + 1)
+        )
+        return cv2.bitwise_or(mask, cv2.dilate(self._last_hand_mask, hold_kernel))
 
     def observe(self, packet: FramePacket, *, source_id: int) -> HandOcclusion:
         """Publica a máscara da captura com identidade e timestamp."""

@@ -185,6 +185,22 @@ def _crop_all_visible(visible, corners):
     return bool(visible[crop.astype(bool)].all())
 
 
+def _warp_exposure_mask(mask, matrix, shape):
+    """Materializa escalar e warpa uma máscara bool (INTER_NEAREST)."""
+    if isinstance(mask, (bool, np.bool_)):
+        mask = np.full(shape, mask, dtype=bool)
+    return (
+        cv2.warpPerspective(
+            mask.astype(np.uint8),
+            matrix,
+            (shape[1], shape[0]),
+            flags=cv2.INTER_NEAREST,
+            borderValue=0,
+        )
+        > 0
+    )
+
+
 def _exposure_masks_in_geometry(
     assessment, reg_anchor, reg_corners, shape, motion_fix=None, fill_clear=False
 ):
@@ -201,8 +217,6 @@ def _exposure_masks_in_geometry(
     máscara alguma o acumulador não tem evidência para a remoção, e o
     materializado antes do warp mantém o fora-do-quad mascarado.
     """
-    if assessment is None:
-        return None, None
     photo_visible = assessment.visible
     exposed = assessment.paper_exposed
     if photo_visible is None and fill_clear:
@@ -210,30 +224,9 @@ def _exposure_masks_in_geometry(
     if reg_anchor is not None and reg_corners is not None:
         matrix = registration._registration_matrix(reg_anchor, reg_corners, shape)
         if not registration._registration_is_identity(matrix):
-            size = (shape[1], shape[0])
             if photo_visible is not None:
-                photo_visible = (
-                    cv2.warpPerspective(
-                        photo_visible.astype(np.uint8),
-                        matrix,
-                        size,
-                        flags=cv2.INTER_NEAREST,
-                        borderValue=0,
-                    )
-                    > 0
-                )
-            if isinstance(exposed, (bool, np.bool_)):
-                exposed = np.full(shape, exposed, dtype=bool)
-            exposed = (
-                cv2.warpPerspective(
-                    exposed.astype(np.uint8),
-                    matrix,
-                    size,
-                    flags=cv2.INTER_NEAREST,
-                    borderValue=0,
-                )
-                > 0
-            )
+                photo_visible = _warp_exposure_mask(photo_visible, matrix, shape)
+            exposed = _warp_exposure_mask(exposed, matrix, shape)
     if motion_fix is not None:
         if photo_visible is not None:
             photo_visible = (
@@ -342,7 +335,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._clock = clock
         self._hand_masker = hand_masker
         self._paper_exposure = occlusion.PaperExposureGuard()
-        self._paper_exposure_generation = None
         self._condition = threading.Condition()
         self._thread = threading.Thread(
             target=self._work, name="draw-page-clean", daemon=True
@@ -540,6 +532,13 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._generation_passes = 0
             self._quiet_passes = 0
             self._activity_quiet_passes = 0
+            # Troca a guarda por uma instancia fresca (swap atomico sob o
+            # lock): uma passada em voo da geracao velha segue no objeto
+            # antigo, ainda valido, e tem o resultado descartado no
+            # check de geracao. Leitores de pending/recovering nunca
+            # veem estado da geracao anterior.
+            self._paper_exposure = occlusion.PaperExposureGuard()
+            self._fill_recovery_waited = 0
             self._pending = None
             self._published = None
             self._published_display = None
@@ -777,11 +776,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         ):
             return False
         if (
-            (
-                self._paper_exposure.pending_fill_recovery
-                or self._paper_exposure.recovering
-            )
-            and self._fill_recovery_waited < occlusion._FILL_RECOVERY_PASSES
+            self._paper_exposure.recovery_pending
+            and self._fill_recovery_waited < occlusion._RECOVERY_WAIT_PASSES
         ):
             # Streak de evidência de tinta contando num bloco
             # anômalo: as passadas que a guarda precisa para adotar
@@ -1144,11 +1140,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # pos-saida (review do PR #118).
             is_masked = visible is not None and not _crop_all_visible(visible, corners)
             fill_pending = (
-                (
-                    self._paper_exposure.pending_fill_recovery
-                    or self._paper_exposure.recovering
-                )
-                and self._fill_recovery_waited < occlusion._FILL_RECOVERY_PASSES
+                self._paper_exposure.recovery_pending
+                and self._fill_recovery_waited < occlusion._RECOVERY_WAIT_PASSES
             )
             if (
                 self._post_exit_confirm_passes() > 1
@@ -1230,9 +1223,12 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             if generation != self._generation:
                 self._telemetry_skipped_stale += 1
                 return True
-        if generation != self._paper_exposure_generation:
-            self._paper_exposure.reset()
-            self._paper_exposure_generation = generation
+            # Captura a guarda desta geracao sob o lock: se new_generation
+            # trocar o objeto no meio da inferencia, o observe desta
+            # passada escreve na instancia orfa, nao na guarda nova —
+            # estado de pagina velha nao semeia referencia na pagina
+            # nova (Devin Review do PR #144).
+            exposure_guard = self._paper_exposure
         # Uma excecao do modelo (shape errado, sessao morta, ONNX
         # sem memoria) matava esta thread em silencio: o canvas
         # congelava no ultimo quadro e nada era impresso. O erro
@@ -1338,7 +1334,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # sustentado em [vote_hit, 0,7) confirmaria no voto mas
             # ficava vetado para sempre (Devin Review do PR #144).
             exposure = (
-                self._paper_exposure.observe(
+                exposure_guard.observe(
                     photometric_image,
                     visible,
                     ink_prob=prob,
@@ -1357,7 +1353,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     return False
                 if generation != self._generation:
                     return True
-                if self._paper_exposure.last_fill_adoption:
+                if exposure_guard.last_fill_adoption:
                     # A guarda acabou de adotar um bloco como
                     # preenchimento: as passadas que o votam precisam
                     # cobrir a janela de voto — sem rearma o
@@ -1372,10 +1368,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         self._confirm_passes,
                         votes._INK_VOTE_WINDOW,
                     )
-                elif (
-                    self._paper_exposure.pending_fill_recovery
-                    or self._paper_exposure.recovering
-                ):
+                elif exposure_guard.recovery_pending:
                     self._fill_recovery_waited += 1
                 else:
                     self._fill_recovery_waited = 0
@@ -2087,33 +2080,18 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 or follow_abstain
                 or motion_abstain
             )
-            if identity_switch_pending or (identity_deferred and identity_timed_out):
-                visible = np.zeros(prob.shape, dtype=bool)
-            if arbitration_abstain:
-                # Evento de arbitragem aberto: a passada e
-                # registrada e pontuada, mas nao vota.
-                visible = np.zeros(prob.shape, dtype=bool)
-            if follow_abstain:
-                # Evento de divergencia assentada aberto: a
-                # passada foi medida, mas nao vota — registrada
-                # na ancora velha, ela depositaria a copia
-                # deslocada que a re-ancoragem existe para
-                # nao fabricar.
-                visible = np.zeros(prob.shape, dtype=bool)
-            if motion_abstain:
-                # A folha anda sob um quad parado: registrada, esta
-                # passada carimbaria a copia deslocada da tinta.
-                visible = np.zeros(prob.shape, dtype=bool)
             if not pass_voted:
-                # Passada abstida nao deposita: o registro fica
-                # None para o avaliador nao projetar GT por uma
-                # geometria que nunca chegou ao canvas.
+                # Passada abstida nao vota nem deposita: evento de
+                # arbitragem/divergencia aberto, identidade pendente ou
+                # timed-out, ou a folha andando sob um quad parado —
+                # registrada, ela carimbaria a copia deslocada da tinta.
+                # O registro fica None para o avaliador nao projetar GT
+                # por uma geometria que nunca chegou ao canvas.
+                visible = np.zeros(prob.shape, dtype=bool)
                 self._last_registration = None
-            paper_exposed = None
-            if not self._config.paper_guard:
-                # Sem a guarda o comportamento é o legado: a evidência
-                # de papel exposto não rege a remoção.
-                paper_exposed = True
+            # Sem a guarda o comportamento é o legado: a evidência
+            # de papel exposto não rege a remoção.
+            paper_exposed = None if self._config.paper_guard else True
             if exposure is not None:
                 # O par de registro é o da passada que VOTA
                 # (_last_registration), não o medido antes da

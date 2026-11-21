@@ -516,3 +516,20 @@ def test_observe_resets_retention_when_the_source_changes(monkeypatch):
     assert masker._held_hands is not None  # mesma fonte: mantem
     masker.observe(FramePacket(frame, 3.0, 3), source_id=2)
     assert masker._held_hands is None  # outra fonte: descartada
+
+
+def test_long_absence_drops_the_held_footprint():
+    """Ausência real (hold de marcos expirado) limpa a pegada retida:
+    uma detecção parcial futura não a reata sobre a região que a mão
+    já deixou (Devin Review do PR #144)."""
+    masker = _bare_masker()
+    frame = np.zeros((120, 160, 3), dtype=np.uint8)
+    masker._landmarks = lambda *_args, **_kwargs: []
+    masker._last_hand_mask = np.full((120, 160), 255, np.uint8)
+    masker._last_hand_count = 2
+    masker._mask_misses = 1
+    empty = masker.mask(frame)
+    assert not empty.any()
+    assert masker._last_hand_mask is None
+    assert masker._last_hand_count == 0
+    assert masker._mask_misses == 0

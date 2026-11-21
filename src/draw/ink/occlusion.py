@@ -22,13 +22,22 @@ _TEXTURE_CHANGE = 0.015
 # (Devin Review do PR #144).
 _GLOBAL_SHIFT_FRACTION = 0.8
 _GLOBAL_SHIFT_MIN_TILES = 4
+_GLOBAL_SHIFT_MIN_RATIO = 0.25
+_GLOBAL_SHIFT_MAX_RATIO = 4.0
+# Bloco mínimo que veta adições: componente conexo de tiles anômalos
+# com os dois lados >= 3 e área >= 9 (um traço fino não é oclusor).
+_BLOCK_MIN_TILE_SIDE = 3
+_BLOCK_MIN_TILE_AREA = 9
+# Piso de luma no denominador do croma: pixels quase pretos produzem
+# croma infinito; 20 é o valor embutido no teto da referência.
+_CHROMA_LUMA_FLOOR = 20.0
 # O croma medido é canal / grayscale (máx. 255/20), não canal /
 # canal-máximo: iluminação colorida legítima passa de 2 — papel
 # neutro sob luz azul marca ~2.5 no canal B. Um teto de 2 na
 # referência deixava um resíduo >= _CHROMA_CHANGE e a página
 # inteira ficava vetada enquanto a luz durasse (Devin Review do
 # PR #144).
-_CHROMA_REFERENCE_MAX = 255.0 / 20.0
+_CHROMA_REFERENCE_MAX = 255.0 / _CHROMA_LUMA_FLOOR
 # Recuperação por preenchimento: um bloco escuro que o modelo lê como
 # tinta, passada após passada e com a mão fora do tile, é conteúdo da
 # página — não oclusor. Até _FILL_RECOVERY_PASSES seguidas o veto de
@@ -56,6 +65,10 @@ _MIN_PAPER_LUMA = 24.0
 # uma anomalia persistente nunca entra em recuperação (espelha o hold
 # de `paper_ok` do guarda anterior, agora por tile).
 _RECOVERY_HOLD_PASSES = 4
+# Teto da espera da trabalhadora por recuperação pendente (streak de
+# preenchimento ou hold de recuperação): cobre os dois orçamentos —
+# hoje coincidem em 4, mas pertencem a mecanismos diferentes.
+_RECOVERY_WAIT_PASSES = max(_FILL_RECOVERY_PASSES, _RECOVERY_HOLD_PASSES)
 
 
 class PaperExposureGuard:
@@ -120,6 +133,33 @@ class PaperExposureGuard:
         """
         return self._recovering is not None and bool(np.any(self._recovering))
 
+    @property
+    def recovery_pending(self):
+        """Recuperação com trabalho pendente (streak ou hold ativo)."""
+        return self.pending_fill_recovery or self.recovering
+
+    def _darkened(self, known, current):
+        """(darkened, expected): luma por tile contra a referência."""
+        expected = np.where(known, self._reference, self._page_reference or 0.0)
+        drop = np.maximum(_MIN_DARKENING, expected * _DARKENING_FRACTION)
+        return current < expected - drop, expected
+
+    def _color_anomaly(self, known, chroma, shape):
+        """Tiles com croma longe da referência; zeros sem evidência."""
+        color_anomaly = np.zeros(shape, dtype=bool)
+        if chroma is None or self._page_color_reference is None:
+            return color_anomaly
+        expected_color = (
+            np.where(
+                known[..., None],
+                self._color_reference,
+                self._page_color_reference,
+            )
+            if self._color_reference is not None
+            else np.broadcast_to(self._page_color_reference, chroma.shape)
+        )
+        return np.linalg.norm(chroma - expected_color, axis=2) > _CHROMA_CHANGE
+
     def observe(self, image, visible=None, ink_prob=None, ink_support_threshold=None):
         """Return separate masks for safe additions and paper exposure.
 
@@ -169,8 +209,12 @@ class PaperExposureGuard:
         else:
             visible = np.asarray(visible, dtype=bool)
             if visible.shape != (height, width):
-                updateable = np.zeros(current.shape, dtype=bool)
-            elif np.all(visible):
+                # Máscara em geometria errada é bug do chamador: sem
+                # veredito confiável devolve None (remoção congela no
+                # acumulador) em vez de congelar a referência e ainda
+                # varrer os streaks/adotados de preenchimento.
+                return None
+            if np.all(visible):
                 updateable = np.ones(current.shape, dtype=bool)
             else:
                 fraction = cv2.resize(
@@ -189,12 +233,15 @@ class PaperExposureGuard:
             self._page_color_reference = None
             self._ink_streak = np.zeros(current.shape, dtype=np.uint8)
             self._fill_adopted = np.zeros(current.shape, dtype=bool)
-            self._last_fill_adoption = False
             self._recovering = np.zeros(current.shape, dtype=np.uint8)
             self._was_anomalous = np.zeros(current.shape, dtype=bool)
 
         known = np.isfinite(self._reference)
         candidates = current[updateable]
+        # Invariante explícita: sem tiles à vista não há estimativa —
+        # o deslocamento global só roda com shifted >= 4, o que já
+        # implica candidates não-vazio, mas o nome fica definido sempre.
+        page_reference = 0.0
         if candidates.size:
             page_reference = float(
                 np.percentile(candidates, _PAGE_REFERENCE_PERCENTILE)
@@ -207,31 +254,16 @@ class PaperExposureGuard:
         # A tile with no clean history is compared to the page's robust
         # brightness estimate. This catches a hand already present on the
         # first sampled frame, before its darkness can become its baseline.
-        expected = np.where(known, self._reference, self._page_reference or 0.0)
-        drop = np.maximum(_MIN_DARKENING, expected * _DARKENING_FRACTION)
-        darkened = current < expected - drop
-
-        color_anomaly = np.zeros(current.shape, dtype=bool)
+        darkened, expected = self._darkened(known, current)
+        chroma = None
         if color is not None:
-            chroma = color / np.maximum(current[..., None], 20.0)
+            chroma = color / np.maximum(current[..., None], _CHROMA_LUMA_FLOOR)
             color_tiles = updateable & ~darkened
             if np.any(color_tiles):
                 self._page_color_reference = np.median(
                     chroma[color_tiles], axis=0
                 ).astype(np.float32)
-            if self._page_color_reference is not None:
-                expected_color = (
-                    np.where(
-                        known[..., None],
-                        self._color_reference,
-                        self._page_color_reference,
-                    )
-                    if self._color_reference is not None
-                    else np.broadcast_to(self._page_color_reference, chroma.shape)
-                )
-                color_anomaly = (
-                    np.linalg.norm(chroma - expected_color, axis=2) > _CHROMA_CHANGE
-                )
+        color_anomaly = self._color_anomaly(known, chroma, current.shape)
 
         anomalous = darkened | color_anomaly
         updateable_px = int(np.count_nonzero(updateable))
@@ -251,12 +283,16 @@ class PaperExposureGuard:
             # histórico (Devin Review do PR #144).
             measured = anomalous & updateable & known
             if np.any(measured):
-                ratio = float(np.median(current[measured] / expected[measured]))
+                # expected ⊆ self._reference para tiles conhecidos:
+                # lê a referência direto, sem recomputar o grid.
+                ratio = float(np.median(current[measured] / self._reference[measured]))
             elif self._page_reference:
                 ratio = page_reference / self._page_reference
             else:
                 ratio = 1.0
-            ratio = float(np.clip(ratio, 0.25, 4.0))
+            ratio = float(
+                np.clip(ratio, _GLOBAL_SHIFT_MIN_RATIO, _GLOBAL_SHIFT_MAX_RATIO)
+            )
             self._reference[known] *= np.float32(ratio)
             self._page_reference = page_reference
             if self._color_reference is not None:
@@ -280,19 +316,8 @@ class PaperExposureGuard:
             # Absorve apenas o componente comum. Um tile muito mais
             # escuro/colorido que o resto continua anômalo e não prova
             # papel exposto — inclusive sob a sombra durante a mudança.
-            expected = np.where(known, self._reference, self._page_reference)
-            drop = np.maximum(_MIN_DARKENING, expected * _DARKENING_FRACTION)
-            darkened = current < expected - drop
-            color_anomaly = np.zeros(current.shape, dtype=bool)
-            if color is not None and self._page_color_reference is not None:
-                expected_color = np.where(
-                    known[..., None],
-                    self._color_reference,
-                    self._page_color_reference,
-                )
-                color_anomaly = (
-                    np.linalg.norm(chroma - expected_color, axis=2) > _CHROMA_CHANGE
-                )
+            darkened, expected = self._darkened(known, current)
+            color_anomaly = self._color_anomaly(known, chroma, current.shape)
             anomalous = darkened | color_anomaly
 
             # A lâmpada direcional apaga e a página nivela no brilho
@@ -367,7 +392,11 @@ class PaperExposureGuard:
             )
             for label in range(1, count):
                 _x, _y, block_width, block_height, area = stats[label]
-                if block_width >= 3 and block_height >= 3 and area >= 9:
+                if (
+                    block_width >= _BLOCK_MIN_TILE_SIDE
+                    and block_height >= _BLOCK_MIN_TILE_SIDE
+                    and area >= _BLOCK_MIN_TILE_AREA
+                ):
                     block[labels == label] = 1
         if np.any(adopted):
             block[adopted] = 0
@@ -383,7 +412,9 @@ class PaperExposureGuard:
 
         # A clean first sample can seed and use its own tile immediately;
         # anomalously dark tiles remain unknown and cannot authorize votes.
-        paper_grid = (known | initialize) & ~anomalous
+        # initialize ⊆ updateable, então a grade é "conhecido ou à vista,
+        # sem anomalia".
+        paper_grid = (known | updateable) & ~anomalous
         paper_exposed = (
             True
             if paper_grid.all()
@@ -415,9 +446,9 @@ class PaperExposureGuard:
                 if isinstance(paper_exposed, (bool, np.bool_)):
                     paper_exposed = np.full((height, width), paper_exposed, dtype=bool)
                 paper_exposed[dark_ink] = False
-        visible = None
+        unblocked = None
         if np.any(block):
-            visible = (
+            unblocked = (
                 cv2.resize(
                     (block == 0).astype(np.uint8),
                     (width, height),
@@ -436,20 +467,19 @@ class PaperExposureGuard:
             )
             recovered = adopted_pixels & pixel_support
             if np.any(recovered):
-                if visible is None:
-                    visible = np.ones((height, width), dtype=bool)
-                visible[recovered] = True
-        # Hold de recuperação: tile que saiu de anomalia conta como
-        # "evidência voltando" por _RECOVERY_HOLD_PASSES passadas; um que
-        # re-escurece sai do hold, e o resto decai uma por passada.
-        left = self._was_anomalous & ~anomalous
-        self._recovering[left] = _RECOVERY_HOLD_PASSES
-        self._recovering[anomalous] = 0
+                if unblocked is None:
+                    unblocked = np.ones((height, width), dtype=bool)
+                unblocked[recovered] = True
+        # Hold de recuperação: decai um por passada, zera onde a
+        # anomalia voltou, e o tile que saiu de anomalia recarrega o
+        # hold (a evidência voltando fica aberta _RECOVERY_HOLD_PASSES).
         np.subtract(
-            self._recovering, 1, out=self._recovering, where=(self._recovering > 0) & ~left
+            self._recovering, 1, out=self._recovering, where=self._recovering > 0
         )
+        self._recovering[anomalous] = 0
+        self._recovering[self._was_anomalous & ~anomalous] = _RECOVERY_HOLD_PASSES
         self._was_anomalous = anomalous.copy()
         return ExposureAssessment(
-            visible=visible,
+            visible=unblocked,
             paper_exposed=paper_exposed,
         )

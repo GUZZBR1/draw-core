@@ -87,7 +87,11 @@ class LayeredInkAccumulator:
         if visible is not None:
             visible = np.asarray(visible, dtype=bool)
             if visible.shape != prob.shape:
-                visible = None
+                # Máscara em geometria errada é bug do chamador:
+                # None devolveria a passada aberta (evidência livre sob
+                # oclusão); zeros veta tudo — falha fechada dos dois
+                # lados, como uma passada abstida.
+                visible = np.zeros(prob.shape, dtype=bool)
         if paper_exposed is not None and not isinstance(
             paper_exposed, (bool, np.bool_)
         ):

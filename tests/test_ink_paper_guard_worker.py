@@ -1,11 +1,13 @@
 """Guarda fotometrica pelo worker real (issue #129): mao sem mascara."""
 
+import threading
 import time
 
 import numpy as np
 
 from draw.contracts import WarpedPage
-from draw.ink import occlusion, worker as worker_mod
+from draw.ink import occlusion
+from draw.ink import worker as worker_mod
 from draw.ink.config import InkConfig
 
 H, W = 256, 384
@@ -302,3 +304,28 @@ def test_lingering_shadow_across_all_post_exit_passes_still_confirms_and_border_
     finally:
         worker.stop()
 
+
+def test_mid_pass_generation_swap_writes_to_the_orphan_guard(monkeypatch):
+    """new_generation durante a inferência troca a guarda; o observe
+    da passada velha escreve na instância órfã — estado de página
+    velha não semeia referência na página nova."""
+    worker, ink, generation = _run(monkeypatch, InkConfig())
+    observed = threading.Event()
+    try:
+        old_guard = worker._paper_exposure
+        real_observe = old_guard.observe
+
+        def poisoned(*args, **kwargs):
+            try:
+                return real_observe(*args, **kwargs)
+            finally:
+                worker.new_generation()
+                observed.set()
+
+        old_guard.observe = poisoned
+        worker.submit(WarpedPage(_paper(), generation, Q0, np.ones((H, W), bool)))
+        assert observed.wait(5.0)
+        assert worker._paper_exposure is not old_guard
+        assert worker._paper_exposure._reference is None
+    finally:
+        worker.stop()
