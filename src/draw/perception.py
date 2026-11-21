@@ -104,6 +104,16 @@ _TIMING_LOG_EVERY = 100
 # neural subdispara num setup novo.
 PRESENCE_VETO_LOGIT = -3.0
 
+# Piso de área para um componente conectado contar como componente
+# de cena em _scene_stats, em fração do frame nativo (0,5%). Referência
+# da issue #106: a mancha de falso-papel no piso claro cobria ~55%
+# do quadro — duas ordens de grandeza acima do piso — enquanto o
+# resíduo de classificação de um argmax de quatro classes aparece em
+# salpicos de dezenas de pixels, abaixo dele. A 384² o limiar pede
+# ~740 px (quadrado de ~27 px de lado): uma folha longe da câmera
+# ainda conta, o ruído não.
+_SCENE_COMPONENT_MIN_FRAC = 0.005
+
 
 def _frame_to_tensor(frame, size):
     """Pré-processo ÚNICO frame→tensor do detector de folha.
@@ -243,6 +253,80 @@ def _session_contract(session):
     )
 
 
+def _scene_stats(coverage_mask, hand_mask):
+    """Medidas de qualidade de cena sobre a máscara de cobertura nativa.
+
+    O sinal de presença responde "há papel?" e nada diz sobre a cena:
+    na captura da issue #106 (frames_s3_geometria_1117_1754, piso
+    claro fora da mesa de referência) a segmentação rotulou lajota
+    como papel, a mancha colou no blob da folha e o quadrilátero saiu
+    cobrindo braço e chão. Este dict separa "papel detectado" de
+    "cena estranha detectada" sem decidir nada — quem lê o rastro na
+    telemetria combina cobertura alta, máscara colada nas bordas e
+    mão sem folha coerente.
+
+    coverage_mask e hand_mask são mapas 0/≠0 na resolução nativa do
+    modelo; hand_mask None (contrato de dois canais) deixa
+    hand_ratio None, pois esse modelo não sabe o que é mão. Campos:
+
+    - coverage_ratio: não-fundo / total do frame — o "máscara cobre
+      55% do frame" medido na captura;
+    - components: componentes conectados (8-vizinhança) com área ≥
+      _SCENE_COMPONENT_MIN_FRAC do frame — o mesmo conjunto de
+      regiões dos contornos externos (uma região com buraco segue um
+      componente só); o salpico de ruído fica fora;
+    - largest_share: pixels do maior componente / não-fundo, máximo
+      sobre TODOS os componentes (não só os contados): mede a
+      concentração do não-fundo. Um blob colado (piso+folha numa
+      união só) fecha ~1,0 — a separação dele vem de coverage_ratio
+      e border_ratio, não deste campo; um salpico sozinho também
+      marca 1,0 ("tudo que há é um blob" é verdade ali), e o que o
+      distingue é components=0 com coverage_ratio ≈ 0;
+    - border_ratio: fração do perímetro do frame que é não-fundo —
+      os quads explodidos da issue nascem de máscaras coladas na
+      borda (96–100% do frame);
+    - hand_ratio: pixels de mão / total.
+
+    Custo: um connectedComponentsWithStats a 384² por previsão —
+    desprezível contra os ~58 ms do session.run medidos na mesa.
+    """
+    total_px = coverage_mask.size
+    non_background = int(np.count_nonzero(coverage_mask))
+    min_area = _SCENE_COMPONENT_MIN_FRAC * total_px
+    _, _, component_stats, _ = cv2.connectedComponentsWithStats(
+        coverage_mask.astype(np.uint8), connectivity=8
+    )
+    # Rótulo 0 é o fundo; CC_STAT_AREA é a contagem exata de pixels
+    # de cada componente — medida do auditor lab/seg_scene_audit.py.
+    # A área de polígono do contorno mediria ~zero num blob fino e
+    # longo e o piso o descartaria apesar dos pixels reais.
+    areas = component_stats[1:, cv2.CC_STAT_AREA]
+    components = int(np.count_nonzero(areas >= min_area))
+    # O maior blob sai do máximo sobre todos os rótulos, contados ou
+    # não (sem componente, non_background é zero e a fatia é 0,0).
+    largest_share = float(areas.max() / non_background) if non_background else 0.0
+    # Fração do perímetro ocupada por não-fundo: linhas de cima e de
+    # baixo inteiras, colunas sem os cantos — cada pixel de borda
+    # conta exatamente uma vez.
+    border_px = np.concatenate(
+        (
+            coverage_mask[0],
+            coverage_mask[-1],
+            coverage_mask[1:-1, 0],
+            coverage_mask[1:-1, -1],
+        )
+    )
+    return {
+        "coverage_ratio": non_background / total_px,
+        "components": components,
+        "largest_share": largest_share,
+        "border_ratio": float(np.count_nonzero(border_px) / border_px.size),
+        "hand_ratio": (
+            None if hand_mask is None else float(np.count_nonzero(hand_mask) / total_px)
+        ),
+    }
+
+
 class NeuralSheetDetector:
     """Detector neural com sessão própria.
 
@@ -267,7 +351,12 @@ class NeuralSheetDetector:
     última chamada a predict (None antes da primeira e após um frame
     vazio): nos modelos legados é o logit treinado; no SegFormer de
     quatro classes é um sinal derivado da área segmentada. O app usa-o
-    para decidir se a reserva clássica pode falar.
+    para decidir se a reserva clássica pode falar. O atributo
+    last_scene_stats guarda o dict de _scene_stats da mesma chamada
+    (None nos mesmos casos): a presença não separa "papel detectado"
+    de "cena estranha detectada" — o falso papel de piso claro da
+    issue #106 — e o rastro da aquisição leva essas medidas à
+    telemetria.
     """
 
     def __init__(
@@ -308,6 +397,10 @@ class NeuralSheetDetector:
         # o voto sob a mão é a visibilidade, não a cobertura.
         self.last_coverage_mask = None
         self.last_hand_mask = None
+        # Qualidade de cena da última previsão (dict de _scene_stats):
+        # o complemento do logit de presença para a telemetria dizer
+        # "papel detectado" de "cena estranha detectada" (issue #106).
+        self.last_scene_stats = None
         self._timing_stats = {
             phase: {"count": 0, "sum_ms": 0.0, "max_ms": 0.0}
             for phase in _TIMING_PHASES
@@ -563,6 +656,13 @@ class NeuralSheetDetector:
         # Resolução nativa da máscara — quem consome faz o upsample
         # no mesmo ponto da cobertura.
         self.last_hand_mask = None if hand_small is None else hand_small * 255
+        # Qualidade de cena sobre a cobertura crua que alimenta
+        # last_coverage_mask: o preenchimento de buracos é conveniência
+        # do voto de tinta, não do diagnóstico — a mão que o modelo
+        # viu como fundo dentro da folha não pode virar não-fundo
+        # aqui. coverage_small e hand_small saem de qualquer um dos
+        # três caminhos de saída acima.
+        self.last_scene_stats = _scene_stats(coverage_small, hand_small)
         if not native:
             mask = cv2.resize(mask, (frame_w, frame_h), interpolation=cv2.INTER_NEAREST)
         if self._timing_enabled:
@@ -579,6 +679,7 @@ class NeuralSheetDetector:
     def __call__(self, frame, *, return_mask=True):
         if frame is None or frame.size == 0:
             self.last_presence_logit = None
+            self.last_scene_stats = None
             return None, None, None
         presence, mask = self.predict(frame, native=True)
         frame_h, frame_w = frame.shape[:2]
