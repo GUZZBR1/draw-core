@@ -14,6 +14,7 @@ CONDITION_KEYS = (
     "camera",
 )
 EXPECTED_RULES = ("no_ink", "ink_present", "canvas_stable")
+REGION_KEYS = ("writing", "ruling_only")
 
 
 class ClipError(Exception):
@@ -52,6 +53,61 @@ def count_frames(clip_dir) -> int:
     if not clip_dir.is_dir():
         return 0
     return sum(1 for p in clip_dir.glob("f*.png") if p.is_file())
+
+
+def rect_problem(rect, size=None):
+    """``None`` se ``rect`` é um ``[x0, y0, x1, y1]`` utilizável como fatia.
+
+    Quatro inteiros, não negativos e estritamente ordenados; ``size``
+    ``(w, h)`` do canvas, quando conhecido, também confere os limites
+    superiores. O texto do problema é devolvido para composição de
+    mensagens por ``check_regions`` e pela validação de ``expected``.
+    """
+    if not isinstance(rect, list) or len(rect) != 4:
+        return "deve ser [x0, y0, x1, y1]"
+    if not all(_is_int(v) for v in rect):
+        return f"coordenadas nao inteiras: {rect!r}"
+    x0, y0, x1, y1 = rect
+    if x0 < 0 or y0 < 0 or x0 >= x1 or y0 >= y1:
+        return f"limites invalidos {rect!r} (precisa 0 <= x0 < x1, 0 <= y0 < y1)"
+    if size is not None:
+        w, h = size
+        if x1 > w or y1 > h:
+            return f"fora do canvas {w}x{h}: {rect!r}"
+    return None
+
+
+def check_regions(spec, size=None) -> list:
+    """Problemas de um ``regions.json``: chaves suportadas com retas válidas."""
+    if not isinstance(spec, dict):
+        return ["regions.json deve ser objeto"]
+    problems = []
+    for key, value in spec.items():
+        if key not in REGION_KEYS:
+            problems.append(f"regions.json: chave desconhecida {key!r}")
+            continue
+        if not isinstance(value, list):
+            problems.append(f"regions.{key} deve ser lista de retas")
+            continue
+        for idx, rect in enumerate(value):
+            problem = rect_problem(rect, size)
+            if problem is not None:
+                problems.append(f"regions.{key}[{idx}] {problem}")
+    return problems
+
+
+def parse_regions(spec, size=None) -> dict:
+    """Normaliza ``regions.json`` -> ``{chave: [(x0, y0, x1, y1), ...]}``.
+
+    Mesma régua de ``check_regions``: qualquer problema vira ``ClipError``
+    — quem conta pixels nunca fatia uma caixa que a validação rejeitaria.
+    """
+    problems = check_regions(spec, size)
+    if problems:
+        raise ClipError("regions.json invalido: " + "; ".join(problems))
+    return {
+        key: [tuple(rect) for rect in spec[key]] for key in REGION_KEYS if key in spec
+    }
 
 
 def _read_json_dict(path: Path, label: str) -> dict:
@@ -131,7 +187,7 @@ def load_clip(clip_dir) -> ClipSpec:
     )
 
 
-def _validate_expected(expected) -> list[str]:
+def _validate_expected(expected, frames=None, size=None) -> list[str]:
     problems = []
     if not isinstance(expected, list):
         return ["expected deve ser uma lista"]
@@ -148,22 +204,38 @@ def _validate_expected(expected) -> list[str]:
                 not isinstance(span, list)
                 or len(span) != 2
                 or not all(_is_int(v) for v in span)
+                or span[0] < 0
                 or span[0] > span[1]
             ):
                 problems.append(
-                    f"expected[{idx}].frames deve ser [a, b] com ints a <= b"
+                    f"expected[{idx}].frames deve ser [a, b] com ints 0 <= a <= b"
+                )
+            elif frames is not None and span[1] >= frames:
+                problems.append(
+                    f"expected[{idx}].frames {span!r} fora do clipe ({frames} quadros)"
                 )
         if "region" in entry:
-            reg = entry["region"]
-            if (
-                not isinstance(reg, list)
-                or len(reg) != 4
-                or not all(_is_int(v) for v in reg)
-            ):
-                problems.append(f"expected[{idx}].region deve ter 4 inteiros")
+            problem = rect_problem(entry["region"], size)
+            if problem is not None:
+                problems.append(f"expected[{idx}].region {problem}")
         if "min_px" in entry and not _is_int(entry["min_px"]):
             problems.append(f"expected[{idx}].min_px deve ser inteiro")
     return problems
+
+
+def _canvas_size(raw):
+    """``(w, h)`` do canvas retificado do clipe, ou ``None`` se incógnito.
+
+    O replay roda sempre na grade a4 na orientação declarada em
+    ``clip.json`` (``run_clip`` assume retrato na ausência dela).
+    Importação preguiçosa: ``draw.config`` carrega cv2.
+    """
+    from draw import config
+
+    orientation = raw.get("orientation") or "retrato"
+    if orientation not in config.ORIENTATIONS:
+        return None
+    return config.paper_grid("a4", orientation)
 
 
 def validate_clip(clip_dir) -> list[str]:
@@ -215,20 +287,26 @@ def validate_clip(clip_dir) -> list[str]:
     if "provenance" in raw and not isinstance(raw["provenance"], dict):
         problems.append("provenance deve ser objeto")
 
+    regions_path = clip_dir / "regions.json"
+    size = _canvas_size(raw) if "expected" in raw or regions_path.exists() else None
+
     if "expected" in raw:
-        problems.extend(_validate_expected(raw["expected"]))
+        declared = raw.get("frames")
+        frames = declared if _is_int(declared) and declared >= 0 else None
+        problems.extend(_validate_expected(raw["expected"], frames, size))
 
     if "issues" in raw:
         issues = raw["issues"]
         if not isinstance(issues, list) or not all(_is_int(v) for v in issues):
             problems.append("issues deve ser lista de inteiros")
 
-    regions_path = clip_dir / "regions.json"
     if regions_path.exists():
         try:
-            _read_json_dict(regions_path, "regions.json")
+            spec = _read_json_dict(regions_path, "regions.json")
         except ClipError as exc:
             problems.append(str(exc))
+        else:
+            problems.extend(check_regions(spec, size))
 
     return problems
 

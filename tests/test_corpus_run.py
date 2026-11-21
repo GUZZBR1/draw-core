@@ -128,7 +128,9 @@ def test_evaluate_expected_rules():
     )
     res_bad = SimpleNamespace(canvas_px=20, retracted_px_total=3)
     verdicts_bad = evaluate_expected(clip, res_bad)
-    assert [v["ok"] for v in verdicts_bad] == [False, False, False, False]
+    # Retracao provisoria nao derruba canvas_stable: a regua olha o
+    # confirmado, e sem traco o fallback e o ponto final (sem colapso).
+    assert [v["ok"] for v in verdicts_bad] == [False, False, True, False]
 
     res_ok = SimpleNamespace(canvas_px=0, retracted_px_total=0)
     verdicts_ok = evaluate_expected(clip, res_ok)
@@ -138,6 +140,92 @@ def test_evaluate_expected_rules():
 
     res_ink = SimpleNamespace(canvas_px=60, retracted_px_total=0)
     assert evaluate_expected(clip, res_ink)[1]["ok"] is True
+
+
+def _trace(points):
+    """[(px, gen), ...] -> lista de pontos _trace com quadros 0..n."""
+    return [{"frame": i, "px": px, "gen": gen} for i, (px, gen) in enumerate(points)]
+
+
+def test_canvas_stable_catches_confirmed_collapse_and_reopen():
+    """canvas_stable mede o CONFIRMADO: queda a zero ou reabertura de
+    sessao (geracao nova) falham; retracao so provisoria nao."""
+    clip = SimpleNamespace(expected=[{"rule": "canvas_stable"}])
+    res = SimpleNamespace(canvas_px=2000, retracted_px_total=0)
+
+    # Colapso transiente: 2000 px confirmados zeram e voltam (o bug do
+    # review — antes passava porque retracted_px_total ficava 0).
+    run = {"_trace": _trace([(2000, 1), (2000, 1), (0, 1), (2000, 1)])}
+    assert evaluate_expected(clip, res, run)[0]["ok"] is False
+
+    # Reabertura sem queda visivel: a republicacao esconde o px, mas a
+    # geracao trocou — o canvas exibido foi limpo ao reabrir a sessao.
+    run = {"_trace": _trace([(100, 1), (100, 2), (100, 2)])}
+    assert evaluate_expected(clip, res, run)[0]["ok"] is False
+
+    # So provisorio retraiu: confirmado cresce e devolve um resto sem
+    # zerar nem reabrir — estavel (retracted_px_total nao entra na regua).
+    res_ret = SimpleNamespace(canvas_px=800, retracted_px_total=99)
+    run = {"_trace": _trace([(0, 1), (500, 1), (900, 1), (800, 1)])}
+    assert evaluate_expected(clip, res_ret, run)[0]["ok"] is True
+
+    # Nunca confirmou tinta: nada a colapsar.
+    res_empty = SimpleNamespace(canvas_px=0, retracted_px_total=0)
+    run = {"_trace": _trace([(0, 1), (0, 1), (0, 1)])}
+    assert evaluate_expected(clip, res_empty, run)[0]["ok"] is True
+
+
+def test_expected_scopes_restrict_ink_to_window_and_region():
+    """Tinta fora da janela de frames ou do retangulo nao satisfaz a regra."""
+    clip = SimpleNamespace(
+        expected=[
+            {"rule": "ink_present", "min_px": 100, "frames": [1, 3]},
+            {"rule": "ink_present", "min_px": 100, "region": [0, 0, 400, 1200]},
+            {"rule": "no_ink", "frames": [2, 4], "region": [0, 0, 400, 1200]},
+            {
+                "rule": "ink_present",
+                "min_px": 100,
+                "frames": [0, 1],
+                "region": [0, 0, 400, 1200],
+            },
+        ]
+    )
+    res = SimpleNamespace(canvas_px=500, retracted_px_total=0)
+    rect = (0, 0, 400, 1200)
+
+    # Tinta so no quadro 5 (depois da janela) e nunca dentro do retangulo.
+    run = {
+        "_trace": _trace([(0, 1)] * 5 + [(500, 1)]),
+        "_scope_px": {rect: [0] * 6},
+    }
+    assert [v["ok"] for v in evaluate_expected(clip, res, run)] == [
+        False,
+        False,
+        True,
+        False,
+    ]
+
+    # Tinta dentro da janela e do retangulo a partir do quadro 2.
+    run = {
+        "_trace": _trace([(0, 1), (0, 1), (150, 1), (150, 1), (150, 1)]),
+        "_scope_px": {rect: [0, 0, 120, 120, 120]},
+    }
+    # A 4a regra pede tinta na janela 0..1 do retangulo — a tinta chega no
+    # quadro 2, fora dela.
+    assert [v["ok"] for v in evaluate_expected(clip, res, run)] == [
+        True,
+        True,
+        False,
+        False,
+    ]
+
+    # Recorte pedido sem serie medida: a regra nao pode ser satisfeita.
+    run = {"_trace": _trace([(150, 1)] * 5)}
+    assert evaluate_expected(clip, res, run)[1]["ok"] is False
+
+    # Janela fora do replay inteiro: falha explicita, nao vazio que passa.
+    clip_far = SimpleNamespace(expected=[{"rule": "no_ink", "frames": [9, 12]}])
+    assert evaluate_expected(clip_far, res, run)[0]["ok"] is False
 
 
 def _write_fake_clip_json(clip_dir, expected=None):

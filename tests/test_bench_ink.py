@@ -251,6 +251,36 @@ def test_run_clip_honors_the_orientation_of_the_clip(tmp_path):
     assert out["_canvas"].shape == (850, 1200)
 
 
+def test_run_clip_exposes_trace_and_scope_counts(tmp_path):
+    """_trace = (quadro, px confirmado, geracao) por frame; _scope_px = a
+    mesma serie restrita a cada reta pedida — base das regras de escopo."""
+    clip = _fake_clip(tmp_path)
+    out = bench.run_clip(
+        clip,
+        [],
+        detector=_Detector(),
+        page_clean=_Ink(),
+        trace=True,
+        scopes=[(90, 90, 210, 210), (0, 0, 10, 10)],
+    )
+    assert len(out["_trace"]) == out["frames"] == 10
+    assert out["_trace"][-1]["px"] == out["canvas_px"]
+    assert out["_trace"][0]["frame"] == 0
+    scoped = out["_scope_px"]
+    assert list(scoped[(90, 90, 210, 210)])[-1] == out["canvas_px"]
+    assert scoped[(0, 0, 10, 10)] == [0] * 10
+
+
+def test_run_clip_rejects_invalid_regions_before_replay(tmp_path):
+    """Caixa fora da régua compartilhada falha cedo, sem rodar o laço."""
+    from lab.corpus.clip import ClipError
+
+    clip = _fake_clip(tmp_path)
+    (clip / "regions.json").write_text(json.dumps({"writing": [[10, 20, 40]]}))
+    with pytest.raises(ClipError, match="regions"):
+        bench.run_clip(clip, [], detector=_Detector(), page_clean=_Ink())
+
+
 # ----------------------------------------------------------------- presets
 
 
