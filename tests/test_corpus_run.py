@@ -140,7 +140,7 @@ def test_evaluate_expected_rules():
     assert evaluate_expected(clip, res_ink)[1]["ok"] is True
 
 
-def _write_fake_clip_json(clip_dir, expected=None):
+def _write_fake_clip_json(clip_dir, expected=None, conditions=None):
     clip_dir.mkdir(parents=True, exist_ok=True)
     (clip_dir / "clip.json").write_text(
         json.dumps(
@@ -150,6 +150,7 @@ def _write_fake_clip_json(clip_dir, expected=None):
                 "frames": 2,
                 "desc": "fake",
                 "expected": expected or [],
+                "conditions": conditions or {},
             }
         ),
         encoding="utf-8",
@@ -316,3 +317,138 @@ def test_render_markdown_and_summary():
     assert summary["failures"] == 1
     assert len(summary["expected_failures"]) == 1
     assert summary["expected_failures"][0]["clip"] == "c1"
+
+
+def _result(clip, bundle, canvas_px, conditions=None):
+    return ClipResult(
+        clip=clip,
+        bundle=bundle,
+        flags=[],
+        frames=10,
+        canvas_px=canvas_px,
+        provisional_median_px=0.0,
+        provisional_last_px=0.0,
+        retracted_px_total=0,
+        passes=1,
+        wall_s=0.1,
+        cpu_s_per_scene_s=0.2,
+        conditions=dict(conditions or {}),
+    )
+
+
+def test_run_bundle_carrega_conditions_no_resultado(monkeypatch, tmp_path):
+    import lab.bench_ink as bench_ink
+
+    clip_dir = tmp_path / "clipe-cond"
+    _write_fake_clip_json(
+        clip_dir, conditions={"lighting": "sombra-movel", "motion": "estatica"}
+    )
+    monkeypatch.setattr(
+        bench_ink,
+        "run_clip",
+        lambda cdir, flags, **_kw: {
+            "clip": cdir.name,
+            "frames": 2,
+            "canvas_px": 10,
+            "provisional_median_px": 0.0,
+            "provisional_last_px": 0.0,
+            "retracted_px_total": 0,
+            "passes": 1,
+            "cpu_s_per_scene_s": 0.1,
+            "wall_s": 0.05,
+        },
+    )
+    res = run_bundle(clip_dir, "base", [])
+    assert res.conditions == {"lighting": "sombra-movel", "motion": "estatica"}
+
+    # Round trip JSONL preserva rotulos; resultado antigo sem a chave carrega {}.
+    path = write_results(tmp_path / "r.jsonl", [res])
+    assert load_results(path)[0].conditions == res.conditions
+    linha_antiga = {k: v for k, v in res.to_dict().items() if k != "conditions"}
+    assert ClipResult.from_dict(linha_antiga).conditions == {}
+
+
+def test_render_markdown_agrupa_por_condicao():
+    results = [
+        _result("sombra-a", "base", 100, {"lighting": "sombra"}),
+        _result("sombra-a", "cand", 150, {"lighting": "sombra"}),
+        _result("sombra-b", "base", 60, {"lighting": "sombra", "motion": "movel"}),
+        _result("sombra-b", "cand", 60, {"lighting": "sombra", "motion": "movel"}),
+        _result("claro", "base", 80, {"lighting": "claro"}),
+        _result("claro", "cand", 90, {"lighting": "claro"}),
+        _result("sem-rotulo", "base", 10),
+        _result("quebrado", "cand", 0, {"lighting": "claro"}),
+    ]
+    results[-1].error = "falhou"
+    md = render_markdown(results, baseline="base")
+    assert "## Condições" in md
+    assert "### lighting=claro" in md
+    assert "### lighting=sombra" in md
+    assert "### lighting=sombra, motion=movel" in md
+    assert "clipes: claro" in md
+    assert "| cand | 150 | 0 | 1 | +50 px (+50%) |" in md
+    assert "| cand | 90 | 0 | 1 | +10 px (+12%) |" in md
+    # Sem rotulo ou com erro nao entra em fatia de condicao.
+    assert "clipes: quebrado" not in md
+    assert "clipes: sem-rotulo" not in md
+
+    # Sem nenhum rotulo no conjunto, a secao nao aparece.
+    md_sem = render_markdown([_result("c", "base", 1)], baseline="base")
+    assert "## Condições" not in md_sem
+
+
+def test_report_rerenderiza_com_baseline_salvo(monkeypatch, tmp_path, capsys):
+    """Baseline nao-primeiro sobrevive a run -> save -> report (BUG_0006)."""
+    import lab.bench_ink as bench_ink
+    from lab.corpus.__main__ import main
+
+    _write_fake_clip_json(tmp_path / "clip-a", conditions={"lighting": "sombra"})
+
+    def fake_run_clip(cdir, flags, **_kw):
+        return {
+            "clip": cdir.name,
+            "frames": 2,
+            "canvas_px": 120 if flags else 100,
+            "provisional_median_px": 0.0,
+            "provisional_last_px": 0.0,
+            "retracted_px_total": 0,
+            "passes": 1,
+            "cpu_s_per_scene_s": 0.1,
+            "wall_s": 0.05,
+        }
+
+    monkeypatch.setattr(bench_ink, "run_clip", fake_run_clip)
+    out = tmp_path / "saida"
+    rc = main(
+        [
+            "run",
+            str(tmp_path),
+            "--bundle",
+            "candidate:cand=1",
+            "--bundle",
+            "control:",
+            "--baseline",
+            "control",
+            "--verify",
+            "none",
+            "--out",
+            str(out),
+        ]
+    )
+    assert rc == 0
+    meta = json.loads((out / "run.json").read_text(encoding="utf-8"))
+    assert meta["baseline"] == "control"
+    assert meta["bundles"] == ["candidate", "control"]
+
+    capsys.readouterr()  # descarta o resumo do run
+    assert main(["report", str(out / "results.jsonl")]) == 0
+    md = capsys.readouterr().out
+    assert "+20 px (+20%)" in md
+    assert "baseline: control" in md
+    assert "## Condições" in md and "clipes: clip-a" in md
+
+    # --baseline explicito sobrepoe o salvo.
+    assert main(["report", str(out / "results.jsonl"), "--baseline", "candidate"]) == 0
+    md_override = capsys.readouterr().out
+    assert "-20 px" in md_override
+    assert "baseline: candidate" in md_override

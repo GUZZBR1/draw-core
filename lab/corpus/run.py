@@ -49,8 +49,10 @@ def run_bundle(
         config.PAPER_W,
         config.PAPER_H,
     )
+    conditions = {}
     try:
         clip = load_clip(clip_dir)
+        conditions = dict(clip.conditions)
         run_dict = bench_ink.run_clip(
             clip.dir,
             list(flags),
@@ -60,6 +62,7 @@ def run_bundle(
         )
         res = ClipResult.from_run_dict(clip.name, bundle, list(flags), run_dict)
         res.expected_verdicts = evaluate_expected(clip, res)
+        res.conditions = conditions
         return res
     except Exception as exc:
         return ClipResult(
@@ -75,6 +78,7 @@ def run_bundle(
             wall_s=0.0,
             cpu_s_per_scene_s=0.0,
             error=str(exc),
+            conditions=conditions,
         )
     finally:
         (

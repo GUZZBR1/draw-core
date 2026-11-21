@@ -102,12 +102,13 @@ def _cmd_verify(args) -> int:
     return 2 if problems else 0
 
 
-def _write_outputs(out_dir: Path, results, baseline: str, title: str):
-    from lab.corpus.metrics import write_results
+def _write_outputs(out_dir: Path, results, baseline: str, title: str, meta=None):
+    from lab.corpus.metrics import RUN_META_NAME, write_results, write_run_meta
     from lab.corpus.report import render_markdown, render_summary
 
     out_dir.mkdir(parents=True, exist_ok=True)
     write_results(out_path := out_dir / "results.jsonl", results)
+    write_run_meta(out_dir / RUN_META_NAME, {"baseline": baseline, **(meta or {})})
     md = render_markdown(results, baseline, title=title)
     (out_dir / "report.md").write_text(md, encoding="utf-8")
     summary = render_summary(results, baseline)
@@ -131,7 +132,13 @@ def _cmd_run(args) -> int:
             f"[{i}/{n}] {clip} :: {b}", file=sys.stderr
         ),
     )
-    _write_outputs(Path(args.out), results, baseline, Path(args.root).name)
+    _write_outputs(
+        Path(args.out),
+        results,
+        baseline,
+        Path(args.root).name,
+        meta={"bundles": list(bundles)},
+    )
     return 0
 
 
@@ -151,16 +158,27 @@ def _cmd_sweep(args) -> int:
             f"[{i}/{n}] {clip} :: {b}", file=sys.stderr
         ),
     )
-    _write_outputs(Path(args.out), results, baseline, f"sweep ({args.grid})")
+    _write_outputs(
+        Path(args.out),
+        results,
+        baseline,
+        f"sweep ({args.grid})",
+        meta={"bundles": list(bundles), "grid": args.grid},
+    )
     return 0
 
 
 def _cmd_report(args) -> int:
-    from lab.corpus.metrics import load_results
+    from lab.corpus.metrics import RUN_META_NAME, load_results, load_run_meta
     from lab.corpus.report import render_markdown
 
     results = load_results(args.results)
-    baseline = args.baseline or (results[0].bundle if results else "base")
+    meta = load_run_meta(Path(args.results).parent / RUN_META_NAME)
+    baseline = (
+        args.baseline
+        or meta.get("baseline")
+        or (results[0].bundle if results else "base")
+    )
     print(render_markdown(results, baseline, title=Path(args.results).stem))
     return 0
 
