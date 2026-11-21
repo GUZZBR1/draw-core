@@ -561,8 +561,11 @@ def test_late_masked_heartbeat_after_hand_lift_does_not_hide_finished_stroke():
             self.state = None
             self.sample_at = None
 
-        def submit(self, *_a, **_kw):
-            return None
+        def submit(self, frame, captured_at, *_a, **_kw):
+            # A amostra é carimbada na captura — como a trabalhadora
+            # real, que entrega resultados capturados antes do quadro
+            # em que o laço os lê (review do PR #121).
+            self.sample_at = captured_at
 
         def poll(self, after_seq):
             if self.state is not None and self._seq > after_seq:
@@ -609,7 +612,7 @@ def test_late_masked_heartbeat_after_hand_lift_does_not_hide_finished_stroke():
     pre_exit_ts = now[0] - 0.1
     hand._seq += 1
     hand.state = False
-    hand.sample_at = now[0] - 0.05
+    hand.submit(still, now[0] - 0.05)
     pipe.step(contracts.FramePacket(with_stroke, now[0], 16))
     ink_worker.pump()
     now[0] += 0.2

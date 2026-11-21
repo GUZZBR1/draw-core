@@ -1220,19 +1220,23 @@ def test_expired_hand_mask_without_mediapipe_cannot_confirm_hand_as_ink(monkeypa
             break
     assert loop._detect_wake.settled
     baseline = det._result.captured_at
-    for second in range(1, 4):
-        step(baseline + second)
-        assert loop.last_hand_mask is not None
-        assert loop.clean_mask is not None and not loop.clean_mask.any()
+    # Cadência ~1 Hz com o jitter de uma captura real: a máscara
+    # oscila entre "válida e mascarando a mão" e "vencida/abstendo"
+    # — nenhum dos dois estados deixa a textura da mão virar tinta
+    # confirmada (review do PR #121).
+    for at in (0.9, 1.95, 2.9, 3.7, 4.6):
+        step(baseline + at)
+    assert loop.clean_mask is not None and not loop.clean_mask.any()
 
     submit = det.submit
     monkeypatch.setattr(det, "submit", lambda *_args: None)
-    step(baseline + 4)
-    assert loop.last_hand_mask is not None
+    for at in (5.6, 6.75):
+        step(baseline + at)
+    assert loop.last_hand_mask is None
     passes = ink.stats()["passes_total"]
 
-    for second in range(5, 9):
-        step(baseline + second)
+    for at in (7.8, 8.95):
+        step(baseline + at)
     assert loop.last_hand_mask is None
     assert ink.stats()["passes_total"] == passes
     assert not loop.clean_mask.any()
@@ -1240,10 +1244,10 @@ def test_expired_hand_mask_without_mediapipe_cannot_confirm_hand_as_ink(monkeypa
     # O classificador voltou a ver uma página livre. Um traço real no
     # mesmo lugar já pode receber votos sem o auxílio do MediaPipe.
     cleared = True
-    submit(frame, baseline + 9)
-    step(baseline + 10)
-    submit(frame, baseline + 10)
-    step(baseline + 11)
+    submit(frame, baseline + 9.8)
+    step(baseline + 10.4)
+    submit(frame, baseline + 11.3)
+    step(baseline + 12.1)
     assert loop.last_hand_mask is not None and not loop.last_hand_mask.any()
     assert loop.clean_mask.any()
 
