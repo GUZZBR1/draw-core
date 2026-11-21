@@ -1172,29 +1172,26 @@ def test_single_ruled_half_fold_at_edge_with_shoulders_and_no_stroke_is_erased()
 
 
 @pytest.mark.parametrize(
-    "layout", ["single_half", "paired_split", "offset_split", "track_edge"]
+    "layout", ["paired_split", "offset_split", "blank_other", "track_edge"]
 )
-@pytest.mark.parametrize("has_stroke", [False, True])
-def test_fold_junction_matrix(layout, has_stroke):
-    """Matriz {configuracao da faixa} x {sem tinta, traco de caneta}:
-    sem tinta nada sobra isento; com traco, o miolo sobrevive inteiro."""
+@pytest.mark.parametrize(
+    "content", ["empty", "straight_stroke", "bending_stroke", "shoulders_only"]
+)
+def test_fold_junction_matrix(layout, content):
+    """Matriz {configuracao da faixa} x {sem tinta, traço reto, traço que dobra,
+    ombro puro}: sem tinta nada sobra isento; com traço, nenhum segmento cai."""
     prob = np.zeros((600, 1200), np.float32)
-    if layout == "single_half":
-        fa, fb = 260, 340
-        for k in range(12):
-            y = 80 + 40 * k
-            prob[y : y + 2, :] = 0.95
-            prob[y : y + 6, fa:fb] = 0.95
-            if k % 2 == 0:
-                prob[y : y + 6, fa - 13 : fa] = 0.95
-                prob[y : y + 6, fb : fb + 13] = 0.95
-    elif layout == "paired_split":
+    with_shoulders = content == "shoulders_only" or layout in (
+        "paired_split",
+        "track_edge",
+    )
+    if layout == "paired_split":
         fa, fb = 560, 640
         for k in range(12):
             y = 80 + 40 * k
             prob[y : y + 2, :] = 0.95
             prob[y : y + 6, fa:fb] = 0.95
-            if k % 2 == 0:
+            if with_shoulders and k % 2 == 0:
                 prob[y : y + 6, fa - 13 : fa] = 0.95
                 prob[y : y + 6, fb : fb + 13] = 0.95
     elif layout == "offset_split":
@@ -1205,9 +1202,17 @@ def test_fold_junction_matrix(layout, has_stroke):
             prob[yl : yl + 6, fa:600] = 0.95
             prob[yr : yr + 2, 600:] = 0.95
             prob[yr : yr + 6, 600:fb] = 0.95
-            if k % 2 == 0:
+            if with_shoulders and k % 2 == 0:
                 prob[yl : yl + 6, fa - 13 : fa] = 0.95
                 prob[yr : yr + 6, fb : fb + 13] = 0.95
+    elif layout == "blank_other":
+        fa, fb = 560, 600
+        for k in range(12):
+            y = 80 + 40 * k
+            prob[y : y + 2, :600] = 0.95
+            prob[y : y + 6, fa:fb] = 0.95
+            if with_shoulders and k % 2 == 0:
+                prob[y : y + 6, fa - 13 : fa] = 0.95
     else:  # track_edge
         fa, fb = 560, 600
         for k in range(12):
@@ -1218,14 +1223,119 @@ def test_fold_junction_matrix(layout, has_stroke):
                 prob[y : y + 6, fa - 13 : fa] = 0.95
 
     y_stroke = 80 + 40 * 5
-    if has_stroke:
-        prob[y_stroke : y_stroke + 6, fa - 20 : fb + 20] = 0.95
+    stroke_mask = np.zeros(prob.shape, bool)
+    if content == "straight_stroke":
+        stroke_mask[y_stroke : y_stroke + 6, fa - 20 : fb + 60] = True
+    elif content == "bending_stroke":
+        # entra reto ate 600 e dobra 20 px para baixo ate 620, seguindo ate fb+40
+        stroke_mask[y_stroke : y_stroke + 6, fa - 20 : 600] = True
+        for x in range(600, 620):
+            dy = x - 600
+            stroke_mask[y_stroke + dy : y_stroke + dy + 6, x] = True
+        stroke_mask[y_stroke + 20 : y_stroke + 26, 620 : fb + 40] = True
 
+    prob[stroke_mask] = 0.95
     out = ruling.RulingFilter().apply(prob.copy())
-    if not has_stroke:
+    if content in ("empty", "shoulders_only"):
         assert (out[:, fa + 2 : fb - 2] > 0.5).sum() == 0
     else:
-        assert (out[y_stroke : y_stroke + 6, fa + 2 : fb - 2] > 0.5).all()
-        others = out[:, fa + 2 : fb - 2] > 0.5
-        others[y_stroke : y_stroke + 6, :] = False
-        assert others.sum() == 0
+        inside = np.zeros(prob.shape, bool)
+        inside[:, fa + 2 : fb - 2] = True
+        kept = stroke_mask & inside
+        assert (out[kept] > 0.5).all()
+        if content == "straight_stroke":
+            others = (out > 0.5) & inside & ~stroke_mask
+            assert others.sum() == 0
+        else:
+            # no pouso da dobra sobre outra pauta, o run se funde com a sombra local;
+            # nas demais pautas (longe da dobra) nada pode sobrar
+            assert (out[: y_stroke - 10, fa + 2 : fb - 2] > 0.5).sum() == 0
+            assert (out[y_stroke + 50 :, fa + 2 : fb - 2] > 0.5).sum() == 0
+
+
+def test_single_ruled_half_keeps_short_left_stroke_continuing_into_blank_half():
+    """Metade esquerda pautada com ombros de 13 col, metade direita em branco;
+    traço de 6 px com 16 col a esquerda (<= 13+3) e 60 col no branco sobrevive."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        y = 80 + 40 * k
+        prob[y : y + 2, :600] = 0.95
+        prob[y : y + 6, 560:600] = 0.95
+        if k % 2 == 0:
+            prob[y : y + 6, 547:560] = 0.95
+    y = 80 + 40 * 5
+    prob[y : y + 6, 544:660] = 0.95  # 16 col a esquerda, 60 col no branco
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[y : y + 6, 560:660] > 0.5).all()
+    others = out[:, 562:600] > 0.5
+    others[y : y + 6, :] = False
+    assert others.sum() == 0
+
+
+def test_offset_halves_preserve_a_stroke_that_bends_onto_a_destination_rule():
+    """Pautas defasadas (80/120/... e 100/140/...); traço na pauta esquerda
+    cruza a costura em 600 e dobra 20 px para pousar sobre a pauta direita em
+    620..640: o segmento de chegada sobrevive."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        yl, yr = 80 + 40 * k, 100 + 40 * k
+        prob[yl : yl + 2, :600] = 0.95
+        prob[yl : yl + 6, 560:600] = 0.95
+        prob[yr : yr + 2, 600:] = 0.95
+        prob[yr : yr + 6, 600:640] = 0.95
+    y = 80 + 40 * 5  # 280 -> dobra para 300 (pauta direita k=5)
+    stroke = np.zeros(prob.shape, bool)
+    stroke[y : y + 6, 540:600] = True
+    for x in range(600, 620):
+        dy = x - 600
+        stroke[y + dy : y + dy + 6, x] = True
+    stroke[y + 20 : y + 26, 620:665] = True
+    prob[stroke] = 0.95
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[stroke] > 0.5).all()
+    assert (out[: y - 10, 562:638] > 0.5).sum() == 0
+    assert (out[y + 50 :, 562:638] > 0.5).sum() == 0
+
+
+def test_disconnected_shadow_fragment_before_gap_is_erased_while_stroke_survives():
+    """Faixa [560, 640) em pautas defasadas com fragmento de sombra [547, 570)
+    antes de um gap [570, 575) e traço depois [575, 660): o fragmento dentro
+    da faixa [560, 570) sai, o traço fica."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        yl, yr = 80 + 40 * k, 100 + 40 * k
+        prob[yl : yl + 2, :600] = 0.95
+        prob[yl : yl + 6, 560:600] = 0.95
+        prob[yr : yr + 2, 600:] = 0.95
+        prob[yr : yr + 6, 600:640] = 0.95
+    y = 80 + 40 * 5
+    prob[y : y + 6, 547:570] = 0.95  # fragmento/ombro desconectado
+    prob[y : y + 6, 570:575] = 0.0  # gap desconectando [560, 570)
+    prob[y : y + 6, 575:660] = 0.95  # traço cruzando a costura
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[y : y + 6, 562:570] > 0.5).sum() == 0
+    assert (out[y : y + 6, 575:660] > 0.5).all()
+
+
+def test_dark_seam_linking_to_destination_shoulder_is_erased_while_blank_crossing_survives():
+    """Costura escura ligando pauta fonte (sem ombros) a pauta destino com
+    ombros de 13 col e apagada; traço real cruzando para espaço em branco
+    sobrevive."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        yl, yr = 80 + 40 * k, 100 + 40 * k
+        prob[yl : yl + 2, :600] = 0.95
+        prob[yl : yl + 6, 560:600] = 0.95
+        prob[yr : yr + 2, 600:] = 0.95
+        prob[yr : yr + 6, 600:640] = 0.95
+        if k % 2 == 0:
+            prob[yr : yr + 6, 640:653] = 0.95  # ombros só no destino
+    # costura de 1 col ligando pauta esquerda k=2 (160) a direita k=2 (180, com ombro)
+    y_seam = 80 + 40 * 2
+    prob[y_seam : y_seam + 26, 599:601] = 0.95
+    # traço real na pauta esquerda k=5 (280) cruzando para espaço em branco
+    y_stroke = 80 + 40 * 5
+    prob[y_stroke : y_stroke + 6, 540:660] = 0.95
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[y_stroke : y_stroke + 6, 540:660] > 0.5).all()
+    assert (out[y_seam : y_seam + 6, 562:598] > 0.5).sum() == 0

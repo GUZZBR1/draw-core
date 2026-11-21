@@ -683,34 +683,16 @@ def _gather_side(tracks, thick, matches, idx, line_ids, edge_col, direction):
     return part
 
 
-def _projected_continuation(
-    ink, track, k, valid_row, seam_col, band_edge, direction, h_run, need
-):
-    """(ok, ext): verifica tinta conectada através da costura na direção dada."""
-    if not valid_row[seam_col - track.x0]:
-        return False, 0
-    h, w = ink.shape
-    x_track = track.paths.shape[1]
-    local_seam = seam_col - track.x0
-    if direction > 0:
-        span = min(16, local_seam + 1)
-        x0_s = local_seam - span + 1
-        vals = track.paths[k, x0_s : local_seam + 1]
-        v_s = valid_row[x0_s : local_seam + 1]
-    else:
-        span = min(16, x_track - local_seam)
-        vals = track.paths[k, local_seam : local_seam + span]
-        v_s = valid_row[local_seam : local_seam + span]
-    if v_s.sum() >= 2:
-        idx = np.flatnonzero(v_s)
-        slope = float((vals[idx[-1]] - vals[idx[0]]) / (idx[-1] - idx[0]))
-    else:
-        slope = 0.0
-    y0 = float(track.paths[k, local_seam])
-    yc0 = int(round(y0))
+def _trace_ink_run(ink, yc0, seam_col, limit, direction, h_run, stop_col, need=0):
+    """Traça run de tinta conectado a partir de `seam_col` até `limit`.
+
+    Devolve `(reached_stop, visited, out_thick)` onde `visited` é lista de
+    `(x, top, bot)` até `stop_col` e `out_thick` são as espessuras além dele.
+    """
+    h = ink.shape[0]
     lo0, hi0 = max(0, yc0 - _R), min(h, yc0 + _R + 1)
     if lo0 >= hi0 or not ink[lo0:hi0, seam_col].any():
-        return False, 0
+        return False, [], []
     ys0 = np.flatnonzero(ink[lo0:hi0, seam_col]) + lo0
     mid = ys0[int(np.argmin(np.abs(ys0 - yc0)))]
     prev_top = prev_bot = int(mid)
@@ -719,31 +701,92 @@ def _projected_continuation(
     while prev_bot + 1 < h and ink[prev_bot + 1, seam_col]:
         prev_bot += 1
 
+    visited = [(seam_col, prev_top, prev_bot)]
     out_thick = []
-    limit = w if direction > 0 else -1
+    max_scan = need + _SUPPORT_W
+    active = [(prev_top, prev_bot)]
     for x in range(seam_col + direction, limit, direction):
-        yc = int(round(y0 + slope * (x - seam_col)))
-        lo, hi = max(0, prev_top), min(h, prev_bot + 1)
-        inside_band = (x < band_edge) if direction > 0 else (x > band_edge)
-        if lo >= hi or not ink[lo:hi, x].any():
+        col = ink[:, x]
+        nxt = []
+        for t0, b0 in active:
+            lo, hi = max(0, t0), min(h, b0 + 1)
+            if lo >= hi or not col[lo:hi].any():
+                continue
+            for hit in np.flatnonzero(col[lo:hi]) + lo:
+                if nxt and hit <= nxt[-1][1]:
+                    continue
+                top = bot = int(hit)
+                while top > 0 and col[top - 1]:
+                    top -= 1
+                while bot + 1 < h and col[bot + 1]:
+                    bot += 1
+                nxt.append((top, bot))
+        inside_band = (x < stop_col) if direction > 0 else (x > stop_col)
+        if not nxt:
             if inside_band:
-                return False, 0
+                return False, visited, out_thick
             break
-        hit = int(np.flatnonzero(ink[lo:hi, x])[0] + lo)
-        top = bot = hit
-        while top > 0 and ink[top - 1, x] and top > yc - 2 * _R:
-            top -= 1
-        while bot + 1 < h and ink[bot + 1, x] and bot < yc + 2 * _R:
-            bot += 1
-        prev_top, prev_bot = top, bot
-        if not inside_band:
-            out_thick.append((bot - top + 1) > h_run + _THIN_MARGIN)
-    if len(out_thick) < need:
-        return False, 0
+        active = nxt
+        if inside_band:
+            for top, bot in active:
+                visited.append((x, top, bot))
+        else:
+            is_thick = any(
+                (bot - top + 1) > h_run + _THIN_MARGIN for top, bot in active
+            )
+            out_thick.append(is_thick)
+            if len(out_thick) >= need and (not is_thick or len(out_thick) >= max_scan):
+                break
+    return True, visited, out_thick
+
+
+def _projected_continuation(
+    ink,
+    track,
+    k,
+    valid_row,
+    seam_col,
+    band_in_edge,
+    band_out_edge,
+    direction,
+    h_run,
+    need,
+):
+    """(ok, ext, visited_src, visited_dst): traça tinta conectada na costura."""
+    if not valid_row[seam_col - track.x0]:
+        return False, 0, [], []
+    w = ink.shape[1]
+    local_seam = seam_col - track.x0
+    yc0 = int(round(float(track.paths[k, local_seam])))
+    limit_dst = w if direction > 0 else -1
+    reached, visited_dst, out_thick = _trace_ink_run(
+        ink, yc0, seam_col, limit_dst, direction, h_run, band_in_edge, need
+    )
+    if not reached or len(out_thick) < need:
+        return False, 0, [], []
     arr = np.array(out_thick, bool)[None, :]
     if arr[:, :need].mean() < 0.85:
-        return False, 0
-    return True, int(_extent(arr, need)[0])
+        return False, 0, [], []
+    # traça de volta na metade fonte para marcar apenas colunas conectadas ao traço
+    limit_src = band_out_edge - 1 if direction > 0 else band_out_edge + 1
+    _, visited_src, _ = _trace_ink_run(
+        ink, yc0, seam_col, limit_src, -direction, h_run, limit_src, 0
+    )
+    return True, int(_extent(arr, need)[0]), visited_src, visited_dst
+
+
+def _mark_visited_track(joined_track, track, valid_track, visited):
+    """Marca em `joined_track` apenas (k, x) visitados pelo traço conectado."""
+    for x, top, bot in visited:
+        if not (track.x0 <= x < track.x1):
+            continue
+        lx = x - track.x0
+        hit = (
+            valid_track[:, lx]
+            & (track.paths[:, lx] >= top - 2)
+            & (track.paths[:, lx] <= bot + 2)
+        )
+        joined_track[hit, lx] = True
 
 
 def _vote_unmatched_split(
@@ -802,32 +845,49 @@ def _vote_unmatched_split(
     for k in unmatched:
         if src_vote is not None and not src_vote[k]:
             continue
-        ok, ext_proj = _projected_continuation(
+        ok, ext_proj, visited_src, visited_dst = _projected_continuation(
             ink,
             t_src,
             int(k),
             valid_list[i_src][k],
             seam_col,
             band_in_edge if direction > 0 else band_in_edge - 1,
+            band_out_edge,
             direction,
             h_run,
             need,
         )
         if not ok:
             continue
-        if has_src and has_dst:
-            if not (
-                ext_src[k] > bulk_src + _GUTTER_EDGE_RUN
-                and ext_proj > bulk_dst + _GUTTER_EDGE_RUN
-            ):
-                continue
-        elif has_src and src_vote is not None and unmatched.size > min_bulk_src:
-            if ext_src[k] <= bulk_src + _GUTTER_EDGE_RUN:
-                continue
-        if direction > 0:
-            joined[i_src][k, a - t_src.x0 :] = True
-        else:
-            joined[i_src][k, : b - t_src.x0] = True
+        # verifica se a projeção aterrissou numa pauta do destino na saída da faixa
+        lands_on_dst = False
+        if visited_dst:
+            lx_end, top_e, bot_e = visited_dst[-1]
+            if t_dst.x0 <= lx_end < t_dst.x1:
+                lx = lx_end - t_dst.x0
+                lands_on_dst = bool(
+                    (
+                        valid_list[i_dst][:, lx]
+                        & (t_dst.paths[:, lx] >= top_e - 2)
+                        & (t_dst.paths[:, lx] <= bot_e + 2)
+                    ).any()
+                )
+        if has_dst and lands_on_dst and ext_proj <= bulk_dst + _GUTTER_EDGE_RUN:
+            continue
+        if has_src and has_dst and ext_src[k] <= bulk_src + _GUTTER_EDGE_RUN:
+            continue
+        if (
+            has_src
+            and not has_dst
+            and src_vote is not None
+            and unmatched.size > min_bulk_src
+            and ext_src[k] <= bulk_src + _GUTTER_EDGE_RUN
+        ):
+            continue
+        for x, _top, _bot in visited_src:
+            if t_src.x0 <= x < t_src.x1:
+                joined[i_src][k, x - t_src.x0] = True
+        _mark_visited_track(joined[i_dst], t_dst, valid_list[i_dst], visited_dst)
 
 
 def _joined_through_bands(tracks, thick, valid_list, gutter_full, ink=None, h_run=2):
@@ -938,9 +998,47 @@ def _joined_through_bands(tracks, thick, valid_list, gutter_full, ink=None, h_ru
             bulk_r = _bulk_ext(ext_r[right_vote])
         if len(sides) == 1:
             if has_l:
-                cont &= ext_l > bulk_l + _GUTTER_EDGE_RUN
+                keep_l = ext_l > bulk_l + _GUTTER_EDGE_RUN
+                if ink is not None and right_at_edge and b < w:
+                    t_only = tracks[i_left]
+                    for idx_c in np.flatnonzero(cont & ~keep_l):
+                        k_line = int(kl[idx_c])
+                        ok, _, _, _ = _projected_continuation(
+                            ink,
+                            t_only,
+                            k_line,
+                            valid_list[i_left][k_line],
+                            t_only.x1 - 1,
+                            b,
+                            a,
+                            1,
+                            h_run,
+                            need,
+                        )
+                        if ok:
+                            keep_l[idx_c] = True
+                cont &= keep_l
             if has_r:
-                cont &= ext_r > bulk_r + _GUTTER_EDGE_RUN
+                keep_r = ext_r > bulk_r + _GUTTER_EDGE_RUN
+                if ink is not None and left_at_edge and a > 0:
+                    t_only = tracks[i_right]
+                    for idx_c in np.flatnonzero(cont & ~keep_r):
+                        k_line = int(kr[idx_c])
+                        ok, _, _, _ = _projected_continuation(
+                            ink,
+                            t_only,
+                            k_line,
+                            valid_list[i_right][k_line],
+                            t_only.x0,
+                            a - 1,
+                            b,
+                            -1,
+                            h_run,
+                            need,
+                        )
+                        if ok:
+                            keep_r[idx_c] = True
+                cont &= keep_r
         elif has_l and has_r:
             cont &= (ext_l > bulk_l + _GUTTER_EDGE_RUN) & (
                 ext_r > bulk_r + _GUTTER_EDGE_RUN
@@ -952,6 +1050,32 @@ def _joined_through_bands(tracks, thick, valid_list, gutter_full, ink=None, h_ru
             t_l, t_r = tracks[i_left], tracks[i_right]
             joined[i_left][kl, a - t_l.x0 :] |= cont[:, None]
             joined[i_right][kr, : b - t_r.x0] |= cont[:, None]
+            # se uma linha pareada dobra dentro da faixa para outra pauta, o
+            # voto reto falha no destino; tenta projeção conectada nesses casos
+            if ink is not None and left_vote is not None and right_vote is not None:
+                for idx_c in np.flatnonzero(~cont & left_vote):
+                    if has_l and ext_l[idx_c] <= bulk_l + _GUTTER_EDGE_RUN:
+                        continue
+                    k_l = int(kl[idx_c])
+                    ok, ext_p, v_src, v_dst = _projected_continuation(
+                        ink,
+                        t_l,
+                        k_l,
+                        valid_list[i_left][k_l],
+                        t_l.x1 - 1,
+                        b,
+                        a,
+                        1,
+                        h_run,
+                        need,
+                    )
+                    if ok and (not has_r or ext_p > bulk_r + _GUTTER_EDGE_RUN):
+                        for x, _top, _bot in v_src:
+                            if t_l.x0 <= x < t_l.x1:
+                                joined[i_left][k_l, x - t_l.x0] = True
+                        _mark_visited_track(
+                            joined[i_right], t_r, valid_list[i_right], v_dst
+                        )
     return joined
 
 
