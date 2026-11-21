@@ -110,7 +110,6 @@ class PipelineConfig:
     detect_wake: bool = True
     detect_wake_interval_s: float = 1.0
     spread_mode: str = "auto"
-    border_guard_px: int | None = None
 
     def __post_init__(self):
         if not 0.0 < self.detect_wake_interval_s <= 5.0:
@@ -121,8 +120,4 @@ class PipelineConfig:
         if self.spread_mode not in ("auto", "always", "never"):
             raise ValueError(
                 f"spread_mode deve ser um de: auto, always, never: {self.spread_mode!r}"
-            )
-        if self.border_guard_px is not None and self.border_guard_px < 0:
-            raise ValueError(
-                f"border_guard_px deve ser >= 0 ou None: {self.border_guard_px!r}"
             )

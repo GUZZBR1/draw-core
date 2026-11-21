@@ -12,17 +12,19 @@ from .. import photometry
 from ..contracts import InkDelta, InkDisplaySnapshot, InkSnapshot
 from . import accumulator, identity, motion, registration, ruling, votes
 from . import anchor as anchor_mod
-from .config import InkConfig, resolve_border_guard_px
+from .config import InkConfig, resolve_border_guard_yx
 
 
-def _zero_border(prob, guard_px):
-    if guard_px <= 0:
+def _zero_border(prob, guard_y, guard_x):
+    if guard_y <= 0 and guard_x <= 0:
         return prob
     out = np.array(prob, copy=True)
-    out[:guard_px, :] = 0.0
-    out[-guard_px:, :] = 0.0
-    out[:, :guard_px] = 0.0
-    out[:, -guard_px:] = 0.0
+    if guard_y > 0:
+        out[:guard_y, :] = 0.0
+        out[-guard_y:, :] = 0.0
+    if guard_x > 0:
+        out[:, :guard_x] = 0.0
+        out[:, -guard_x:] = 0.0
     return out
 
 
@@ -1230,10 +1232,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     self._ruling.reset()
                     self._ruling_generation = generation
                 prob = self._ruling.apply(prob, visible)
-            guard_px = resolve_border_guard_px(
-                prob.shape, self._config.border_guard_px, min_auto_side=200
-            )
-            prob = _zero_border(prob, guard_px)
             # Cobertura de folha (cobertura de folha do loop) viaja em
             # canal proprio ate depois do registro: o veto nao e
             # cego nem se confunde com oclusao de mao — ver o
@@ -1943,7 +1941,16 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 # None para o avaliador nao projetar GT por uma
                 # geometria que nunca chegou ao canvas.
                 self._last_registration = None
-            prob = _zero_border(prob, guard_px)
+            guard_corners = (
+                self._anchor_corners if self._anchor_corners is not None else corners
+            )
+            guard_y, guard_x = resolve_border_guard_yx(
+                prob.shape,
+                self._config.border_guard_px,
+                guard_corners,
+                min_auto_side=200,
+            )
+            prob = _zero_border(prob, guard_y, guard_x)
             result = self._accumulator.add(
                 prob,
                 visible,

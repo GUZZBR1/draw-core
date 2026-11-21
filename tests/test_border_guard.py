@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from draw import contracts
-from draw.ink.config import InkConfig, resolve_border_guard_px
+from draw.ink.config import InkConfig, resolve_border_guard_px, resolve_border_guard_yx
 from draw.ink.worker import PageCleanWorker
 from draw.pipeline import Pipeline
 from draw.settings import PipelineConfig
@@ -88,8 +88,12 @@ def test_border_guard_config_derivation_and_validation():
     assert resolve_border_guard_px((40, 60), None, min_auto_side=200) == 0
     assert resolve_border_guard_px((40, 60), 5, min_auto_side=200) == 5
 
-    with pytest.raises(ValueError, match="border_guard_px"):
-        PipelineConfig(border_guard_px=-1)
+    small_quad = np.array(
+        [[200, 100], [560, 100], [560, 600], [200, 600]], dtype=np.float32
+    )
+    assert resolve_border_guard_yx((1200, 850), None, small_quad) == (9, 9)
+    assert resolve_border_guard_yx((1200, 850), 5, small_quad) == (5, 5)
+
     with pytest.raises(ValueError, match="border_guard_px"):
         InkConfig(border_guard_px=-1)
 
@@ -146,7 +150,7 @@ def test_jitter_against_dark_desk_does_not_confirm_or_provisional_border_ink(
     assert confirmed is not None
     assert int(np.count_nonzero(confirmed)) > 0, "traco util precisa confirmar"
 
-    guard = resolve_border_guard_px(confirmed.shape, pipe_cfg.border_guard_px)
+    guard = resolve_border_guard_px(confirmed.shape, ink_cfg.border_guard_px)
     assert guard > 0
     for mask in (confirmed, provisional):
         if mask is None:
@@ -210,7 +214,6 @@ def test_border_guard_disabled_discriminates_dark_border_jitter():
     pipe_cfg = PipelineConfig(
         coverage=False,
         ink_auto_gain=False,
-        border_guard_px=0,
         ink=ink_cfg,
     )
     loop, _worker = _drive_with_worker(
@@ -246,3 +249,68 @@ def test_empty_coverage_mask_still_gates_votes():
     )
     assert loop.clean_mask is not None
     assert int(np.count_nonzero(loop.clean_mask)) == 0
+
+
+def test_empty_page_without_coverage_and_small_camera_sheet_stays_empty():
+    """Sem cobertura e com folha pequena na camera (360x500 -> 850x1200),
+    a guarda projetada cobre o estiramento de 3 px da camera e mantem
+    toda a pagina vazia (inclusive logo dentro da margem de 7 px)."""
+    frame = np.full((720, 1280, 3), 20, np.uint8)
+    frame[100:600, 200:560] = 215
+    quad = np.array(
+        [[197, 97], [563, 97], [563, 603], [197, 603]],
+        dtype=np.float32,
+    )
+    ink_cfg = InkConfig.production()
+    pipe_cfg = PipelineConfig(
+        coverage=False,
+        ink_auto_gain=False,
+        ink=ink_cfg,
+    )
+    loop, _worker = _drive_with_worker(
+        lambda _seq: (quad.copy(), "paper", None),
+        frame,
+        pipeline_config=pipe_cfg,
+        ink_config=ink_cfg,
+    )
+    assert loop.clean_mask is not None
+    assert int(np.count_nonzero(loop.clean_mask)) == 0
+    if loop.clean_provisional_mask is not None:
+        assert int(np.count_nonzero(loop.clean_provisional_mask)) == 0
+
+
+def test_near_edge_stroke_survives_persistent_inward_quad_shift():
+    """Traco proximo a borda util (fora da guarda da ancora) sobrevive
+    mesmo quando o quad recua 3 px para dentro e permanece ali."""
+    frame = np.full((720, 1280, 3), 20, np.uint8)
+    frame[100:600, 200:560] = 215
+    # Traco a 5 px da borda esquerda da folha (~12 px na grade 850 px)
+    frame[250:350, 205:208] = 25
+
+    anchor_quad = np.array(
+        [[200, 100], [560, 100], [560, 600], [200, 600]],
+        dtype=np.float32,
+    )
+    shifted_quad = np.array(
+        [[203, 100], [560, 100], [560, 600], [203, 600]],
+        dtype=np.float32,
+    )
+
+    def script(seq):
+        return (anchor_quad if seq <= 3 else shifted_quad).copy(), "paper", None
+
+    ink_cfg = InkConfig.production()
+    pipe_cfg = PipelineConfig(
+        coverage=False,
+        ink_auto_gain=False,
+        ink=ink_cfg,
+    )
+    loop, _worker = _drive_with_worker(
+        script,
+        frame,
+        pipeline_config=pipe_cfg,
+        ink_config=ink_cfg,
+        steps=24,
+    )
+    assert loop.clean_mask is not None
+    assert int(np.count_nonzero(loop.clean_mask[:, 9:30])) > 0

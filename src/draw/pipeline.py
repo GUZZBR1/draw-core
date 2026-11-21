@@ -36,7 +36,6 @@ import numpy as np
 from . import config as config_module
 from . import contracts, exposure, paper, tracker
 from .ink import render as ink_render
-from .ink.config import resolve_border_guard_px
 from .settings import PipelineConfig
 from .tracker import _SHEET_LOST_MIN_FRAMES
 
@@ -380,13 +379,6 @@ class Pipeline:
             > 0
         )
 
-    @staticmethod
-    def _set_border(arr, guard_px, value):
-        arr[:guard_px, :] = value
-        arr[-guard_px:, :] = value
-        arr[:, :guard_px] = value
-        arr[:, -guard_px:] = value
-
     def _quad_coverage_iou(self, warp_corners):
         """IoU do quad com a mascara de cobertura no espaco da camera.
 
@@ -580,19 +572,6 @@ class Pipeline:
                         warp_corners,
                     )
                     ink_submit[valid == 0] = fill_color
-        guard_px = resolve_border_guard_px(
-            ink_submit.shape, self._config.border_guard_px
-        )
-        if guard_px > 0:
-            interior = ink_submit[guard_px:-guard_px, guard_px:-guard_px]
-            if interior.size > 0:
-                fill = (
-                    fill_color
-                    if fill_color is not None
-                    else interior.mean(axis=(0, 1)).astype(np.uint8)
-                )
-                ink_submit = ink_submit.copy()
-                self._set_border(ink_submit, guard_px, fill)
         self.ink_worker.submit(
             contracts.WarpedPage(
                 ink_submit,

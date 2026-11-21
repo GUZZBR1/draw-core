@@ -1,5 +1,6 @@
 """Preset de producao do motor de tinta (o que as flags Tier A/B liam do ambiente)."""
 
+import math
 from dataclasses import dataclass
 
 # Nivel de voto que reproduz o legado: a media das 3 passadas que fecha a
@@ -35,6 +36,48 @@ def resolve_border_guard_px(shape, configured, *, min_auto_side=0):
     if short < min_auto_side:
         return 0
     return min(max(6, int(round(0.008 * short))), limit)
+
+
+def resolve_border_guard_yx(
+    shape,
+    configured,
+    corners=None,
+    *,
+    min_auto_side=0,
+    camera_jitter_px=3.5,
+):
+    """(guard_y, guard_x) em px da grade retificada.
+
+    No modo automatico (`configured is None`), quando `corners` (4x2 em
+    espaco de camera) e informado, projeta `camera_jitter_px` pela
+    escala de cada eixo para cobrir o estiramento de folhas pequenas no
+    quadro da camera. Larguras explicitas seguem em px retificados.
+    """
+    h, w = shape[:2]
+    limit_y = max(0, (h - 1) // 2)
+    limit_x = max(0, (w - 1) // 2)
+    if configured is not None:
+        val = int(configured)
+        return min(val, limit_y), min(val, limit_x)
+    base = resolve_border_guard_px(shape, None, min_auto_side=min_auto_side)
+    if base == 0 or corners is None:
+        return min(base, limit_y), min(base, limit_x)
+    gy = gx = base
+    try:
+        c0, c1, c2, c3 = corners[0], corners[1], corners[2], corners[3]
+        top_w = math.hypot(float(c1[0] - c0[0]), float(c1[1] - c0[1]))
+        bot_w = math.hypot(float(c2[0] - c3[0]), float(c2[1] - c3[1]))
+        left_h = math.hypot(float(c3[0] - c0[0]), float(c3[1] - c0[1]))
+        right_h = math.hypot(float(c2[0] - c1[0]), float(c2[1] - c1[1]))
+        min_w = min(top_w, bot_w)
+        min_h = min(left_h, right_h)
+        if min_h > 0.0:
+            gy = max(gy, math.ceil(camera_jitter_px * h / min_h))
+        if min_w > 0.0:
+            gx = max(gx, math.ceil(camera_jitter_px * w / min_w))
+    except (IndexError, TypeError, ValueError):
+        pass
+    return min(gy, limit_y), min(gx, limit_x)
 
 
 @dataclass(frozen=True, slots=True)
