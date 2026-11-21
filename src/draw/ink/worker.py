@@ -1405,6 +1405,13 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 (None if registration_corners is None else registration_corners.copy()),
                 None if corners is None else corners.copy(),
             )
+            # Pegada amostrada pelo registro (zeros de preenchimento
+            # onde a passada nao alcancou a ancora): separa "nao
+            # observei" de "observei vazio" quando nao ha mascara de
+            # visibilidade — entra no dominio valido la no voto.
+            sampled = registration._sampled_footprint(
+                anchor, registration_corners, prob.shape
+            )
             # Mapa registrado SO pela camera: e o que a arbitragem de
             # ancora compara com o mapa cru para julgar pouso x quad ruim.
             # A escolha/correcao do portao vale so para a evidencia que
@@ -1477,6 +1484,9 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         registration_corners.copy(),
                         None if corners is None else corners.copy(),
                     )
+                    sampled = registration._sampled_footprint(
+                        anchor, registration_corners, prob.shape
+                    )
                 if motion_decision == "correct":
                     # A evidencia volta para a grade da ancora pelo
                     # modelo afim medido nesta mesma imagem.
@@ -1488,6 +1498,18 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                             )
                             > 0
                         )
+                    # A correcao afim tambem recorta a pegada: a
+                    # faixa que o warp_back preenche de zeros nao
+                    # foi observada.
+                    sampled = (
+                        motion_fix.warp_back(
+                            np.ones(prob.shape, np.uint8)
+                            if sampled is None
+                            else sampled.astype(np.uint8),
+                            nearest=True,
+                        )
+                        > 0
+                    )
             if coverage_cam is not None or coverage_page_static is not None:
                 # Gate de re-confirmacao (cobertura de folha do loop): onde
                 # o warp nao e folha, so a tinta que a ancora JA
@@ -1873,6 +1895,11 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         ),
                         None if corners is None else corners.copy(),
                     )
+                    sampled = registration._sampled_footprint(
+                        self._anchor_corners,
+                        (self._reg_frozen_corners if reg_deadband else corners),
+                        prob.shape,
+                    )
                     force_publish = True
             follow_abstain = False
             if anchor_follow:
@@ -1932,6 +1959,11 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         ),
                         None if corners is None else corners.copy(),
                     )
+                    sampled = registration._sampled_footprint(
+                        self._anchor_corners,
+                        (self._reg_frozen_corners if reg_deadband else corners),
+                        prob.shape,
+                    )
                     arbitration_abstain = False
                     force_publish = True
             if (
@@ -1953,6 +1985,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     if corners is None
                     else (corners.copy(), corners.copy(), corners.copy())
                 )
+                sampled = None
             else:
                 prob = registered_prob
                 visible = registered_visible
@@ -2005,10 +2038,18 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 guard_corners,
                 min_auto_side=200,
             )
+            # A pegada amostrada entra no dominio valido so com a
+            # guarda ativa: sem ela, a abstencao legada sem mascara
+            # de visibilidade continua valendo (zeros de
+            # preenchimento do registro nao viram evidencia
+            # negativa).
+            valid_mask = guard_mask
+            if valid_mask is not None and sampled is not None:
+                valid_mask = valid_mask & sampled
             result = self._accumulator.add(
                 prob,
                 visible,
-                valid_mask=guard_mask,
+                valid_mask=valid_mask,
                 removal_allowed=(
                     not identity_owned
                     and not arbitration_abstain

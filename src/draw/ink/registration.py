@@ -228,3 +228,33 @@ def _register_ink_probability(
                 > 0
             )
     return prob, visible
+
+
+def _sampled_footprint(anchor, corners, shape):
+    """Pegada amostrada do registro na grade da ancora.
+
+    Mascara True onde o warp ancora<-corners leu de fato a passada;
+    False na faixa que o registro preencheu de zeros por falta de
+    amostra (quad que recuou uma borda para dentro). Sem mascara de
+    visibilidade, esses zeros sao indistinguiveis de papel apagado —
+    a pegada separa "nao observei" de "observei vazio".
+
+    None quando nao ha geometria ou o registro e identidade: a
+    pegada e a grade inteira e a mascara seria redundante.
+    """
+    if anchor is None or corners is None:
+        return None
+    matrix = _registration_matrix(anchor, corners, shape)
+    if _registration_is_identity(matrix):
+        return None
+    size = (shape[1], shape[0])
+    return (
+        cv2.warpPerspective(
+            np.ones(shape, np.uint8),
+            matrix,
+            size,
+            flags=cv2.INTER_NEAREST,
+            borderValue=0,
+        )
+        > 0
+    )

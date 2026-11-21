@@ -438,6 +438,49 @@ def test_erased_interior_stroke_removed_without_visibility_mask():
     assert run_case(0) > 0
 
 
+def test_unsampled_edge_strip_does_not_count_as_erasure():
+    """Quad que recua uma borda para dentro deixa uma faixa sem amostra
+    no espaco da ancora: os zeros de preenchimento do registro nao podem
+    contar como borracha. Um traco amostrado e apagado de verdade continua
+    saindo, e a testemunha interior permanece."""
+    anchor_quad = np.array(
+        [[200, 100], [560, 100], [560, 600], [200, 600]], dtype=np.float32
+    )
+    shifted_quad = np.array(
+        [[206, 100], [560, 100], [560, 600], [206, 600]], dtype=np.float32
+    )
+    img = np.full((1200, 850, 3), 215, np.uint8)
+    img[200:500, 10:14] = 25  # traco na faixa que fica sem amostra
+    img[200:500, 100:110] = 25  # traco interior, apagado de verdade
+    img[300:700, 300:500] = 25  # testemunha no miolo (permanece)
+
+    clock = _Clock()
+    cfg = InkConfig.strict_vote(0.85, border_guard_px=None)
+    worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
+    for _ in range(5):
+        clock.now += 1.1
+        worker.submit(contracts.WarpedPage(img, 0, anchor_quad, captured_at=clock.now))
+        worker.pump()
+    snap = worker.poll_display(0, 0)
+    assert snap is not None
+    assert int(np.count_nonzero(snap.confirmed[200:500, 10:14])) > 0
+    assert int(np.count_nonzero(snap.confirmed[200:500, 100:110])) > 0
+
+    img_erased = np.full((1200, 850, 3), 215, np.uint8)
+    img_erased[300:700, 300:500] = 25
+    for _ in range(10):
+        clock.now += 1.1
+        worker.submit(
+            contracts.WarpedPage(img_erased, 0, shifted_quad, captured_at=clock.now)
+        )
+        worker.pump()
+    snap_after = worker.poll_display(0, 0)
+    assert snap_after is not None
+    assert int(np.count_nonzero(snap_after.confirmed[200:500, 10:14])) > 0
+    assert int(np.count_nonzero(snap_after.confirmed[200:500, 100:110])) == 0
+    assert int(np.count_nonzero(snap_after.confirmed[300:700, 300:500])) > 0
+
+
 def test_confirmed_ink_under_guard_does_not_trigger_page_turn():
     """Tinta confirmada quase toda sob a guarda alargada: a virada se
     abstem em vez de declarar pagina trocada na mesma folha."""

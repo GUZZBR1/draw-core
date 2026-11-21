@@ -218,16 +218,20 @@ class LayeredInkAccumulator:
                 )
                 # Com testemunha: pixel inspecionado e não ausente
                 # vê o streak zerar (evidência positiva ou prova
-                # inconclusiva); pixel ausente conta. Fora do
-                # dominio inspecionado (ocluido ou sob a guarda) ou
-                # sem testemunha não informa nada — o streak segura,
-                # não zera: a ausência do F-10 segue precisando ser
-                # persistente, mas não precisa ser em passadas
-                # consecutivas nem desobstruídas (a testemunha e a
-                # mão oscilam em cena real — medido: retained
-                # 1,5k~13,9k alternando no sim-hand, streak nunca
-                # completava).
-                resettable = inspected & ~missing
+                # inconclusiva); pixel ausente conta. Ocluído não
+                # informa nada — o streak segura, não zera: a
+                # ausência do F-10 segue precisando ser persistente,
+                # mas não precisa ser em passadas consecutivas nem
+                # desobstruídas (a testemunha e a mão oscilam em cena
+                # real — medido: retained 1,5k~13,9k alternando no
+                # sim-hand, streak nunca completava). Sem máscara de
+                # oclusão, o que está fora de `missing` zera em vez
+                # de segurar: contagem velha sob a guarda ou fora da
+                # pegada não pode nem apagar o traço nem segurar a
+                # trabalhadora acordada.
+                resettable = ~missing
+                if visible is not None:
+                    resettable &= visible
                 self._removal_streak[resettable] = 0
                 self._removal_streak[missing] = np.minimum(
                     self._removal_streak[missing].astype(np.uint16) + 1,
