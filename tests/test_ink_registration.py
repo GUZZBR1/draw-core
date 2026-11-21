@@ -468,3 +468,9 @@ def test_off_crop_occlusion_does_not_hold_the_post_exit_window():
         WarpedPage(np.zeros((60, 80, 3), np.uint8), generation, quad, visible)
     )
     assert not worker._awaiting_clear_post_exit
+    # O mesmo recorte governa o is_masked da passada: oclusao fora do
+    # quad nao gasta a janela de confirmacao.
+    assert worker_mod._crop_all_visible(visible, quad)
+    inside = visible.copy()
+    inside[200, 200] = False  # oclusao DENTRO do quad mascara a passada
+    assert not worker_mod._crop_all_visible(inside, quad)

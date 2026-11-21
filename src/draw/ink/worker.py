@@ -126,6 +126,21 @@ def _bbox_of(mask):
     return int(rows[0]), int(rows[-1]) + 1, int(cols[0]), int(cols[-1]) + 1
 
 
+def _crop_all_visible(visible, corners):
+    """Todo o recorte do quad visivel na mascara?
+
+    Com corners a mascara e de camera (issue #100): so o interior do
+    quad conta — mao na mesa fora do recorte nao e folha mascarada
+    (review do PR #118). Sem corners a mascara ja e a grade do warp:
+    toda ela e recorte.
+    """
+    if corners is None:
+        return bool(np.all(visible))
+    crop = np.zeros(visible.shape, np.uint8)
+    cv2.fillConvexPoly(crop, np.round(corners).astype(np.int32), 1)
+    return bool(visible[crop.astype(bool)].all())
+
+
 def _merge_deltas(records):
     """Uniao (OR) dos deltas incrementais de registros contiguos."""
     boxes = [r[3] for r in records if r[3] is not None]
@@ -513,24 +528,11 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 # porque ela e atraso real de atualizacao.
                 self._telemetry_replaced += 1
             self._telemetry_submits += 1
-            crop_clear = None
-            if visible is not None:
-                if corners is None:
-                    # Mascara na grade do warp: toda ela e recorte.
-                    crop_clear = bool(np.all(visible))
-                else:
-                    # Mascara de camera (issue #100): mao na mesa
-                    # fora do quad nao pode segurar a janela de
-                    # confirmacao pos-saida — a folha limpa e o que
-                    # esta limpo dentro do recorte (review do PR #118).
-                    crop = np.zeros(visible.shape, np.uint8)
-                    cv2.fillConvexPoly(crop, np.round(corners).astype(np.int32), 1)
-                    crop_clear = bool(visible[crop.astype(bool)].all())
             if (
                 self._hand_state is False
                 and self._awaiting_clear_post_exit
                 and self._post_exit_confirm_passes() > 1
-                and (crop_clear is None or crop_clear)
+                and (visible is None or _crop_all_visible(visible, corners))
             ):
                 # Primeira submissao pos-saida com visibilidade limpa (sem
                 # mascara de mao velha): re-arma a janela completa de
@@ -948,7 +950,11 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # (limitado a _INK_VOTE_WINDOW passadas para nunca prender o
             # descanso).
             is_pre_exit = self._telemetry_submits <= self._hand_exit_submits
-            is_masked = visible is not None and not np.all(visible)
+            # A mascara e de camera quando ha cantos: so a oclusao
+            # dentro do recorte mascara a passada — uma mao na mesa
+            # fora do quad nao pode gastar a janela de confirmacao
+            # pos-saida (review do PR #118).
+            is_masked = visible is not None and not _crop_all_visible(visible, corners)
             if (
                 self._post_exit_confirm_passes() > 1
                 and (is_pre_exit or is_masked)
