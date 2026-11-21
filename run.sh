@@ -51,7 +51,70 @@ _gui_ready() {
 import cv2, onnxruntime, draw
 from draw.app import _gui_backend_compiled
 assert _gui_backend_compiled(), "headless opencv"
+assert hasattr(cv2, "ximgproc"), "opencv sem modulos contrib"
 ' >/dev/null 2>&1
+}
+
+_drop_extra_cv2_providers() {
+    # A second registered cv2 provider is a time bomb: the next exact
+    # `uv sync` uninstalls one dist and deletes the shared cv2 files.
+    # When the GUI works the files are already the contrib ones — the
+    # extra provider only needs to lose what it owns alone: its RECORD
+    # entries minus every file a retained distribution also lists, and
+    # only inside this venv's own purelib/platlib — registrations
+    # inherited from system or user site-packages are never touched.
+    # No wheel, no network, and nothing shared is ever removed, so a
+    # working env stays launchable even offline on a cold cache.
+    _resolve_venv_paths
+    [ -n "$VENV_PYTHON" ] && "$VENV_PYTHON" -c '
+import shutil, sysconfig
+from pathlib import Path
+from importlib.metadata import distributions
+
+extra = {
+    "opencv-contrib-python-headless",
+    "opencv-python",
+    "opencv-python-headless",
+}
+roots = {
+    Path(sysconfig.get_path(key)).resolve()
+    for key in ("purelib", "platlib")
+}
+dists = [
+    d for d in distributions()
+    if (p := getattr(d, "_path", None)) is not None
+    and Path(p).resolve().parent in roots
+]
+names = {d.metadata["Name"].lower() for d in dists}
+if "opencv-contrib-python" in names:
+    keep = {
+        Path(d.locate_file(f)).resolve()
+        for d in dists
+        if d.metadata["Name"].lower() not in extra
+        for f in (d.files or ())
+    }
+    for d in dists:
+        if d.metadata["Name"].lower() not in extra:
+            continue
+        root = Path(d._path).resolve().parent
+        parents = set()
+        for f in d.files or ():
+            target = Path(d.locate_file(f)).resolve()
+            if target in keep or root not in target.parents:
+                continue
+            if target.is_file() or target.is_symlink():
+                target.unlink(missing_ok=True)
+                parents.update(target.parents)
+        for folder in sorted(
+            (p for p in parents if root in p.parents),
+            key=lambda p: -len(p.parts),
+        ):
+            try:
+                folder.rmdir()
+            except OSError:
+                pass
+        shutil.rmtree(d._path, ignore_errors=True)
+' >/dev/null 2>&1 || true
 }
 
 _hand_ready() {
@@ -79,7 +142,8 @@ fi
 
 _install_gui() {
     if [ "$USE_UV" = 1 ]; then
-        UV_PROJECT_ENVIRONMENT="$VENV_DIR" uv sync --extra gui "$@"
+        UV_PROJECT_ENVIRONMENT="$VENV_DIR" uv sync --inexact --extra gui \
+            --no-install-package opencv-contrib-python-headless "$@"
     else
         local extras=gui
         if [ "$#" -gt 0 ]; then
@@ -98,21 +162,34 @@ _prepare_pip() {
 }
 
 _repair_opencv() {
-    local wheels=(opencv-python opencv-python-headless opencv-contrib-python opencv-contrib-python-headless)
+    # Force the locked contrib wheel back on top without uninstalling:
+    # --reinstall-package rewrites its files in place, so a working GUI
+    # survives a failed attempt, and the extra cv2 dist registrations
+    # are dropped metadata-only at the end. --locked --offline resolves
+    # from uv.lock alone and reinstalls straight from the wheel cache;
+    # go online only for a missing wheel.
     if [ "$USE_UV" = 1 ]; then
-        uv pip uninstall --python "$VENV_PYTHON" "${wheels[@]}" >/dev/null 2>&1 || true
-        uv pip install --python "$VENV_PYTHON" --reinstall "opencv-contrib-python>=4.8,<5.1"
+        UV_PROJECT_ENVIRONMENT="$VENV_DIR" uv sync --locked --offline \
+            --inexact --extra gui --reinstall-package opencv-contrib-python \
+            --no-install-package opencv-contrib-python-headless ||
+            UV_PROJECT_ENVIRONMENT="$VENV_DIR" uv sync --inexact \
+                --extra gui --reinstall-package opencv-contrib-python \
+                --no-install-package opencv-contrib-python-headless ||
+            return "$?"
     else
-        "$VENV_PYTHON" -m pip uninstall -y "${wheels[@]}" >/dev/null 2>&1 || true
-        "$VENV_PYTHON" -m pip install --force-reinstall "opencv-contrib-python>=4.8,<5.1"
+        "$VENV_PYTHON" -m pip install --no-deps --force-reinstall \
+            "opencv-contrib-python>=4.8,<5.1" || return "$?"
     fi
+    _drop_extra_cv2_providers
 }
 
 if _gui_ready; then
+    _drop_extra_cv2_providers
     if ! _hand_ready; then
         BASE_VENV_DIR="$VENV_DIR"
         VENV_DIR="$BASE_VENV_DIR-hand"
         if _gui_ready && _hand_ready; then
+            _drop_extra_cv2_providers
             exec "$VENV_DRAW" "$@"
         fi
         VENV_DIR="$BASE_VENV_DIR"
@@ -133,7 +210,11 @@ if _gui_ready; then
         fi
     fi
 else
-    echo "Preparando ambiente do Draw (primeira execucao)..."
+    if [ -d "$VENV_DIR" ]; then
+        echo "Reparando o OpenCV do ambiente do Draw..."
+    else
+        echo "Preparando ambiente do Draw (primeira execucao)..."
+    fi
     _prepare_pip
     if _install_gui --extra hand; then
         rm -f "$VENV_DIR/.no_hand"
@@ -147,4 +228,5 @@ else
 fi
 
 _resolve_venv_paths
+_drop_extra_cv2_providers
 exec "$VENV_DRAW" "$@"
