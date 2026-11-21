@@ -66,6 +66,14 @@ def test_apply_format_recomputa_marcadores():
     assert config.current().name == "carta"
 
 
+def test_paper_spec_eh_imutavel():
+    spec = config.current()
+    with pytest.raises(AttributeError):
+        spec.width = 1
+    with pytest.raises(TypeError):
+        spec.marker_centers[0] = (0, 0)
+
+
 def projected_quad(name="carta", pitch=25, yaw=15, roll=0):
     w, h = config.FORMATS[name]
     points = np.array(

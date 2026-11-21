@@ -10,7 +10,9 @@ mutáveis (PAPER_W, MARKER_CENTERS, ...) podiam sair de sincronia se
 alguém escrevesse em um deles fora da função.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 
 import cv2
 
@@ -35,14 +37,15 @@ class PaperSpec:
     """Grade retificada da sessão: formato, orientação, pixels e cantos.
 
     `marker_centers` guarda os quatro centros ArUco por id
-    (0=sup. esq., 1=sup. dir., 2=inf. dir., 3=inf. esq.).
+    (0=sup. esq., 1=sup. dir., 2=inf. dir., 3=inf. esq.) num mapeamento
+    somente-leitura: o spec compartilhado nao pode ser editado in-place.
     """
 
     name: str
     orientation: str
     width: int
     height: int
-    marker_centers: dict
+    marker_centers: Mapping
 
     def paper_mm(self):
         """(largura_mm, altura_mm) da folha na orientação da grade."""
@@ -115,12 +118,14 @@ def _spec(name, orientation):
         orientation,
         width,
         height,
-        {
-            0: (90, 90),
-            1: (width - 90, 90),
-            2: (width - 90, height - 90),
-            3: (90, height - 90),
-        },
+        MappingProxyType(
+            {
+                0: (90, 90),
+                1: (width - 90, 90),
+                2: (width - 90, height - 90),
+                3: (90, height - 90),
+            }
+        ),
     )
 
 

@@ -398,25 +398,33 @@ def detect_markers(frame):
     return found
 
 
+def _sheet_corners(spec):
+    return [
+        (0, 0),
+        (spec.width, 0),
+        (spec.width, spec.height),
+        (0, spec.height),
+    ]
+
+
 def perspective_matrix(corners, destination=None):
     """Matriz de homografia 3x3 dos cantos da cena para a folha retificada."""
     src = np.asarray(corners, dtype=np.float32).reshape(4, 2)
     if destination is None:
-        spec = config.current()
-        destination = [
-            (0, 0),
-            (spec.width, 0),
-            (spec.width, spec.height),
-            (0, spec.height),
-        ]
+        destination = _sheet_corners(config.current())
     dst = np.asarray(destination, dtype=np.float32).reshape(4, 2)
     return cv2.getPerspectiveTransform(src, dst)
 
 
 def warp_sheet(frame, corners, destination=None):
     """Retifica a folha a partir de quatro cantos explícitos."""
-    matrix = perspective_matrix(corners, destination=destination)
     spec = config.current()
+    # Uma unica leitura do spec alimenta matriz e dsize: um apply_format
+    # entre elas nao pode combinar grade velha com tamanho novo.
+    matrix = perspective_matrix(
+        corners,
+        destination=_sheet_corners(spec) if destination is None else destination,
+    )
     return cv2.warpPerspective(frame, matrix, (spec.width, spec.height))
 
 
