@@ -2046,6 +2046,19 @@ def main():
         ),
     )
     parser.add_argument(
+        "--preset",
+        choices=("sketch", "ruled", "technical"),
+        default=None,
+        help=(
+            "perfil de produto da tinta ao vivo: sketch (esboço/lápis — "
+            "fidelidade máxima: voto legado, sem remoção de pauta), ruled "
+            "(caderno pautado — o preset de produção atual) ou technical "
+            "(técnico/CAD — voto 0,92, vetores mais limpos para DXF). "
+            "--ink-vote não combina (o perfil fixa o nível); --ink-interval "
+            "e --no-ink-ruling seguem como ajustes sobre o perfil"
+        ),
+    )
+    parser.add_argument(
         "--allow-unverified",
         action="store_true",
         help="carrega modelos divergentes ou fora do manifesto com "
@@ -2084,6 +2097,7 @@ def main():
         ("--ink-interval", args.ink_interval is not None),
         ("--no-ink-ruling", args.no_ink_ruling),
         ("--legacy-ink", args.legacy_ink),
+        ("--preset", args.preset is not None),
     ):
         if args.markers and given:
             parser.error(
@@ -2091,6 +2105,13 @@ def main():
             )
     if args.legacy_ink and args.no_ink_ruling:
         parser.error("--no-ink-ruling e redundante com --legacy-ink (ja sem pauta)")
+    if args.preset is not None:
+        if args.legacy_ink:
+            parser.error("--preset nao combina com --legacy-ink")
+        if args.ink_vote is not None:
+            parser.error(
+                "--ink-vote nao combina com --preset (o perfil fixa o nivel de voto)"
+            )
     try:
         if legacy_ink:
             ink_config = InkConfig()
@@ -2101,12 +2122,25 @@ def main():
                     ink_config, pass_interval_s=args.ink_interval
                 )
         else:
-            options = {"ruling_removal": not args.no_ink_ruling}
-            if args.ink_vote is not None:
-                options["vote_level"] = args.ink_vote
-            if args.ink_interval is not None:
-                options["pass_interval_s"] = args.ink_interval
-            ink_config = InkConfig.production(**options)
+            if args.preset == "sketch":
+                ink_config = InkConfig.sketch()
+            elif args.preset == "technical":
+                ink_config = InkConfig.technical()
+            else:
+                options = {"ruling_removal": not args.no_ink_ruling}
+                if args.ink_vote is not None:
+                    options["vote_level"] = args.ink_vote
+                if args.ink_interval is not None:
+                    options["pass_interval_s"] = args.ink_interval
+                ink_config = InkConfig.production(**options)
+            if args.preset is not None:
+                overrides = {}
+                if args.ink_interval is not None:
+                    overrides["pass_interval_s"] = args.ink_interval
+                if args.no_ink_ruling:
+                    overrides["ruling_removal"] = False
+                if overrides:
+                    ink_config = dataclasses.replace(ink_config, **overrides)
     except ValueError as error:
         parser.error(str(error))
     # Marcadores nao tem detector neural nem tinta: preset legado, sem erro.

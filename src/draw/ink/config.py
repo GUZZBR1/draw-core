@@ -11,6 +11,11 @@ LEGACY_VOTE_LEVEL = 1.9 / 3
 PRODUCTION_VOTE_LEVEL = 0.85
 PRODUCTION_PASS_INTERVAL_S = 0.15
 
+# Nível de voto do perfil técnico/CAD (medido na bancada do strict_vote:
+# 0,92 com ganho -> escrita 109%, pauta 48% do legado sem ganho — traco
+# mais fino ainda, aceitável e até desejado em linhas de CAD).
+TECHNICAL_VOTE_LEVEL = 0.92
+
 
 @dataclass(frozen=True, slots=True)
 class InkConfig:
@@ -184,4 +189,42 @@ class InkConfig:
             hysteresis=True,
             motion_veto=True,
             pass_interval_s=pass_interval_s,
+        )
+
+    @classmethod
+    def sketch(cls, *, pass_interval_s=PRODUCTION_PASS_INTERVAL_S):
+        """Perfil esboço/lápis: fidelidade primeiro.
+
+        Voto legado (o strict_vote medido afina tracos -27..48% e exige
+        ink_auto_gain; para desenho a lápis a perda de grafite fino
+        pesa mais que a sujeira residual) + hysteresis/motion_veto para
+        a poeira. ruling_removal desligado: o removedor pode comer lápis
+        deitado sobre a linha impressa (PR #56, recall do braço 8,6%).
+        """
+        return cls.strict_vote(
+            LEGACY_VOTE_LEVEL,
+            ruling_removal=False,
+            hysteresis=True,
+            motion_veto=True,
+            pass_interval_s=pass_interval_s,
+        )
+
+    @classmethod
+    def technical(
+        cls,
+        *,
+        vote_level=TECHNICAL_VOTE_LEVEL,
+        pass_interval_s=PRODUCTION_PASS_INTERVAL_S,
+        ruling_removal=True,
+    ):
+        """Perfil técnico/CAD: vetores mais limpos para export DXF.
+
+        Voto mais estrito (0,92 medido: escrita 109%, pauta 48% — quase
+        zera a pauta residual) + removedor de pauta; o traço mais fino
+        é desejado em linhas de construção.
+        """
+        return cls.production(
+            vote_level=vote_level,
+            pass_interval_s=pass_interval_s,
+            ruling_removal=ruling_removal,
         )
