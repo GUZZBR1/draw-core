@@ -34,7 +34,7 @@ import cv2
 import numpy as np
 
 from . import config as config_module
-from . import contracts, exposure, paper, photometry, tracker
+from . import contracts, exposure, paper, tracker
 from .ink import render as ink_render
 from .settings import PipelineConfig
 from .tracker import _SHEET_LOST_MIN_FRAMES
@@ -330,46 +330,6 @@ class Pipeline:
         self.last_ink_gain = 1.0
         self.generation_events = {"drop": 0, "reopen": 0}
 
-    @staticmethod
-    def _divnorm_page(ink_warped, coverage):
-        """ink_divnorm: domínio de entrada do modelo de tinta v4.
-
-        Paridade com o treino (draw-training pack_round4: mask_sheet
-        -> division_normalize): o fora-da-folha é preenchido ANTES da
-        normalização. Sem isso a mesa clara entra no blur de
-        iluminação e escurece a faixa de papel encostada nela — uma
-        borda falsa dentro da cobertura, que o preenchimento final
-        não alcança. O preenchimento usa a média da própria página
-        (o mesmo do caminho sem divnorm), não um branco fixo: papel
-        sob sombra ao lado de um branco fixo repetiria a borda.
-        """
-        if coverage is not None and coverage.any():
-            filled = ink_warped.copy()
-            filled[~coverage] = _paper_mean_bgr(ink_warped, coverage)
-            return photometry.division_normalize(filled)
-        return photometry.division_normalize(ink_warped)
-
-    def _sheet_coverage_page(self, warp_corners):
-        """Cobertura da folha na grade da página — só para o divnorm.
-
-        O caminho ink_divnorm ainda trabalha na grade retificada:
-        a borda preta que o warp deixa fora do quad (quad que
-        extrapola a borda do frame) só existe na página e não pode
-        ser preenchida em câmera, e o blur de iluminação a lê como
-        aresta. Este helper sobrevive apenas para esse caminho
-        experimental — a cobertura que sobe à trabalhadora é a de
-        câmera (`_sheet_coverage_camera`, issue #100).
-        """
-        if not self._config.coverage or self._coverage_mask is None:
-            return None
-        warped = self._warp_sheet(self._coverage_mask, warp_corners)
-        if warped is None:
-            return None
-        coverage = (
-            cv2.erode((warped > 127).astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
-        )
-        return coverage
-
     def _sheet_coverage_camera(self):
         """Cobertura da folha na grade do frame, ou None sem evidência.
 
@@ -484,22 +444,13 @@ class Pipeline:
             visible = seg_clear if visible is None else (visible & seg_clear)
         coverage = self._sheet_coverage_camera()
         if self._config.ink_divnorm:
-            # Domínio de entrada do modelo de tinta v4 — a receita
-            # continua na grade da página: a borda preta que o warp
-            # deixa fora do quad só existe lá, não pode ser
-            # preenchida em câmera, e o blur de iluminação a lê como
-            # aresta. A cobertura de página volta a ser retificada
-            # só neste caminho experimental; a cobertura de câmera
-            # segue subindo para o gate da trabalhadora.
-            ink_warped = self._warp_sheet(frame, warp_corners)
-            coverage_page = self._sheet_coverage_page(warp_corners)
-            ink_submit = self._divnorm_page(ink_warped, coverage_page)
-            if coverage_page is not None:
-                if coverage_page.any():
-                    ink_submit = ink_submit.copy()
-                    ink_submit[~coverage_page] = _paper_mean_bgr(
-                        ink_submit, coverage_page
-                    )
+            # Com ink_divnorm a imagem sobe crua: o par de
+            # preenchimentos e a normalização rolam dentro da
+            # passada da trabalhadora (issue #101), fora do laço.
+            # A cobertura de câmera segue subindo — a trabalhadora a
+            # retifica para preencher a região fora da folha e para
+            # o gate de re-confirmação.
+            ink_submit = self._warp_sheet(frame, warp_corners)
         else:
             # O ganho e o preenchimento usam máscaras em grade de
             # página nos antigos — a grade da página É o quad
