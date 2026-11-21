@@ -103,36 +103,49 @@ class LayeredInkAccumulator:
             self._turn_fired = False
         confirmed_before = self._confirmed > 0
         canvas_before = int(np.count_nonzero(self._confirmed))
-        # Oclusao: pixel que a passada nao pode ver (a mao sobre a
-        # pagina) nao entrega evidencia, nem a favor nem contra. A
+        # Oclusao e guarda: pixel que a passada nao pode julgar (a
+        # mao sobre a pagina, ou a faixa de borda fora da area util)
+        # nao entrega evidencia, nem a favor nem contra. A
         # probabilidade dele entra zerada na janela — soma zero no
         # escore, nao conta hit nem "visto como tinta" —, o
         # julgamento de virada mede a cobertura so sobre a tinta
-        # confirmada visivel (ou se abstem quando quase tudo esta
-        # coberto: mao segurando a pagina nao e pagina trocada) e a
-        # camada provisoria congela onde nao ha visao (ver abaixo).
+        # confirmada no dominio inspecionado (ou se abstem quando
+        # quase tudo esta fora dele: mao segurando a pagina, ou a
+        # guarda alargada cobrindo a tinta, nao e pagina trocada) e
+        # a camada provisoria congela onde nao ha visao (ver abaixo).
         evidence = prob if visible is None else np.where(visible, prob, np.float32(0.0))
         if valid_mask is not None:
             evidence = np.where(valid_mask, evidence, np.float32(0.0))
         mask_now = evidence > self.threshold
+        # Dominio inspecionado: onde a passada pode distinguir tinta
+        # de papel — nao ocluido (visible) e dentro da area util
+        # (valid_mask). Sem mascara de oclusao a guarda sozinha
+        # delimita esse dominio; sem nenhuma das duas nao ha
+        # evidencia negativa confiavel — a virada julga o canvas
+        # inteiro (legado) e a remocao se abstem.
+        inspected = visible
+        if inspected is None:
+            inspected = valid_mask
+        elif valid_mask is not None:
+            inspected = inspected & valid_mask
         turn = False
         if canvas_before >= identity._INK_TURN_MIN_CANVAS_PX and not self._turn_fired:
-            if visible is None:
+            if inspected is None:
                 judge_turn = True
                 turn_low = (
                     int(np.count_nonzero(mask_now & confirmed_before))
                     <= identity._INK_TURN_MAX_OVERLAP * canvas_before
                 )
             else:
-                visible_confirmed = confirmed_before & visible
-                visible_px = int(np.count_nonzero(visible_confirmed))
+                inspected_confirmed = confirmed_before & inspected
+                inspected_px = int(np.count_nonzero(inspected_confirmed))
                 judge_turn = (
-                    visible_px >= identity._OCCLUSION_TURN_MIN_VISIBLE_PX
-                    and visible_px >= 0.5 * canvas_before
+                    inspected_px >= identity._OCCLUSION_TURN_MIN_VISIBLE_PX
+                    and inspected_px >= 0.5 * canvas_before
                 )
                 turn_low = judge_turn and (
-                    int(np.count_nonzero(mask_now & visible_confirmed))
-                    <= identity._INK_TURN_MAX_OVERLAP * visible_px
+                    int(np.count_nonzero(mask_now & inspected_confirmed))
+                    <= identity._INK_TURN_MAX_OVERLAP * inspected_px
                 )
             if judge_turn:
                 if turn_low:
@@ -186,10 +199,12 @@ class LayeredInkAccumulator:
         if self._config.removal:
             if self._removal_streak is None:
                 self._removal_streak = np.zeros(prob.shape, dtype=np.uint8)
-            # Sem máscara de visibilidade não há evidência negativa confiável.
+            # Sem dominio inspecionado nao ha evidencia negativa
+            # confiavel; com a guarda ativa ela sozinha delimita
+            # onde a ausencia foi de fato observada.
             witnessed = False
-            if removal_allowed and visible is not None and canvas_before:
-                retained = np.count_nonzero(confirmed_before & visible & mask_now)
+            if removal_allowed and inspected is not None and canvas_before:
+                retained = np.count_nonzero(confirmed_before & inspected & mask_now)
                 witnessed = (
                     retained >= registration._REMOVAL_RETAINED_FRACTION * canvas_before
                     or retained >= registration._REMOVAL_WITNESS_FLOOR_PX
@@ -197,22 +212,22 @@ class LayeredInkAccumulator:
             if witnessed:
                 missing = (
                     confirmed_before
-                    & visible
-                    & (True if valid_mask is None else valid_mask)
+                    & inspected
                     & np.isfinite(prob)
                     & (prob <= registration._REMOVAL_LOW_PROB)
                 )
-                # Com testemunha: pixel à vista e não ausente vê o
-                # streak zerar (evidência positiva ou prova
-                # inconclusiva); pixel ausente conta. Ocluído ou sem
-                # testemunha não informa nada — o streak segura, não
-                # zera: a ausência do F-10 segue precisando ser
+                # Com testemunha: pixel inspecionado e não ausente
+                # vê o streak zerar (evidência positiva ou prova
+                # inconclusiva); pixel ausente conta. Fora do
+                # dominio inspecionado (ocluido ou sob a guarda) ou
+                # sem testemunha não informa nada — o streak segura,
+                # não zera: a ausência do F-10 segue precisando ser
                 # persistente, mas não precisa ser em passadas
                 # consecutivas nem desobstruídas (a testemunha e a
                 # mão oscilam em cena real — medido: retained
                 # 1,5k~13,9k alternando no sim-hand, streak nunca
                 # completava).
-                resettable = visible & ~missing
+                resettable = inspected & ~missing
                 self._removal_streak[resettable] = 0
                 self._removal_streak[missing] = np.minimum(
                     self._removal_streak[missing].astype(np.uint16) + 1,
