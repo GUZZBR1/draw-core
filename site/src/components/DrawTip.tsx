@@ -49,7 +49,7 @@ function caretAt(x: number, y: number): { node: Node; offset: number } | null {
 // Acha a palavra "Draw" sob o ponteiro, em qualquer texto da página (sem marcar nada no HTML).
 function findDraw(x: number, y: number, target: EventTarget | null): Hit | null {
   const el = target instanceof Element ? target : null;
-  if (!el || el.closest('.draw-tip, .wordmark, input, textarea, canvas')) return null;
+  if (!el || el.closest('.draw-tip, .wordmark, .studio-mark, input, textarea, canvas')) return null;
   const caret = caretAt(x, y);
   if (!caret || caret.node.nodeType !== Node.TEXT_NODE) return null;
   // Junta os nós de texto vizinhos (a máquina de escrever da Vision deixa uma letra por nó).
