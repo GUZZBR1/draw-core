@@ -154,19 +154,23 @@ class _SynchronousHandPresence:
         self.available_samples = 0
         self.error = None
 
-    def submit(self, frame, timestamp_ms):
+    def submit(self, frame, captured_at, *, source_id):
+        from draw.contracts import HandPresenceResult
+
         try:
-            sample = self.presence.sample(frame, timestamp_ms)
+            sample = self.presence.sample(
+                frame, captured_at * 1000.0, source_id=source_id
+            )
         except Exception as error:
             # Como a worker do app: o laço degrada para sinal indisponível.
             self.error = error
             return
         self.sequence += 1
         self.available_samples += int(sample.present is not None)
-        self.result = (self.sequence, sample.present, sample.moved)
+        self.result = HandPresenceResult(self.sequence, captured_at, source_id, sample)
 
     def poll(self, after_seq):
-        if self.result is not None and self.result[0] > after_seq:
+        if self.result is not None and self.result.sequence > after_seq:
             return self.result
         return None
 

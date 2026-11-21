@@ -474,7 +474,9 @@ def test_hand_lift_with_stale_seg_hand_mask_wakes_detector_before_confirming():
 
         def poll(self, after_seq):
             if self.next_state is not None and self._seq > after_seq:
-                return (self._seq, self.next_state, False)
+                return contracts.HandPresenceResult(
+                    self._seq, now[0], 0, contracts.HandSample(self.next_state, False)
+                )
             return None
 
     now = [100.0]
@@ -557,13 +559,22 @@ def test_late_masked_heartbeat_after_hand_lift_does_not_hide_finished_stroke():
         def __init__(self):
             self._seq = 0
             self.state = None
+            self.sample_at = None
 
-        def submit(self, *_a, **_kw):
-            return None
+        def submit(self, frame, captured_at, *_a, **_kw):
+            # A amostra é carimbada na captura — como a trabalhadora
+            # real, que entrega resultados capturados antes do quadro
+            # em que o laço os lê (review do PR #121).
+            self.sample_at = captured_at
 
         def poll(self, after_seq):
             if self.state is not None and self._seq > after_seq:
-                return (self._seq, self.state, False)
+                return contracts.HandPresenceResult(
+                    self._seq,
+                    self.sample_at,
+                    0,
+                    contracts.HandSample(self.state, False),
+                )
             return None
 
     now = [100.0]
@@ -601,6 +612,7 @@ def test_late_masked_heartbeat_after_hand_lift_does_not_hide_finished_stroke():
     pre_exit_ts = now[0] - 0.1
     hand._seq += 1
     hand.state = False
+    hand.submit(still, now[0] - 0.05)
     pipe.step(contracts.FramePacket(with_stroke, now[0], 16))
     ink_worker.pump()
     now[0] += 0.2
@@ -695,7 +707,9 @@ def test_cached_hand_mask_on_hand_exit_still_confirms_final_stroke_under_product
 
         def poll(self, after_seq):
             if self._seq > after_seq:
-                return (self._seq, self.state, self.moved)
+                return contracts.HandPresenceResult(
+                    self._seq, now[0], 0, contracts.HandSample(self.state, self.moved)
+                )
             return None
 
     now = [100.0]
