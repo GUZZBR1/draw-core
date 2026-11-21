@@ -443,7 +443,7 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
           <figcaption>
             <span>{tr('papel', 'paper')}</span>
             <button type="button" className="studio-pane-focus" aria-pressed={focusPane === 'paper'} onClick={() => setFocusPane('paper')}>
-              {focusPane === 'paper' ? tr('papel em foco', 'paper focused') : tr('ampliar papel', 'enlarge paper')}
+              {tr('Focar papel', 'Focus paper')}
             </button>
           </figcaption>
           <video ref={videoRef} className="studio-video" muted playsInline aria-hidden="true" />
@@ -453,7 +453,7 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
           <figcaption>
             <span>{tr('digital', 'digital')} · <span ref={countRef}>00</span> {tr('traços', 'strokes')}</span>
             <button type="button" className="studio-pane-focus" aria-pressed={focusPane === 'digital'} onClick={() => setFocusPane('digital')}>
-              {focusPane === 'digital' ? tr('digital em foco', 'digital focused') : tr('ampliar digital', 'enlarge digital')}
+              {tr('Focar digital', 'Focus digital')}
             </button>
           </figcaption>
           <canvas ref={digitalRef} className="studio-canvas" role="img" aria-label={tr('Versão digital do desenho', 'Digital version of the drawing')} />
