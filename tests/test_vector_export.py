@@ -67,6 +67,22 @@ def test_pipeline_simplifies_and_roundtrips(tmp_path):
     assert ev.iou(r_dxf, ink) >= 0.45
 
 
+def test_simplify_polylines_keeps_collinear_backtrack_overshoot():
+    """O approxPolyDP media distância à reta infinita das âncoras: um
+    retrocesso colinear que ultrapassa a âncora tinha distância zero e
+    sumia do SVG/DXF. Com distância ao SEGMENTO (simplify compartilhado
+    com vectorize.py), o vai-e-vem do traço fica."""
+    raw = [
+        {
+            "points": np.array([[0, 0], [30, 0], [10, 0]], dtype=np.float64),
+            "closed": False,
+        }
+    ]
+    simplified = ev.simplify_polylines(raw, 1.0)
+    assert len(simplified[0]["points"]) == 3
+    assert (simplified[0]["points"][1] == [30, 0]).all()
+
+
 def test_two_by_two_dot_survives_thinning_and_exports(tmp_path):
     # Um ponto 2x2 passa por filter_microfragments (area=4) mas o
     # Zhang-Suen o apagava inteiro: o export omitia o ponto.
