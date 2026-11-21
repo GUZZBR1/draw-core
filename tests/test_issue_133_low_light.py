@@ -19,6 +19,7 @@ def _low_light_page(delta, hand_at_margin):
     page = np.repeat(gradient[None, :], H, axis=0)
     page = np.repeat(page[..., None], 3, axis=2)
     page[SHADOW] -= 10.0
+    page[STROKE] = 28.0
     if hand_at_margin:
         page[HAND_MARGIN] = 235.0
     return np.clip(page + delta, 0, 255).astype(np.uint8)
@@ -37,6 +38,8 @@ def test_low_light_shadow_replay_keeps_weak_stroke_without_shadow_flicker(
     target_gains = []
     stable_gains = []
     outputs = []
+    shadow_reference = None
+    stroke_reference = None
     # Pequena oscilação temporal de exposição sobre gradiente e sombra
     # fixos; a mão branca ocupa a margem, mas não participa do p90.
     for index, delta in enumerate((0, 1, -1, 1, 0, -1, 0)):
@@ -45,12 +48,18 @@ def test_low_light_shadow_replay_keeps_weak_stroke_without_shadow_flicker(
         gain = smoother.update(target, index / 10.0)
         target_gains.append(target)
         stable_gains.append(gain)
+        ink_input = exposure.apply_gain(page, gain)
+        shadow_level = float(ink_input[SHADOW].mean())
+        stroke_level = float(ink_input[STROKE].mean())
+        if shadow_reference is None:
+            shadow_reference = shadow_level
+            stroke_reference = stroke_level
 
-        # Proxy determinístico do page-clean: o sombreamento responde mais
-        # à variação de ganho que o traço, cuja crista serve de âncora fraca.
+        # Proxy determinístico do page-clean construído a partir dos pixels
+        # efetivamente entregues à inferência, incluindo o ganho aplicado.
         prob = np.zeros((H, W), dtype=np.float32)
-        prob[SHADOW] = np.clip(0.84 + (gain - stable_gains[0]) * 0.8, 0, 1)
-        prob[STROKE] = np.clip(0.75 + (gain - stable_gains[0]) * 0.2, 0, 1)
+        prob[SHADOW] = np.clip(0.84 + (shadow_level - shadow_reference) * 0.02, 0, 1)
+        prob[STROKE] = np.clip(0.75 + (stroke_reference - stroke_level) * 0.01, 0, 1)
         prob[STROKE_ANCHOR] = 0.96
         outputs.append(accumulator.add(prob, visible))
 

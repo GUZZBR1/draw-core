@@ -56,6 +56,18 @@ def test_temporal_gain_suppresses_small_jitter_and_tracks_real_exposure_change()
     assert smoother.update(1.35, 10.0) == pytest.approx(1.35)
 
 
+def test_unity_gain_clears_a_previous_boost_without_clipping_bright_strokes():
+    smoother = exposure.PaperGainSmoother()
+    smoother.update(1.0256, 0.0)
+
+    gain = smoother.update(1.0, 0.1)
+    bright_paper = np.array([[[254, 254, 254], [251, 251, 251]]], np.uint8)
+    out = exposure.apply_gain(bright_paper, gain)
+
+    assert gain == 1.0
+    np.testing.assert_array_equal(out, bright_paper)
+
+
 def _dark_paper_with_bright_desk(desk_fraction=0.14, shape=(1200, 850)):
     h, w = shape
     img = np.full((h, w, 3), 80, np.uint8)

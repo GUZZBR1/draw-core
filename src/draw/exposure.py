@@ -73,6 +73,9 @@ class PaperGainSmoother:
     A banda morta de 3% evita que ruído do p90 altere a LUT. Mudanças
     maiores são seguidas em escala logarítmica, com constante de tempo
     curta para não prender a exposição quando a iluminação realmente muda.
+    Alvo 1,0 é bypass, não amortecimento: papel já bem exposto não pode
+    esperar a banda morta liberar o resíduo — cada passada ganhada clipa
+    o traço claro junto do papel.
     """
 
     def __init__(self):
@@ -97,6 +100,10 @@ class PaperGainSmoother:
         if elapsed <= 0.0:
             return self._gain
         self._updated_at = now
+
+        if target == 1.0:
+            self._gain = target
+            return self._gain
 
         current_log = math.log(self._gain)
         target_log = math.log(target)
