@@ -2,25 +2,27 @@
 
 `coverage_iou_floor` e `PRESENCE_VETO_LOGIT` foram calibrados na
 mesa de referência e não escalam com a resolução (issue #105). Este
-script lê o telemetry.jsonl de uma ou mais sessões capturadas na
-mesa nova e aplica a MESMA regra da calibração original sobre os
-valores observados:
+script lê o telemetry.jsonl de sessões capturadas na mesa nova e
+reaplica a MESMA regra da calibração original:
 
-- coverage_iou_floor: ponto médio entre o maior IoU rejeitado
-  (fantasma) e o menor IoU aceito (folha real). Referência:
+- coverage_iou_floor: ponto médio entre o maior IoU de fantasma
+  (mesa vazia) e o menor IoU de folha real. Referência:
   fantasma <= 0.108, folha >= 0.298 -> 0.2.
-- PRESENCE_VETO_LOGIT: maior logit de presença medido em aquisição
-  sem folha + 4.0 de margem. Referência: -6.98 + 4.0 -> -3.0.
+- PRESENCE_VETO_LOGIT: maior logit de presença medido em cena sem
+  folha + 4.0 de margem. Referência: -6.98 + 4.0 -> -3.0.
 
-As saídas são SUGESTÕES com a evidência ao lado. Limite epistêmico:
-a classificação folha/vazio é pelo DESFECHO da detecção, não por
-verdade de cena — uma folha real perdida pelo detector contamina o
-lado "vazio" e um fantasma aceito contamina o lado "folha". O
-relatório conta as fontes para a conferência visual da captura
-ficar a um passo (lab/desk_capture grava as pranchas de cena).
+Os lados vêm de RÓTULOS de captura, não do desfecho do detector:
+--empty declara "esta captura é mesa vazia" e --sheet "esta tem
+folha". É o operador quem sabe o que a câmera viu; os desfechos
+(veto, classic, neural...) ficam no relatório como evidência
+diagnóstica. Sem rótulos, a única separação disponível seria o
+próprio limiar medido — os anéis de IoU são censurados por ele
+(rejeitados < piso <= aceitos, sempre "separados" por construção)
+e uma folha perdida contaminaria o lado vazio: é a contaminação
+que o rótulo elimina.
 
 Uso:
-  python -m lab.calibrate_desk captures/telemetry.jsonl [mais.jsonl ...]
+  python -m lab.calibrate_desk --empty cap_mesa_vazia/ --sheet cap_folha/
 """
 
 from __future__ import annotations
@@ -33,12 +35,11 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-# O veto de presença só se aplica quando a neural NÃO fecha cantos
-# (app.py: corners retornam antes do check do logit). Só os
-# desfechos classic/presence_only estão sob o veto — a detecção
-# neural direta é imune a ele por construção.
-_VETOABLE_SHEET_SOURCES = {"classic", "presence_only"}
-_EMPTY_SOURCES = {"veto", "none"}
+# Fontes que o veto de presença alcança: a detecção neural devolve
+# cantos ANTES do check do logit (app.py) e é imune a ele — numa
+# captura rotulada como com-folha, só classic/presence_only/veto/
+# none estão sob o veto.
+_VETOABLE_SOURCES = {"classic", "presence_only", "veto", "none"}
 # Razões de rejeição cujo area_ratio é razão de contorno — a
 # métrica do _MIN_CONTOUR_AREA_RATIO. low_presence carrega fração
 # de foreground da máscara (métrica diferente) e ficaria misturada.
@@ -66,22 +67,18 @@ def _iter_records(paths):
                     continue
 
 
-def summarize(paths):
-    """Separa as amostras da telemetria por lado da calibração.
+def _summarize_side(paths, *, sheet):
+    """Amostras de UMA captura sob o rótulo declarado pelo operador.
 
-    As amostras de IoU vêm dos snapshots de stats (rejects e
-    accepts ficam em anel de 32 por linha — juntados, repetem-se
-    entre snapshots e por isso vão a conjuntos deduplicados por
-    valor). Os logits vêm dos eventos de aquisição: `presence_logit`
-    classificado pelo desfecho da detecção — `presence_sheet` guarda
-    só os desfechos que o veto alcança (classic/presence_only); a
-    detecção neural direta fica à parte porque é imune ao veto.
+    Os dois anéis de IoU (rejects+accepts) entram juntos: a divisão
+    entre eles é o piso VIGENTE, não a cena — um fantasma que o piso
+    velho deixou passar continua sendo fantasma. `presence_sheet`
+    reúne os logits das fontes que o veto alcança; `presence_neural`
+    fica à parte porque é imune ao veto.
     """
-    summary = {
-        "coverage_reject": [],
-        "coverage_accept": [],
-        "presence_empty": [],
-        "presence_sheet": [],
+    side = {
+        "coverage": set(),
+        "presence": [],
         "presence_neural": [],
         "source_counts": {},
         "fit_reject_reasons": {},
@@ -90,105 +87,107 @@ def summarize(paths):
         "acquisitions": 0,
         "snapshots": 0,
     }
-    cov_rej, cov_acc = set(), set()
     for rec in _iter_records(paths):
         if rec.get("event") == "acquisition":
-            summary["acquisitions"] += 1
-            logit = rec.get("presence_logit")
+            side["acquisitions"] += 1
             source = rec.get("source")
             if source:
-                summary["source_counts"][source] = (
-                    summary["source_counts"].get(source, 0) + 1
-                )
+                side["source_counts"][source] = side["source_counts"].get(source, 0) + 1
+            logit = rec.get("presence_logit")
             if isinstance(logit, (int, float)):
-                if source in _VETOABLE_SHEET_SOURCES:
-                    summary["presence_sheet"].append(float(logit))
-                elif source in _EMPTY_SOURCES:
-                    summary["presence_empty"].append(float(logit))
-                elif source == "neural":
-                    summary["presence_neural"].append(float(logit))
+                if sheet and source == "neural":
+                    side["presence_neural"].append(float(logit))
+                elif sheet or source in _VETOABLE_SOURCES:
+                    # Na mesa rotulada com folha, veto/none também
+                    # são amostras de folha — folhas perdidas pelo
+                    # detector, exatamente as que a calibração busca.
+                    side["presence"].append(float(logit))
             fit = rec.get("fit_reject")
             if isinstance(fit, dict):
                 reason = fit.get("reason")
                 if reason:
-                    summary["fit_reject_reasons"][reason] = (
-                        summary["fit_reject_reasons"].get(reason, 0) + 1
+                    side["fit_reject_reasons"][reason] = (
+                        side["fit_reject_reasons"].get(reason, 0) + 1
                     )
                 area = fit.get("area_ratio")
                 if reason in _CONTOUR_AREA_REASONS and isinstance(area, (int, float)):
-                    summary["fit_reject_areas"].append(float(area))
-            for side in ("tracker_before", "tracker_after"):
-                diag = rec.get(side) or {}
-                scale = diag.get("pixel_scale")
+                    side["fit_reject_areas"].append(float(area))
+            for diag in (rec.get("tracker_before"), rec.get("tracker_after")):
+                scale = (diag or {}).get("pixel_scale")
                 if isinstance(scale, (int, float)):
-                    summary["pixel_scales"].add(round(float(scale), 6))
+                    side["pixel_scales"].add(round(float(scale), 6))
         else:
-            summary["snapshots"] += 1
+            side["snapshots"] += 1
             for recent in rec.get("coverage_iou_reject_recent") or []:
-                cov_rej.add(round(float(recent), 4))
+                side["coverage"].add(round(float(recent), 4))
             for recent in rec.get("coverage_iou_accept_recent") or []:
-                cov_acc.add(round(float(recent), 4))
-    summary["coverage_reject"] = sorted(cov_rej)
-    summary["coverage_accept"] = sorted(cov_acc)
-    summary["pixel_scales"] = sorted(summary["pixel_scales"])
-    return summary
+                side["coverage"].add(round(float(recent), 4))
+    return side
+
+
+def summarize(empty_paths, sheet_paths):
+    """Sumariza as capturas rotuladas por lado da calibração."""
+    return {
+        "empty": _summarize_side(empty_paths, sheet=False),
+        "sheet": _summarize_side(sheet_paths, sheet=True),
+    }
 
 
 def suggest(summary, margin=4.0):
     """Converte a sumarização em limiares sugeridos + evidência.
 
     Regras idênticas às da calibração original da mesa de
-    referência; quando um lado da distribuição não apareceu na
-    captura, a sugestão é None com o motivo — calibrar sem os dois
-    lados é o chute que a issue quer evitar.
+    referência; quando um lado da distribuição não foi capturado,
+    a sugestão é None com o motivo — calibrar com metade do dado é
+    o chute que a issue quer evitar.
     """
     out = {}
 
-    rej, acc = summary["coverage_reject"], summary["coverage_accept"]
-    if rej and acc:
-        high_ghost, low_sheet = rej[-1], acc[0]
+    ghosts = sorted(summary["empty"]["coverage"])
+    sheets = sorted(summary["sheet"]["coverage"])
+    if ghosts and sheets:
+        high_ghost, low_sheet = ghosts[-1], sheets[0]
         if high_ghost < low_sheet:
             out["coverage_iou_floor"] = {
                 "value": round((high_ghost + low_sheet) / 2, 4),
                 "evidence": (
-                    f"maior IoU rejeitado {high_ghost} < menor IoU "
-                    f"aceito {low_sheet} (regra do ponto médio)"
+                    f"maior IoU de mesa vazia {high_ghost} < menor IoU "
+                    f"com folha {low_sheet} (regra do ponto médio)"
                 ),
             }
         else:
             out["coverage_iou_floor"] = {
                 "value": None,
                 "evidence": (
-                    f"distribuições se sobrepõem: rejeitado até "
-                    f"{high_ghost}, aceito desde {low_sheet} — o "
+                    f"distribuições se sobrepõem: mesa vazia até "
+                    f"{high_ghost}, folha desde {low_sheet} — o "
                     f"piso não separa nesta mesa"
                 ),
             }
     else:
-        missing = "rejeitados" if not rej else "aceitos"
+        missing = "mesa vazia (--empty)" if not ghosts else "com folha (--sheet)"
         out["coverage_iou_floor"] = {
             "value": None,
-            "evidence": f"sem amostras {missing}: capture a mesa vazia e com folha",
+            "evidence": f"sem amostras de {missing}: capture os dois cenários",
         }
 
-    empty = summary["presence_empty"]
-    sheet = summary["presence_sheet"]
-    if empty and sheet:
-        veto = round(max(empty) + margin, 4)
+    empty_logits = summary["empty"]["presence"]
+    sheet_logits = summary["sheet"]["presence"]
+    if empty_logits and sheet_logits:
+        veto = round(max(empty_logits) + margin, 4)
         # Folhas cuja presença cairia sob o veto sugerido: cada uma
         # é uma folha real que o veto mataria nesta mesa — logo a
-        # regra não separa aqui e a sugestão honesta é None. Só
-        # classic/presence_only entram: a detecção neural devolve
-        # cantos antes do check do veto e é imune a ele.
-        sheets_below = sum(1 for logit in sheet if logit <= veto)
+        # regra não separa aqui e a sugestão honesta é None. As
+        # detecções neurais são imunes ao veto e ficaram à parte.
+        sheets_below = sum(1 for logit in sheet_logits if logit <= veto)
         if sheets_below:
             out["presence_veto_logit"] = {
                 "value": None,
                 "evidence": (
-                    f"maior logit sem folha {max(empty)} + margem {margin} "
-                    f"= {veto}, mas {sheets_below} aquisição(ões) com folha "
-                    f"(menor logit {min(sheet)}) cairiam sob ele — "
-                    f"veto não separa nesta mesa"
+                    f"maior logit sem folha {max(empty_logits)} + margem "
+                    f"{margin} = {veto}, mas {sheets_below} aquisição(ões) "
+                    f"com folha (menor logit {min(sheet_logits)}) cairiam "
+                    f"sob ele — veto não separa nesta mesa"
                 ),
                 "sheets_vetoed": sheets_below,
             }
@@ -196,43 +195,58 @@ def suggest(summary, margin=4.0):
             out["presence_veto_logit"] = {
                 "value": veto,
                 "evidence": (
-                    f"maior logit sem folha {max(empty)} + margem {margin}; "
-                    f"nenhuma aquisição com folha cai sob o veto"
+                    f"maior logit sem folha {max(empty_logits)} + margem "
+                    f"{margin}; nenhuma aquisição com folha cai sob o veto"
                 ),
                 "sheets_vetoed": 0,
             }
     else:
-        if not empty:
-            missing = "sem aquisições de mesa vazia na captura"
-        elif summary["presence_neural"]:
-            # Houve folhas — só que todas detectadas pela neural,
-            # que é imune ao veto: o que falta são amostras de
-            # folha SOB o veto (classic/presence_only).
+        if not empty_logits:
+            neural_empty = summary["empty"]["source_counts"].get("neural", 0)
+            if neural_empty:
+                # Detecções neurais não passam pelo caminho do veto —
+                # faltam as amostras de mesa vazia que ele alcança.
+                missing = (
+                    f"mesa vazia só vista por detecções neurais "
+                    f"({neural_empty} aquisições), que o veto não "
+                    f"alcança — faltam amostras do lado vetável"
+                )
+            else:
+                missing = "sem aquisições de mesa vazia (--empty)"
+        elif summary["sheet"]["presence_neural"]:
             missing = (
                 f"folhas só detectadas pela neural "
-                f"({len(summary['presence_neural'])} aquisições), "
-                f"que é imune ao veto — faltam amostras do lado "
-                f"que o veto alcança (classic/presence_only)"
+                f"({len(summary['sheet']['presence_neural'])} aquisições), "
+                f"imune ao veto — faltam amostras do lado vetável"
             )
         else:
-            missing = "sem aquisições com folha na captura"
+            missing = "sem aquisições com folha (--sheet)"
         out["presence_veto_logit"] = {
             "value": None,
             "evidence": f"{missing} — o veto precisa dos dois lados para ser validado",
         }
 
+    reasons = {}
+    areas = []
+    for side in ("empty", "sheet"):
+        for reason, count in summary[side]["fit_reject_reasons"].items():
+            reasons[reason] = reasons.get(reason, 0) + count
+        areas += summary[side]["fit_reject_areas"]
     out["min_contour_area_ratio"] = {
         "value": None,
         "evidence": (
-            f"{summary['fit_reject_reasons'].get('min_area', 0)} "
-            f"rejeição(ões) min_area; menores razões de área "
-            f"rejeitadas: {sorted(summary['fit_reject_areas'])[:5]} — "
-            f"confirme visualmente se eram folhas antes de baixar o piso"
+            f"{reasons.get('min_area', 0)} rejeição(ões) min_area; "
+            f"menores razões de contorno rejeitadas: "
+            f"{sorted(areas)[:5]} — confirme visualmente se eram "
+            f"folhas antes de baixar o piso"
         ),
     }
     out["pixel_scale"] = {
-        "value": summary["pixel_scales"],
-        "evidence": "escalas de pixel vistas pelo tracker nesta captura",
+        "value": sorted(
+            set(summary["empty"]["pixel_scales"])
+            | set(summary["sheet"]["pixel_scales"])
+        ),
+        "evidence": "escalas de pixel vistas pelo tracker nestas capturas",
     }
     return out
 
@@ -240,12 +254,21 @@ def suggest(summary, margin=4.0):
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Sugere limiares sem denominador a partir da "
-        "telemetria de capturas em outra mesa (issue #105)."
+        "telemetria de capturas ROTULADAS em outra mesa (issue #105)."
     )
     parser.add_argument(
-        "telemetry",
+        "--empty",
         nargs="+",
-        help="telemetry.jsonl ou diretório de sessão que o contém",
+        default=[],
+        metavar="CAP",
+        help="telemetry.jsonl/diretório de captura de MESA VAZIA",
+    )
+    parser.add_argument(
+        "--sheet",
+        nargs="+",
+        default=[],
+        metavar="CAP",
+        help="telemetry.jsonl/diretório de captura COM FOLHA",
     )
     parser.add_argument(
         "--margin",
@@ -255,20 +278,32 @@ def main(argv=None):
         "a mesma da calibração de referência)",
     )
     args = parser.parse_args(argv)
+    if not args.empty and not args.sheet:
+        parser.error("rotule as capturas: --empty e/ou --sheet são obrigatórios")
 
-    summary = summarize(args.telemetry)
+    summary = summarize(args.empty, args.sheet)
     report = {
-        "inputs": [str(p) for p in args.telemetry],
-        "acquisitions": summary["acquisitions"],
-        "snapshots": summary["snapshots"],
-        "source_counts": summary["source_counts"],
-        "fit_reject_reasons": summary["fit_reject_reasons"],
+        "inputs": {
+            "empty": [str(p) for p in args.empty],
+            "sheet": [str(p) for p in args.sheet],
+        },
+        "empty": {
+            "acquisitions": summary["empty"]["acquisitions"],
+            "snapshots": summary["empty"]["snapshots"],
+            "source_counts": summary["empty"]["source_counts"],
+            "fit_reject_reasons": summary["empty"]["fit_reject_reasons"],
+        },
+        "sheet": {
+            "acquisitions": summary["sheet"]["acquisitions"],
+            "snapshots": summary["sheet"]["snapshots"],
+            "source_counts": summary["sheet"]["source_counts"],
+            "fit_reject_reasons": summary["sheet"]["fit_reject_reasons"],
+        },
         "suggestions": suggest(summary, margin=args.margin),
         "caveats": [
-            "classes folha/vazio derivam do desfecho da detecção, "
-            "não de verdade de cena — folhas perdidas e fantasmas "
-            "aceitos contaminam os lados; confirme nas pranchas "
-            "da captura antes de aplicar um valor sugerido",
+            "os lados seguem os rótulos declarados (--empty/--sheet); "
+            "um rótulo errado contamina a calibração — confira nas "
+            "pranchas da captura (lab/desk_capture) antes de aplicar",
         ],
     }
     print(json.dumps(report, indent=2, sort_keys=True))
