@@ -38,6 +38,7 @@ from draw.exporters.export_vectors import (  # noqa: E402
     parse_svg_paths,
     rasterize,
     simplify_polylines,
+    stroke_scale_mm_per_px,
     stroke_widths_px,
     trace_polylines,
     write_dxf,
@@ -293,15 +294,16 @@ def main(argv=None):
     ink = result["ink"]
 
     def _rasterize_weighted(parsed, widths, **kw):
-        raster = np.zeros(ink.shape, dtype=bool)
-        for (pts, closed), w_mm in zip(parsed, widths, strict=True):
-            th_px = (
-                thickness
-                if w_mm is None
-                else max(1, int(round(w_mm / (0.5 * (sx + sy)))))
-            )
-            raster |= rasterize([(pts, closed)], ink.shape, sx, sy, th_px, **kw)
-        return raster
+        # Uma varredura de página por arquivo: a espessura de cada
+        # entidade vai em thicknesses_px (medida na perpendicular do
+        # traço — a média sx/sy distorce sob escala anisotrópica).
+        ths = [
+            thickness
+            if w_mm is None
+            else max(1, int(round(w_mm / stroke_scale_mm_per_px(pts, sx, sy))))
+            for (pts, _), w_mm in zip(parsed, widths, strict=True)
+        ]
+        return rasterize(parsed, ink.shape, sx, sy, thickness, thicknesses_px=ths, **kw)
 
     widths_svg, widths_dxf = [], []
     raster_svg = _rasterize_weighted(parse_svg_paths(svg_path, widths_svg), widths_svg)

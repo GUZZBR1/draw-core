@@ -540,10 +540,15 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         0,90 sobre a media de 3 passadas), um traco forte exige 3
         leituras na janela: a saida da mao arma uma janela completa
         (_INK_VOTE_WINDOW) para fechar o traco antes do descanso total.
+        Perfis com post_exit_full_window (ex.: sketch, voto legado sem
+        histerese) tambem armam a janela: a passada unica so fecha um
+        traco ja lido com a mao presente, e um traco revelado so depois
+        da saida precisa das leituras restantes (Devin Review PR #122).
         """
         if (
             self._config.vote_score_strong > votes._INK_VOTE_SCORE_STRONG
             or self._config.hysteresis
+            or self._config.post_exit_full_window
         ):
             return votes._INK_VOTE_WINDOW
         return 1

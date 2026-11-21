@@ -218,6 +218,54 @@ def test_production_vote_confirms_late_stroke_after_hand_exit_and_then_rests():
     assert fake.calls == calls_at_rest
 
 
+def test_sketch_confirms_stroke_revealed_only_after_hand_exit():
+    """Regressao (Devin Review PR #122): no preset sketch (voto legado,
+    sem histerese), um traco que so aparece DEPOIS da mao sair nunca foi
+    lido antes — a unica passada pos-saida do atalho deixa o score em
+    0,98 < 1,9 e o descanso total congela o traco. post_exit_full_window
+    arma a janela completa, como production()."""
+    from draw.ink.config import InkConfig
+
+    class _PostExitDashInk:
+        threshold = 0.7
+
+        def __init__(self):
+            self.calls = 0
+            self.add_dash = False
+
+        def ink_prob(self, _warped):
+            self.calls += 1
+            prob = np.zeros((H, W), dtype=np.float32)
+            prob[5:15, 5:20] = 0.98
+            if self.add_dash:
+                prob[25:33, 35:50] = 0.98
+            return prob
+
+    now = [1000.0]
+    fake = _PostExitDashInk()
+    worker = worker_mod.PageCleanWorker(
+        fake, clock=lambda: now[0], config=InkConfig.sketch()
+    )
+    generation = worker.new_generation()
+    worker.set_hand_presence(True, moved=True)
+    _pump_for(worker, generation, now, 1.0)
+    base_snap = worker.poll(generation, 0)
+    assert int(np.count_nonzero(base_snap.confirmed[5:15, 5:20])) == 10 * 15
+    assert worker._generation_passes >= worker_mod._REST_MIN_GENERATION_PASSES
+    assert worker._quiet_passes >= worker_mod._REST_QUIET_PASSES
+
+    # Mao sai e so entao o traco aparece (estava totalmente sob ela):
+    # nenhuma leitura pre-saida existe para o atalho de 1 passada usar.
+    worker.set_hand_presence(False)
+    fake.add_dash = True
+
+    _pump_for(worker, generation, now, 1.5)
+    snap = worker.poll(generation, 0)
+    assert int(np.count_nonzero(snap.confirmed[25:33, 35:50])) == 8 * 15
+    _pump_for(worker, generation, now, 2.5)
+    assert worker.stats()["resting"] is True
+
+
 def test_queued_masked_frame_on_exit_legacy_vs_production():
     """Regressao (review #74): com um quadro mascarado ja na fila quando a mao
     sai numa pagina madura, o legado (InkConfig()) gasta sua unica passada

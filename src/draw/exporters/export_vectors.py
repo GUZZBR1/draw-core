@@ -605,26 +605,56 @@ def parse_dxf_polylines(dxf_path, widths=None):
     return out
 
 
-def rasterize(mm_polylines, shape, sx, sy, thickness_px, flip_y=False, paper_h_mm=None):
-    """Desenha polilinhas (mm) de volta na grade de pixels da página."""
+def rasterize(
+    mm_polylines,
+    shape,
+    sx,
+    sy,
+    thickness_px,
+    flip_y=False,
+    paper_h_mm=None,
+    thicknesses_px=None,
+):
+    """Desenha polilinhas (mm) de volta na grade de pixels da página.
+
+    `thicknesses_px` (opcional, alinhado a mm_polylines) dá a espessura
+    de cada entidade — a prova por traço usa uma única varredura de
+    página em vez de uma por traço.
+    """
     raster = np.zeros(shape, dtype=np.uint8)
-    for pts_mm, closed in mm_polylines:
+    for i, (pts_mm, closed) in enumerate(mm_polylines):
+        th_px = thickness_px if thicknesses_px is None else thicknesses_px[i]
         pts = pts_mm.copy()
         if flip_y:
             pts[:, 1] = paper_h_mm - pts[:, 1]
         px = np.round(pts / np.array([sx, sy])).astype(np.int32)
         if len(px) == 1:
-            cv2.circle(raster, tuple(px[0]), max(thickness_px // 2, 0), 1, -1)
+            cv2.circle(raster, tuple(px[0]), max(th_px // 2, 0), 1, -1)
         else:
             cv2.polylines(
                 raster,
                 [px.reshape(-1, 1, 2)],
                 bool(closed),
                 1,
-                thickness=max(int(thickness_px), 1),
+                thickness=max(int(th_px), 1),
                 lineType=cv2.LINE_AA,
             )
     return raster > 0
+
+
+def stroke_scale_mm_per_px(pts_mm, sx, sy):
+    """Escala mm/px da ESPESSURA do traço sob escala anisotrópica.
+
+    A largura projeta na perpendicular ao eixo do traço: horizontal
+    segue sy, vertical segue sx — a média (sx+sy)/2 engorda/fina o
+    traço quando os eixos diferem (Devin Review PR #122).
+    """
+    if len(pts_mm) < 2:
+        return 0.5 * (sx + sy)
+    cov = np.cov(np.asarray(pts_mm, dtype=np.float64).T)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    u = eigvecs[:, int(np.argmax(eigvals))]
+    return abs(u[1]) * sx + abs(u[0]) * sy
 
 
 def iou(a, b):

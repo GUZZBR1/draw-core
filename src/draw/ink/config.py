@@ -104,6 +104,11 @@ class InkConfig:
     # 6,7/s em 3,1; 0,10 s -> 9,9/s em 4,3 (o fp32 em mosaico de hoje, a
     # 0,25 s: 3,9/s em 4,9). Opt-in ate a validacao ao vivo com a mao.
     pass_interval_s: float | None = None
+    # Janela completa de confirmacao apos a saida da mao (worker). Sem ela,
+    # o voto legado gasta 1 passada assumindo que o traco ja foi lido uma
+    # vez com a mao presente; um traco revelado so depois da saida fica
+    # aquem do voto e o descanso total o congela (Devin Review PR #122).
+    post_exit_full_window: bool = False
 
     def __post_init__(self):
         if not 0.0 < self.t_low < self.t_high <= 1.0:
@@ -204,6 +209,9 @@ class InkConfig:
         (2,25 >= 1,9) mas morre sem âncora (Devin Review PR #122).
         ruling_removal desligado: o removedor pode comer lápis
         deitado sobre a linha impressa (PR #56, recall do braço 8,6%).
+        post_exit_full_window: o atalho de 1 passada pos-saida assume
+        uma leitura com a mao presente; traco so revelado depois da
+        saida precisa da janela inteira (Devin Review PR #122).
         """
         return cls.strict_vote(
             LEGACY_VOTE_LEVEL,
@@ -211,6 +219,7 @@ class InkConfig:
             hysteresis=False,
             motion_veto=True,
             pass_interval_s=pass_interval_s,
+            post_exit_full_window=True,
         )
 
     @classmethod
