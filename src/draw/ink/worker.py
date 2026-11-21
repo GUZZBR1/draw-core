@@ -10,7 +10,7 @@ import numpy as np
 from .. import config as paper_config
 from .. import photometry
 from ..contracts import InkDelta, InkDisplaySnapshot, InkSnapshot
-from . import accumulator, identity, motion, registration, ruling, votes
+from . import accumulator, identity, motion, paper_evidence, registration, ruling, votes
 from . import anchor as anchor_mod
 from .config import InkConfig
 
@@ -56,6 +56,9 @@ _NO_HAND_REST_AFTER_STILL_PASSES = 4
 # de acordar desse clone — com a porta de fronteira, ela nao
 # acumula mais.
 _REST_MIN_GENERATION_PASSES = 3
+# Pixels minimos de papel em recuperacao (hold) para re-armar a janela de
+# confirmacao pos-saida; abaixo disso e ruido de borda.
+_RECOVERY_MIN_PX = 256
 
 
 _REST_QUIET_PASSES = 2
@@ -355,6 +358,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         # Degrau entre quads consecutivos (a entrada de cadencia
         # geometrica do follow e do portao de remocao).
         self._previous_corners = None
+        self._paper_ref = None
+        self._spent_confirm_pass = False
         self._accumulator = accumulator.LayeredInkAccumulator(
             threshold=self._config.seen_threshold, config=self._config
         )
@@ -436,6 +441,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._identity_defer_count = 0
             self._identity_switch_votes = 0
             self._previous_corners = None
+            self._paper_ref = None
             if preserve_identity:
                 reference = self._accumulator._confirmed
                 self._identity_reference = (
@@ -1040,6 +1046,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         scheduled_hand_state = self._hand_state
         self._last_pass_start = self._clock()
         pass_started_at = self._last_pass_start
+        self._spent_confirm_pass = False
         if self._confirm_passes > 0:
             # Se a passada retirada logo apos a saida da mao veio de um submit
             # anterior a saida ou ainda carrega mascara de oclusao pre-saida
@@ -1062,6 +1069,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 self._confirm_passes = self._post_exit_confirm_passes()
             else:
                 self._confirm_passes -= 1
+                self._spent_confirm_pass = True
         return (
             warped,
             generation,
@@ -1213,6 +1221,21 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 prob = ink_prob(warped)
             else:
                 prob = (self._page_clean.ink_mask(warped) > 0).astype(np.float32)
+            paper_ok_page = None
+            if self._config.paper_guard and warped.dtype == np.uint8:
+                # Guarda fotometrica (issue #129): so papel exposto
+                # pode apagar ou votar; mao/sombra/caneta congelam,
+                # com ou sem a deteccao do MediaPipe. So imagem
+                # fotometrica (uint8): mapa float nao e foto.
+                reference = paper_evidence.paper_reference(warped, visible)
+                if reference is not None:
+                    self._paper_ref = reference
+                # Sem NENHUMA referencia de papel (imagem preta desde o
+                # inicio da geracao) nao ha o que comparar: a guarda se
+                # abstem como antes. Com referencia previa, incerteza
+                # (reference None) congela a pagina inteira.
+                if self._paper_ref is not None:
+                    paper_ok_page = paper_evidence.paper_exposed(warped, reference)
             if self._ruling is not None:
                 if generation != self._ruling_generation:
                     self._ruling.reset()
@@ -1927,9 +1950,36 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 # None para o avaliador nao projetar GT por uma
                 # geometria que nunca chegou ao canvas.
                 self._last_registration = None
+            paper_ok = paper_ok_page
+            registration_used = self._last_registration
+            if (
+                paper_ok is not None
+                and registration_used is not None
+                and registration_used[0] is not None
+                and prob is registered_prob
+            ):
+                # Mesma transformacao da probabilidade; so o que sobrevive
+                # inteiro ao resample (== 1) conta como papel.
+                paper_ok = (
+                    registration._register_ink_probability(
+                        paper_ok.astype(np.float32),
+                        registration_used[0],
+                        registration_used[1],
+                        None,
+                    )[0]
+                    > 0.999
+                )
+                if motion_decision == "correct":
+                    # A evidencia de papel segue o mesmo modelo afim da
+                    # probabilidade e da visibilidade.
+                    paper_ok = (
+                        motion_fix.warp_back(paper_ok.astype(np.uint8), nearest=True)
+                        > 0
+                    )
             result = self._accumulator.add(
                 prob,
                 visible,
+                paper_ok=paper_ok,
                 removal_allowed=(
                     not identity_owned
                     and not arbitration_abstain
@@ -1969,6 +2019,24 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # Contadores do descanso total: so a saida
             # CONFIRMADA interessa (provisoria tremula com o
             # warp e nao pode segurar a trabalhadora acordada).
+            if (
+                self._spent_confirm_pass
+                and (
+                    result["frozen_pending_px"] > 0
+                    or result["recovering_px"] >= _RECOVERY_MIN_PX
+                )
+                and self._confirm_passes < self._post_exit_confirm_passes()
+                and self._confirm_masked_skips
+                < 2 * votes._INK_VOTE_WINDOW + self._config.occlusion_hold_passes + 1
+            ):
+                # Pos-saida da mao: enquanto a guarda congela tinta nova
+                # detectada pelo modelo (ou remocao elegivel no hold) ou a
+                # sombra esta saindo (recovering_px), as passadas gastas ate
+                # aqui nao deram voto limpo. Re-arma a janela cheia (limitado
+                # pelo teto de devolucoes) para que, solto o hold, haja uma
+                # janela inteira de votos antes do descanso.
+                self._confirm_masked_skips += 1
+                self._confirm_passes = self._post_exit_confirm_passes()
             self._generation_passes += 1
             if result["confirmed_changed"] or result["turn"] or motion_abstain:
                 # Passada vetada nao e quietude: a folha esta fora do

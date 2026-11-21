@@ -1275,9 +1275,11 @@ def main():
             )
     try:
         if legacy_ink:
-            ink_config = InkConfig()
+            # Comparacao com o legado: sem a guarda de papel (#129), que o
+            # laco legado nao tem.
+            ink_config = InkConfig(paper_guard=False)
             if args.ink_vote is not None:
-                ink_config = InkConfig.strict_vote(args.ink_vote)
+                ink_config = InkConfig.strict_vote(args.ink_vote, paper_guard=False)
             if args.ink_interval is not None:
                 ink_config = dataclasses.replace(
                     ink_config, pass_interval_s=args.ink_interval
