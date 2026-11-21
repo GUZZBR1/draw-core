@@ -32,7 +32,9 @@ import shutil
 import socket
 import struct
 import subprocess
+import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -329,6 +331,29 @@ class _PurePythonHvcamLib:
         return 0
 
     @classmethod
+    def _read_into(cls, sock, view, deadline):
+        total = len(view)
+        received = 0
+        while received < total:
+            w = cls._wait_readable(sock, deadline)
+            if w == -2:
+                return -1 if received > 0 else -2
+            if w != 0:
+                return w
+            try:
+                n = sock.recv_into(view[received:])
+            except InterruptedError:
+                continue
+            except BlockingIOError:
+                continue
+            except OSError:
+                return -1
+            if n <= 0:
+                return -1
+            received += n
+        return 0
+
+    @classmethod
     def _pull_frame(cls, sock, hdr, buf, cap, deadline):
         if cls._write_full(sock, _HVCAM_REQ) < 0:
             return -1
@@ -361,12 +386,29 @@ class _PurePythonHvcamLib:
             or payload_bytes > _MAX_PAYLOAD
         ):
             return -1
+        stored = min(payload_bytes, int(cap))
+        if (
+            buf is not None
+            and payload_bytes > 0
+            and payload_bytes <= int(cap)
+            and hasattr(sock, "recv_into")
+        ):
+            try:
+                view = memoryview(buf).cast("B")[:payload_bytes]
+            except TypeError:
+                view = None
+            if view is not None:
+                rc = cls._read_into(sock, view, deadline)
+                if rc == -2:
+                    return -1
+                if rc != 0:
+                    return rc
+                return stored
         raw_payload, rc = cls._read_full(sock, payload_bytes, deadline)
         if rc == -2:
             return -1
         if rc != 0:
             return rc
-        stored = min(payload_bytes, int(cap))
         if stored > 0 and buf is not None:
             ctypes.memmove(buf, raw_payload, stored)
         return stored
@@ -496,6 +538,583 @@ def _listen_vsock_bounded(
         return -(error.errno or errno.EIO)
     finally:
         listener.close()
+
+
+# Tabelas de Huffman padrao do MJPEG (ITU-T T.81 Annex K / RFC 2435, 420 bytes).
+# Webcams UVC no Windows frequentemente omitem o segmento DHT (0xFFC4) em fluxos
+# MJPEG; injetar o DHT padrao antes do SOS (0xFFDA) evita "Corrupt JPEG data" e
+# falhas do libjpeg/OpenCV sem custo quando o DHT ja vem presente.
+_MJPEG_STANDARD_DHT = bytes(
+    [
+        0xFF,
+        0xC4,
+        0x01,
+        0xA2,
+        # DC Luminance (0x00)
+        0x00,
+        0x00,
+        0x01,
+        0x05,
+        0x01,
+        0x01,
+        0x01,
+        0x01,
+        0x01,
+        0x01,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x01,
+        0x02,
+        0x03,
+        0x04,
+        0x05,
+        0x06,
+        0x07,
+        0x08,
+        0x09,
+        0x0A,
+        0x0B,
+        # DC Chrominance (0x01)
+        0x01,
+        0x00,
+        0x03,
+        0x01,
+        0x01,
+        0x01,
+        0x01,
+        0x01,
+        0x01,
+        0x01,
+        0x01,
+        0x01,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x01,
+        0x02,
+        0x03,
+        0x04,
+        0x05,
+        0x06,
+        0x07,
+        0x08,
+        0x09,
+        0x0A,
+        0x0B,
+        # AC Luminance (0x10)
+        0x10,
+        0x00,
+        0x02,
+        0x01,
+        0x03,
+        0x03,
+        0x02,
+        0x04,
+        0x03,
+        0x05,
+        0x05,
+        0x04,
+        0x04,
+        0x00,
+        0x00,
+        0x01,
+        0x7D,
+        0x01,
+        0x02,
+        0x03,
+        0x00,
+        0x04,
+        0x11,
+        0x05,
+        0x12,
+        0x21,
+        0x31,
+        0x41,
+        0x06,
+        0x13,
+        0x51,
+        0x61,
+        0x07,
+        0x22,
+        0x71,
+        0x14,
+        0x32,
+        0x81,
+        0x91,
+        0xA1,
+        0x08,
+        0x23,
+        0x42,
+        0xB1,
+        0xC1,
+        0x15,
+        0x52,
+        0xD1,
+        0xF0,
+        0x24,
+        0x33,
+        0x62,
+        0x72,
+        0x82,
+        0x09,
+        0x0A,
+        0x16,
+        0x17,
+        0x18,
+        0x19,
+        0x1A,
+        0x25,
+        0x26,
+        0x27,
+        0x28,
+        0x29,
+        0x2A,
+        0x34,
+        0x35,
+        0x36,
+        0x37,
+        0x38,
+        0x39,
+        0x3A,
+        0x43,
+        0x44,
+        0x45,
+        0x46,
+        0x47,
+        0x48,
+        0x49,
+        0x4A,
+        0x53,
+        0x54,
+        0x55,
+        0x56,
+        0x57,
+        0x58,
+        0x59,
+        0x5A,
+        0x63,
+        0x64,
+        0x65,
+        0x66,
+        0x67,
+        0x68,
+        0x69,
+        0x6A,
+        0x73,
+        0x74,
+        0x75,
+        0x76,
+        0x77,
+        0x78,
+        0x79,
+        0x7A,
+        0x83,
+        0x84,
+        0x85,
+        0x86,
+        0x87,
+        0x88,
+        0x89,
+        0x8A,
+        0x92,
+        0x93,
+        0x94,
+        0x95,
+        0x96,
+        0x97,
+        0x98,
+        0x99,
+        0x9A,
+        0xA2,
+        0xA3,
+        0xA4,
+        0xA5,
+        0xA6,
+        0xA7,
+        0xA8,
+        0xA9,
+        0xAA,
+        0xB2,
+        0xB3,
+        0xB4,
+        0xB5,
+        0xB6,
+        0xB7,
+        0xB8,
+        0xB9,
+        0xBA,
+        0xC2,
+        0xC3,
+        0xC4,
+        0xC5,
+        0xC6,
+        0xC7,
+        0xC8,
+        0xC9,
+        0xCA,
+        0xD2,
+        0xD3,
+        0xD4,
+        0xD5,
+        0xD6,
+        0xD7,
+        0xD8,
+        0xD9,
+        0xDA,
+        0xE1,
+        0xE2,
+        0xE3,
+        0xE4,
+        0xE5,
+        0xE6,
+        0xE7,
+        0xE8,
+        0xE9,
+        0xEA,
+        0xF1,
+        0xF2,
+        0xF3,
+        0xF4,
+        0xF5,
+        0xF6,
+        0xF7,
+        0xF8,
+        0xF9,
+        0xFA,
+        # AC Chrominance (0x11)
+        0x11,
+        0x00,
+        0x02,
+        0x01,
+        0x02,
+        0x04,
+        0x04,
+        0x03,
+        0x04,
+        0x07,
+        0x05,
+        0x04,
+        0x04,
+        0x00,
+        0x01,
+        0x02,
+        0x77,
+        0x00,
+        0x01,
+        0x02,
+        0x03,
+        0x11,
+        0x04,
+        0x05,
+        0x21,
+        0x31,
+        0x06,
+        0x12,
+        0x41,
+        0x51,
+        0x07,
+        0x61,
+        0x71,
+        0x13,
+        0x22,
+        0x32,
+        0x81,
+        0x08,
+        0x14,
+        0x42,
+        0x91,
+        0xA1,
+        0xB1,
+        0xC1,
+        0x09,
+        0x23,
+        0x33,
+        0x52,
+        0xF0,
+        0x15,
+        0x62,
+        0x72,
+        0xD1,
+        0x0A,
+        0x16,
+        0x24,
+        0x34,
+        0xE1,
+        0x25,
+        0xF1,
+        0x17,
+        0x18,
+        0x19,
+        0x1A,
+        0x26,
+        0x27,
+        0x28,
+        0x29,
+        0x2A,
+        0x35,
+        0x36,
+        0x37,
+        0x38,
+        0x39,
+        0x3A,
+        0x43,
+        0x44,
+        0x45,
+        0x46,
+        0x47,
+        0x48,
+        0x49,
+        0x4A,
+        0x53,
+        0x54,
+        0x55,
+        0x56,
+        0x57,
+        0x58,
+        0x59,
+        0x5A,
+        0x63,
+        0x64,
+        0x65,
+        0x66,
+        0x67,
+        0x68,
+        0x69,
+        0x6A,
+        0x73,
+        0x74,
+        0x75,
+        0x76,
+        0x77,
+        0x78,
+        0x79,
+        0x7A,
+        0x82,
+        0x83,
+        0x84,
+        0x85,
+        0x86,
+        0x87,
+        0x88,
+        0x89,
+        0x8A,
+        0x92,
+        0x93,
+        0x94,
+        0x95,
+        0x96,
+        0x97,
+        0x98,
+        0x99,
+        0x9A,
+        0xA2,
+        0xA3,
+        0xA4,
+        0xA5,
+        0xA6,
+        0xA7,
+        0xA8,
+        0xA9,
+        0xAA,
+        0xB2,
+        0xB3,
+        0xB4,
+        0xB5,
+        0xB6,
+        0xB7,
+        0xB8,
+        0xB9,
+        0xBA,
+        0xC2,
+        0xC3,
+        0xC4,
+        0xC5,
+        0xC6,
+        0xC7,
+        0xC8,
+        0xC9,
+        0xCA,
+        0xD2,
+        0xD3,
+        0xD4,
+        0xD5,
+        0xD6,
+        0xD7,
+        0xD8,
+        0xD9,
+        0xDA,
+        0xE2,
+        0xE3,
+        0xE4,
+        0xE5,
+        0xE6,
+        0xE7,
+        0xE8,
+        0xE9,
+        0xEA,
+        0xF2,
+        0xF3,
+        0xF4,
+        0xF5,
+        0xF6,
+        0xF7,
+        0xF8,
+        0xF9,
+        0xFA,
+    ]
+)
+
+
+_STDERR_REDIRECT_LOCK = threading.Lock()
+
+
+def _sanitize_mjpeg(frame):
+    """Valida e saneia um payload MJPEG antes do `cv2.imdecode`.
+
+    - Inspeciona marcadores diretamente sobre um `memoryview` zero-copy; quadros
+      MJPEG limpos (SOI em 0, DHT presente e EOI no fim) sao devolvidos sem copia.
+    - Rejeita quadros truncados sem SOI (0xFFD8), SOS (0xFFDA) ou EOI (0xFFD9)
+      antes do libjpeg, evitando quadros metade-cinza e spam "Corrupt JPEG".
+    - Apara lixo antes do SOI e padding UVC apos o EOI.
+    - Injeta o segmento DHT padrao de MJPEG quando a webcam o omite.
+    """
+    view = memoryview(frame).cast("B")
+    n = len(view)
+    if n < 4:
+        raise ValueError("hvcam: payload MJPEG curto demais")
+    if view[0] == 0xFF and view[1] == 0xD8:
+        soi = 0
+    else:
+        raw = bytes(view)
+        soi = raw.find(b"\xff\xd8")
+        if soi < 0:
+            raise ValueError("hvcam: payload MJPEG sem marcador SOI")
+    pos = soi + 2
+    has_dht = False
+    sos = -1
+    while pos + 1 < n:
+        if view[pos] != 0xFF:
+            raise ValueError("hvcam: cabecalho MJPEG desalinhado")
+        while pos < n and view[pos] == 0xFF:
+            pos += 1
+        if pos >= n:
+            break
+        marker = view[pos]
+        pos += 1
+        if marker == 0xDA:  # SOS
+            sos = pos - 2
+            break
+        if marker == 0xD9:  # EOI antes de SOS
+            raise ValueError("hvcam: payload MJPEG sem segmento SOS")
+        if marker in (0x00, 0x01, 0xD8) or 0xD0 <= marker <= 0xD7:
+            continue
+        if pos + 1 >= n:
+            raise ValueError("hvcam: segmento MJPEG truncado")
+        seg_len = (view[pos] << 8) | view[pos + 1]
+        if seg_len < 2 or pos + seg_len > n:
+            raise ValueError("hvcam: tamanho de segmento MJPEG invalido")
+        if marker == 0xC4:
+            has_dht = True
+        pos += seg_len
+    if sos < 0:
+        raise ValueError("hvcam: payload MJPEG sem marcador SOS")
+    # Caminho rapido zero-copy: EOI exatamente no fim do buffer.
+    if view[n - 2] == 0xFF and view[n - 1] == 0xD9 and n - 2 >= sos + 2:
+        eoi = n - 2
+    else:
+        raw_tail = bytes(view[sos + 2 :])
+        rel_eoi = raw_tail.rfind(b"\xff\xd9")
+        if rel_eoi < 0:
+            raise ValueError("hvcam: payload MJPEG truncado (sem marcador EOI)")
+        eoi = sos + 2 + rel_eoi
+    if not has_dht:
+        clean = bytes(view[soi:sos]) + _MJPEG_STANDARD_DHT + bytes(view[sos : eoi + 2])
+        return np.frombuffer(clean, dtype=np.uint8)
+    if soi == 0 and eoi + 2 == n and isinstance(frame, np.ndarray):
+        return frame
+    return np.frombuffer(bytes(view[soi : eoi + 2]), dtype=np.uint8)
+
+
+_EXTRANEOUS_RE = re.compile(r"(\d+) extraneous bytes before marker 0xd9")
+
+
+def _classify_mjpeg_warning(line, buf):
+    """Classifica uma linha de aviso do libjpeg: "corrupt", "padding" ou "other".
+
+    "extraneous bytes before marker 0xd9" so e inofensivo se os N bytes logo
+    antes do EOI forem padding (0x00/0xFF), como em varias webcams UVC. Se forem
+    dados de scan, o decode consumiu menos bytes do que devia (dano real).
+    """
+    lower = line.lower()
+    if "premature end" in lower:
+        return "corrupt"
+    if "corrupt jpeg" not in lower:
+        return "other"
+    m = _EXTRANEOUS_RE.search(lower)
+    if m is None:
+        return "corrupt"
+    n = int(m.group(1))
+    data = np.asarray(buf, dtype=np.uint8).reshape(-1)
+    if n <= 0 or data.size < n + 2 or data[-2] != 0xFF or data[-1] != 0xD9:
+        return "corrupt"
+    tail = data[-2 - n : -2]
+    return "padding" if bool(np.all((tail == 0x00) | (tail == 0xFF))) else "corrupt"
+
+
+def _imdecode_mjpeg_strict(buf):
+    """Decodifica MJPEG e falha se o libjpeg emitir aviso de scan corrompido.
+
+    Quando um scan MJPEG termina prematuramente mas mantem `FF D9` no fim,
+    `cv2.imdecode` devolve uma imagem metade-cinza acompanhada de aviso
+    `Corrupt JPEG data` no stderr C (fd 2). Capturar o fd 2 sob lock transforma
+    esse aviso em `ValueError` para que o fallback NV12/YUY2 seja acionado.
+    """
+    warn = ""
+    try:
+        with _STDERR_REDIRECT_LOCK:
+            try:
+                sys.stderr.flush()
+            except Exception:  # noqa: BLE001
+                pass
+            with tempfile.TemporaryFile() as tmp:
+                saved_fd = os.dup(2)
+                try:
+                    os.dup2(tmp.fileno(), 2)
+                    img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+                finally:
+                    os.dup2(saved_fd, 2)
+                    os.close(saved_fd)
+                tmp.seek(0)
+                warn = tmp.read(4096).decode("utf-8", errors="replace")
+    except OSError:
+        img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+    if warn:
+        passthrough = []
+        for line in warn.splitlines():
+            if not line.strip():
+                continue
+            verdict = _classify_mjpeg_warning(line, buf)
+            if verdict == "corrupt":
+                raise ValueError(f"hvcam: payload MJPEG corrompido ({line.strip()})")
+            if verdict == "other":
+                passthrough.append(line)
+        if passthrough:
+            try:
+                sys.stderr.write("\n".join(passthrough) + "\n")
+            except Exception:  # noqa: BLE001
+                pass
+    if img is None or img.size == 0:
+        raise ValueError("hvcam: payload MJPEG falhou no decode")
+    return img
 
 
 class Camera:
@@ -642,9 +1261,8 @@ class Camera:
                 cv2.COLOR_YUV2BGR_NV12,
             )
         elif fmt == 4:
-            img = cv2.imdecode(frame, cv2.IMREAD_COLOR)
-            if img is None:
-                raise ValueError("hvcam: payload MJPEG falhou no decode")
+            clean = _sanitize_mjpeg(frame)
+            img = _imdecode_mjpeg_strict(clean)
         else:
             img = cv2.cvtColor(frame.reshape(hgt, w, 4), cv2.COLOR_BGRA2BGR)
         return cv2.flip(img, 0) if flags & 2 else img
@@ -747,6 +1365,7 @@ class HvcamCapture:
         self.last_frame_id = None
         self.last_capture_ts_ms = None
         self.source_dropped = 0
+        self.mjpeg_decode_errors = 0
         self._last_seq = None
         # Por que a fonte nao abriu (URL invalida, libhvcam.so ausente
         # ou connect recusado): os chamadores exibem isso em vez de um
@@ -801,6 +1420,8 @@ class HvcamCapture:
         try:
             frame = self._cam.to_bgr(info, payload)
         except (ValueError, cv2.error):
+            if info.get("format") == 4:
+                self.mjpeg_decode_errors += 1
             return False, None
         if frame is None:
             return False, None
@@ -1023,6 +1644,11 @@ def list_hvcam_devices(host_exe):
     return devices
 
 
+_MANAGED_WIDTH = 1280
+_MANAGED_HEIGHT = 720
+_MANAGED_FPS = 30
+
+
 def open_managed_reverse(
     port=DEFAULT_PORT,
     device=0,
@@ -1032,14 +1658,19 @@ def open_managed_reverse(
     host_exe=None,
     devices=None,
     try_all=False,
+    width=_MANAGED_WIDTH,
+    height=_MANAGED_HEIGHT,
+    fps=_MANAGED_FPS,
     popen=subprocess.Popen,
     capture_cls=None,
 ):
     """Sobe `hvcam-host.exe --reverse` automaticamente e conecta via vsock.
 
-    Quando `try_all=True` (padrao para `--source 0`), tenta primeiro o
-    indice pedido e, se a camera nao abrir, percorre as demais webcams
-    encontradas no Windows ate achar uma que funcione. O processo host
+    Pede 1280x720@30fps por padrao (evita que webcams 1080p/4K derrubem o
+    desempenho). Se a camera abrir mas entregar MJPEG corrompido no probe,
+    tenta automaticamente o mesmo dispositivo com `--format nv12` (sem JPEG).
+    Quando `try_all=True` (padrao para `--source 0`), percorre as demais
+    webcams encontradas no Windows ate achar uma que funcione. O processo host
     fica preso ao `HvcamCapture` retornado e e encerrado no `release()`.
     Devolve `(HvcamCapture, device_index, device_name)` ou `(None, None, None)`.
     """
@@ -1061,20 +1692,27 @@ def open_managed_reverse(
     run_cwd = "/mnt/c" if os.path.isdir("/mnt/c") else str(exe.parent)
     cls = HvcamCapture if capture_cls is None else capture_cls
 
-    last_host_error = None
-    for dev_idx, dev_name in order:
+    base_mode = []
+    if width is not None and height is not None:
+        base_mode.extend(["--width", str(int(width)), "--height", str(int(height))])
+    if fps is not None:
+        base_mode.extend(["--fps", str(int(fps))])
+
+    def _attempt(dev_idx, extra_args):
         proc_box = [None]
+        host_error = None
         # A file lets the host keep logging after connect without a pipe reader.
         # The child keeps its own descriptor until it exits.
         with tempfile.TemporaryFile() as stderr_log:
 
-            def _spawn(idx=dev_idx, box=proc_box):
+            def _spawn(idx=dev_idx, box=proc_box, mode_args=extra_args):
                 proc = popen(
                     [
                         str(exe),
                         "--reverse",
                         "--port",
                         str(int(port)),
+                        *mode_args,
                         "--device",
                         str(idx),
                     ],
@@ -1098,28 +1736,153 @@ def open_managed_reverse(
                     abort_check=_aborted,
                 )
                 if cap.isOpened():
-                    if not try_all or _probe_hvcam_frame(cap):
+                    needs_probe = try_all or (
+                        capture_cls is None and hasattr(cap, "read")
+                    )
+                    if not needs_probe:
                         cap._host_proc = proc_box[0]
                         proc_box[0] = None
-                        return cap, dev_idx, dev_name
-                elif _aborted():
+                        return cap, False, None, None
+                    ok_probe, measured_fps = _probe_hvcam_stream(cap)
+                    mjpeg_failed = getattr(cap, "mjpeg_decode_errors", 0) > 0
+                    if ok_probe and not mjpeg_failed:
+                        cap._host_proc = proc_box[0]
+                        proc_box[0] = None
+                        return cap, False, measured_fps, None
+                    cap.release()
+                    return None, mjpeg_failed, None, None
+                if _aborted():
                     size = stderr_log.seek(0, os.SEEK_END)
                     stderr_log.seek(max(0, size - 16_384))
                     err_msg = stderr_log.read(16_384).decode("utf-8", errors="replace")
                     if err_msg.strip():
-                        last_host_error = err_msg.strip()
+                        host_error = err_msg.strip()
                 cap.release()
+                return None, False, None, host_error
             finally:
                 _terminate_host_process(proc_box[0])
+
+    def _try_raw_formats(dev_idx, mode_prefix, accept=None):
+        """Tenta NV12 e YUY2. `accept(fps)` rejeita um raw limpo (ex.: lento
+        demais) e segue para o proximo formato; o primeiro rejeitado fica em
+        `rejected_fmt` como ultimo recurso. Devolve (cap, erro, rejected_fmt)."""
+        err_last = None
+        rejected_fmt = None
+        for fallback_fmt in ("nv12", "yuy2"):
+            raw_cap, _raw_mjpeg, raw_fps, raw_err = _attempt(
+                dev_idx, [*mode_prefix, "--format", fallback_fmt]
+            )
+            if raw_cap is not None:
+                if accept is None or accept(raw_fps):
+                    return raw_cap, None, None
+                raw_cap.release()
+                if rejected_fmt is None:
+                    rejected_fmt = fallback_fmt
+                continue
+            if raw_err:
+                err_last = raw_err
+        return None, err_last, rejected_fmt
+
+    last_host_error = None
+    for dev_idx, dev_name in order:
+        cap, mjpeg_failed, measured_fps, err = _attempt(dev_idx, base_mode)
+        if cap is not None:
+            # Se 720p reduziu o FPS abaixo de 75% do alvo (ex.: camera so oferece
+            # 720p@15fps e 1080p@30fps), testa o modo nativo (rate-first) e fica
+            # com ele se entregar taxa mais alta.
+            if (
+                base_mode
+                and fps is not None
+                and measured_fps is not None
+                and measured_fps < 0.75 * float(fps)
+            ):
+                cap.release()
+                nat_cap, nat_mjpeg, nat_fps, nat_err = _attempt(dev_idx, [])
+                native_raw_fmt = None
+                if nat_cap is not None and (
+                    nat_fps is None or nat_fps > measured_fps * 1.15
+                ):
+                    return nat_cap, dev_idx, dev_name
+                if nat_cap is not None:
+                    nat_cap.release()
+                elif nat_mjpeg:
+                    # Raw nativo costuma ser mais lento (USB2): so troca o 720p
+                    # MJPEG limpo se a taxa medida for claramente maior.
+                    raw_cap, raw_err, native_raw_fmt = _try_raw_formats(
+                        dev_idx,
+                        [],
+                        accept=lambda f, m=measured_fps: f is None or f > m * 1.15,
+                    )
+                    if raw_cap is not None:
+                        return raw_cap, dev_idx, dev_name
+                    if raw_err:
+                        last_host_error = raw_err
+                if nat_err:
+                    last_host_error = nat_err
+                # Nativo nao superou 720p: reabre 720p (menor carga de CPU).
+                cap2, mjpeg2, _f2, err2 = _attempt(dev_idx, base_mode)
+                if cap2 is not None:
+                    return cap2, dev_idx, dev_name
+                if err2:
+                    last_host_error = err2
+                if mjpeg2:
+                    raw_cap, raw_err, _rej = _try_raw_formats(dev_idx, base_mode)
+                    if raw_cap is not None:
+                        return raw_cap, dev_idx, dev_name
+                    if raw_err:
+                        last_host_error = raw_err
+                if native_raw_fmt is not None:
+                    # Ultimo recurso: o raw nativo lento que ja passou no probe.
+                    raw_cap, _m, _f, _e = _attempt(
+                        dev_idx, ["--format", native_raw_fmt]
+                    )
+                    if raw_cap is not None:
+                        return raw_cap, dev_idx, dev_name
+                continue
+            return cap, dev_idx, dev_name
+        if err:
+            last_host_error = err
+        # Se a camera abriu mas o fluxo MJPEG veio corrompido, tenta NV12/YUY2 (sem JPEG).
+        if mjpeg_failed:
+            raw_cap, raw_err, _rej = _try_raw_formats(dev_idx, base_mode)
+            if raw_cap is not None:
+                return raw_cap, dev_idx, dev_name
+            if raw_err:
+                last_host_error = raw_err
     if last_host_error:
         raise RuntimeError(last_host_error)
     return None, None, None
 
 
-def _probe_hvcam_frame(capture, attempts=3):
-    """Confirma que a fonte hvcam entrega ao menos um quadro valido."""
+def _probe_hvcam_stream(capture, attempts=3):
+    """Confirma que a fonte hvcam entrega quadros limpos e mede o FPS real.
+
+    Falha imediatamente se ocorrer qualquer erro de decode MJPEG (mesmo que
+    outra leitura funcione), para acionar o fallback de formato cru. Quando a
+    fonte expoe `last_capture_ts_ms`, coleta ate `attempts` quadros para medir
+    o FPS entregue sem depender de clock local.
+    """
+    timestamps = []
+    got_frame = False
     for _ in range(attempts):
         ok, frame = capture.read()
+        if getattr(capture, "mjpeg_decode_errors", 0) > 0:
+            return False, None
         if ok and frame is not None:
-            return True
-    return False
+            got_frame = True
+            ts = getattr(capture, "last_capture_ts_ms", None)
+            if ts is None:
+                return True, None
+            timestamps.append(ts)
+    if not got_frame:
+        return False, None
+    measured_fps = None
+    if len(timestamps) >= 2 and timestamps[-1] > timestamps[0]:
+        measured_fps = (len(timestamps) - 1) * 1000.0 / (timestamps[-1] - timestamps[0])
+    return True, measured_fps
+
+
+def _probe_hvcam_frame(capture, attempts=3):
+    """Confirma que a fonte hvcam entrega ao menos um quadro valido."""
+    ok, _fps = _probe_hvcam_stream(capture, attempts=attempts)
+    return ok
