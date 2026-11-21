@@ -140,6 +140,19 @@ def test_veto_sem_lado_de_folha_nao_valida(tmp_path):
     assert "com folha" in sug["evidence"]
 
 
+def test_folhas_so_neurais_nao_confundem_evidencia(tmp_path):
+    """Folhas existem mas todas vieram da neural (imune ao veto):
+    a evidência diz que faltam amostras do LADO VETÁVEL — não que
+    a captura não viu folha."""
+    path = _write_telemetry(
+        tmp_path, [_acq("veto", -6.0), _acq("neural", 1.8), _acq("neural", 2.4)]
+    )
+    sug = cd.suggest(cd.summarize([path]))["presence_veto_logit"]
+    assert sug["value"] is None
+    assert "neural" in sug["evidence"]
+    assert "2" in sug["evidence"]
+
+
 def test_sem_um_lado_nao_ha_sugestao(tmp_path):
     """Só mesa com folha (nenhum fantasma rejeitado): piso fica sem
     sugestão — metade da distribuição não basta para posicioná-lo."""

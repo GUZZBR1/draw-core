@@ -202,13 +202,23 @@ def suggest(summary, margin=4.0):
                 "sheets_vetoed": 0,
             }
     else:
-        missing = "mesa vazia" if not empty else "com folha"
+        if not empty:
+            missing = "sem aquisições de mesa vazia na captura"
+        elif summary["presence_neural"]:
+            # Houve folhas — só que todas detectadas pela neural,
+            # que é imune ao veto: o que falta são amostras de
+            # folha SOB o veto (classic/presence_only).
+            missing = (
+                f"folhas só detectadas pela neural "
+                f"({len(summary['presence_neural'])} aquisições), "
+                f"que é imune ao veto — faltam amostras do lado "
+                f"que o veto alcança (classic/presence_only)"
+            )
+        else:
+            missing = "sem aquisições com folha na captura"
         out["presence_veto_logit"] = {
             "value": None,
-            "evidence": (
-                f"sem aquisições de {missing} na captura — o veto "
-                f"precisa dos dois lados para ser validado"
-            ),
+            "evidence": f"{missing} — o veto precisa dos dois lados para ser validado",
         }
 
     out["min_contour_area_ratio"] = {
