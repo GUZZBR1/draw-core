@@ -245,7 +245,11 @@ def test_weighted_segments_collapses_the_dxf_duplicated_dot():
     # (Devin Review PR #122).
     assert ths == [2]
     raster = ev.rasterize(parts, (20, 20), 1.0, 1.0, 7, thicknesses_px=ths)
-    assert int(raster.sum()) > 0
+    raster_fallback = ev.rasterize(parts, (20, 20), 1.0, 1.0, 7, thicknesses_px=[7])
+    # O ponto de 2 px tem de renderizar menor que o de 7 px — sem a
+    # comparação, rasterize podia ignorar ths e usar o fallback
+    # (Devin Review PR #122).
+    assert 0 < int(raster.sum()) < int(raster_fallback.sum())
 
 
 def test_lines_without_width_px_keep_the_uniform_fallback(tmp_path):
