@@ -644,6 +644,18 @@ class Pipeline:
             full=full,
         )
 
+    def _reset_paper_gain(self):
+        """Zera o estado de exposição do papel, suavizador e ganho juntos.
+
+        Resetar só o suavizador deixaria `last_ink_gain` com o ganho da
+        folha velha: com a máscara vazia (mão cobrindo tudo) a
+        estimativa não roda e o frame recebe aquele ganho até a
+        primeira medida — uma folha clara entraria clipada a 255
+        (Devin Review PR #140).
+        """
+        self._paper_gain_smoother.reset()
+        self.last_ink_gain = 1.0
+
     def reset_source(self, since):
         """Fronteira de fonte: a camera nova comeca uma pagina nova.
 
@@ -672,7 +684,7 @@ class Pipeline:
         self.clean_display_version = 0
         # A tinta antiga morreu: a saida ao vivo precisa saber (canvas limpo).
         self._on_ink(contracts.InkPublication(-1, 0, None))
-        self._paper_gain_smoother.reset()
+        self._reset_paper_gain()
         self.tracker.reset()
         detect_wake = getattr(self, "_detect_wake", None)
         if detect_wake is not None:
@@ -1024,7 +1036,7 @@ class Pipeline:
                 self.clean_generation = self.ink_worker.new_generation(
                     preserve_identity=self.clean_recovery_pending
                 )
-                self._paper_gain_smoother.reset()
+                self._reset_paper_gain()
                 self.clean_recovery_pending = False
                 self.clean_display_version = 0
                 self.clean_provisional_mask = None

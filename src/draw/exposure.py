@@ -191,9 +191,20 @@ class PaperGainSmoother:
         if target >= _MAX_GAIN and self._saturates_newly(
             image, mask, proposed, self._gain
         ):
-            # Alvo no teto não mede a cena: convergir para ele só vale
-            # enquanto a subida não clipa papel — realce que o ganho
-            # atual preserva trava o resíduo (Devin Review PR #140).
+            # Alvo no teto não mede a cena: a subida só vale sem clipar
+            # papel. Descartar o passo inteiro congelava o ganho — a
+            # mesma proposta é rejeitada a cada passada e a folha fica
+            # escura mesmo com ganho intermediário seguro (Devin Review
+            # PR #140). O predicado é monotônico no ganho: bisseção em
+            # log acha o maior passo seguro em (atual, proposto].
+            lo, hi = self._gain, proposed
+            for _ in range(10):
+                mid = math.sqrt(lo * hi)
+                if self._saturates_newly(image, mask, mid, self._gain):
+                    hi = mid
+                else:
+                    lo = mid
+            self._gain = lo
             return self._gain
         self._gain = proposed
         return self._gain

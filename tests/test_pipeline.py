@@ -1230,6 +1230,23 @@ def test_drop_without_persist_clears_canvas_and_provisional():
     assert loop.accumulated_canvas is None
 
 
+def test_reset_source_resets_the_applied_ink_gain():
+    """Devin Review PR #140: o reset de fonte/geração zerava o
+    suavizador mas não `last_ink_gain` — com a folha toda coberta a
+    estimativa não roda e o frame aplicaria o ganho velho (folha clara
+    entraria clipada a 255). Os dois estados zera juntos."""
+    loop, _det, _ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None),
+        config=PipelineConfig(ink_auto_gain=True),
+    )
+    frame = np.full((720, 1280, 3), 80, np.uint8)
+    _drive(loop, 40, frame=frame)
+    assert loop.last_ink_gain == pytest.approx(2.5, rel=0.1)
+
+    loop.reset_source(since=1000.0)
+    assert loop.last_ink_gain == 1.0
+
+
 def test_reset_source_drops_camera_space_state_and_stale_detections():
     """Troca de camera: estado da camera anterior nao vaza para a nova."""
     loop, det, _ink = _make_loop(lambda _i: (QUAD.copy(), "paper", None))

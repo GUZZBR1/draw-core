@@ -150,15 +150,58 @@ def test_ceiling_ratio_correction_not_undone_by_smoothing():
     bright[8, 16] = 91
 
     smoother = exposure.PaperGainSmoother()
-    sequence = [dark, bright] * 4  # clarões sustentados, não um flash
+    # Clarões alternados E fases claras sustentadas: em quadro claro
+    # repetido não há shift — o caminho normal também tem que preservar.
+    sequence = [dark, bright, bright, dark, bright, bright, bright, dark, bright]
     for index, page in enumerate(sequence):
         target = exposure.paper_gain(page, visible)  # 3,0 sempre
         gain = smoother.update(target, index * 0.15, image=page, mask=visible)
-        if index % 2 == 0:
+        if page is not bright:
             continue
         out = exposure.apply_gain(bright, gain)
         # 65 * (3 / (65/60)) ~= 180: realces 90/91 distintos em TODO clarão
         assert out[8, 8, 0] < out[8, 16, 0] < 255
+
+
+def test_sustained_shadow_recovers_toward_the_safe_ceiling():
+    """Devin Review PR #140: sombra irregular sustentada em cadência
+    ~150 ms com o alvo no teto. Rejeitar o passo inteiro congelava o
+    ganho na cadência; a bisseção acha o maior passo seguro — o ganho
+    converge à borda que cliparia a faixa clara, sem clipá-la."""
+    visible = np.ones((120, 120), dtype=bool)
+    page = np.full((120, 120, 3), 66, np.uint8)
+    page[:, 112:] = 200  # faixa clara do papel: ~7% amostrado, p90 fica 66
+
+    smoother = exposure.PaperGainSmoother()
+    smoother.update(1.0, 0.0)  # sem imagem: começa do bypass sem baseline
+    target = exposure.paper_gain(page, visible)
+    assert target == 3.0
+
+    gains = []
+    for index in range(1, 9):
+        gains.append(smoother.update(target, index * 0.15, image=page, mask=visible))
+
+    # Congelado em 1,0 a folha sairia ~66; o maior ganho seguro é 255/200.
+    assert gains[-1] == pytest.approx(255 / 200, rel=0.02)
+    out = exposure.apply_gain(page, gains[-1])
+    assert out[0, 112, 0] < 255  # faixa preservada, não clipada
+    assert out[0, 40, 0] > 80  # papel escuro subiu: ~84, não ~66
+
+
+def test_static_scene_converges_to_the_target():
+    """Invariante: cena estática converge à banda morta do alvo em
+    poucas passadas — nenhum caminho pode travar o ganho num platô."""
+    visible = np.ones((120, 120), dtype=bool)
+    page = np.full((120, 120, 3), 100, np.uint8)
+
+    smoother = exposure.PaperGainSmoother()
+    smoother.update(1.5, 0.0)  # sem imagem: sem baseline de shift
+    gains = [
+        smoother.update(2.0, index / 10.0, image=page, mask=visible)
+        for index in range(1, 12)
+    ]
+
+    assert gains[-1] == pytest.approx(2.0, rel=0.03)  # dentro da banda morta
 
 
 def test_exposure_shift_correction_uses_shared_ratio_over_new_mask_target():
