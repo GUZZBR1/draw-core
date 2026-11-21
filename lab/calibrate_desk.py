@@ -52,12 +52,14 @@ _CONTOUR_AREA_REASONS = {"min_area", "unsupported", "fit_failed", "implausible"}
 
 
 class MixedSessionError(RuntimeError):
-    """telemetry.jsonl com mais de uma sessão gravada.
+    """Arquivo que não prova uma sessão única e rotulável.
 
     A SessionTelemetry faz append: regravar no mesmo save-dir junta
-    duas cenas num arquivo só. O rótulo --empty/--sheet vale para o
-    arquivo inteiro — sessões misturadas misturariam os lados da
-    calibração. Grave cada cena num --save-dir novo.
+    duas cenas (segundo session_open), e a rotação move o arquivo
+    cheio para telemetry.jsonl.1 deixando no ativo uma cauda sem o
+    marcador de abertura. Nos dois casos o rótulo --empty/--sheet
+    deixaria de valer para o arquivo inteiro. Grave cada cena num
+    --save-dir novo.
     """
 
 
@@ -65,9 +67,11 @@ def _iter_records(paths):
     """Abre cada telemetry.jsonl e devolve os dicts na ordem.
 
     Diretórios também valem: procura <dir>/telemetry.jsonl. Linha
-    quebrada não derruba a leitura — só é pulada. Um segundo
-    `session_open` no mesmo arquivo significa sessão misturada:
-    sobe MixedSessionError em vez de calibrar com cena errada.
+    quebrada não derruba a leitura — só é pulada. O primeiro
+    registro PRECISA ser `session_open` (senão é cauda de arquivo
+    rotacionado, cujo início ficou no .1) e único (senão o append
+    juntou duas sessões): ambos sobem MixedSessionError em vez de
+    calibrar com cena errada.
     """
     for raw in paths:
         path = Path(raw)
@@ -86,7 +90,16 @@ def _iter_records(paths):
                 if rec.get("event") == "session_open":
                     sessions += 1
                     if sessions > 1:
-                        raise MixedSessionError(str(path))
+                        raise MixedSessionError(
+                            f"{path}: segundo session_open — duas sessões "
+                            "no mesmo arquivo"
+                        )
+                elif sessions == 0:
+                    raise MixedSessionError(
+                        f"{path}: registros antes do primeiro session_open — "
+                        "cauda de log rotacionado (o início ficou no "
+                        "telemetry.jsonl.1)"
+                    )
                 yield rec
 
 
@@ -308,8 +321,9 @@ def main(argv=None):
         summary = summarize(args.empty, args.sheet)
     except MixedSessionError as exc:
         print(
-            f"erro: {exc} contém mais de uma sessão — grave cada "
-            f"cena num --save-dir novo (a SessionTelemetry faz append)",
+            f"erro: {exc}\n"
+            "  grave cada cena num --save-dir novo (a SessionTelemetry "
+            "faz append e a rotação move o arquivo cheio para .1)",
             file=sys.stderr,
         )
         return 2

@@ -39,8 +39,13 @@ def _snapshot(rejects=(), accepts=()):
 
 
 def _write_telemetry(tmp_path, records, name="telemetry.jsonl"):
+    """Captura real: o app emite session_open antes de qualquer
+    outro registro — toda fixture parte dele."""
     path = tmp_path / name
-    path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+    path.write_text(
+        "".join(json.dumps(r) + "\n" for r in [{"event": "session_open"}, *records]),
+        encoding="utf-8",
+    )
     return path
 
 
@@ -219,7 +224,10 @@ def test_main_aceita_diretorio_de_sessao(tmp_path, capsys):
     session = tmp_path / "sessao-nova"
     session.mkdir()
     (session / "telemetry.jsonl").write_text(
-        json.dumps(_acq("veto", -4.0)) + "\n",
+        json.dumps({"event": "session_open"})
+        + "\n"
+        + json.dumps(_acq("veto", -4.0))
+        + "\n",
         encoding="utf-8",
     )
     assert cd.main(["--empty", str(session)]) == 0
@@ -266,9 +274,24 @@ def test_main_recusa_sessao_mista_com_erro_claro(tmp_path, capsys):
     assert "--save-dir" in capsys.readouterr().err
 
 
+def test_cauda_de_log_rotacionado_e_recusada(tmp_path):
+    """A rotação move o arquivo cheio para telemetry.jsonl.1 e o
+    ativo continua SEM o session_open do início: registros antes
+    do primeiro marcador são uma cauda cujo rótulo não é
+    confiável."""
+    path = tmp_path / "telemetry.jsonl"
+    path.write_text(
+        json.dumps(_acq("veto", -6.0)) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(cd.MixedSessionError, match="rotacionado"):
+        cd.summarize([path], [])
+
+
 def test_linhas_quebradas_nao_derrubam(tmp_path):
     path = tmp_path / "telemetry.jsonl"
     path.write_text(
+        '{"event": "session_open"}\n'
         '{"event": "acquisition", "source": "veto", "presence_logit": -6.0}\n'
         "{linha truncada\n"
         "\n"
