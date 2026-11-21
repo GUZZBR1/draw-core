@@ -18,11 +18,15 @@ import cv2
 import numpy as np
 
 if __package__ in (None, ""):
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+    _REPO_ROOT = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(_REPO_ROOT))
+    sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 _DEFAULT_SHEET_MODEL = (
     Path(__file__).resolve().parents[1] / "models" / "draw_seg_v3_dyn.onnx"
 )
+
+from lab.sync_workers import StepClock, SyncDetector, SyncPresence  # noqa: E402
 
 
 def _sheet_model_path(explicit=None):
@@ -97,84 +101,6 @@ def compare_masks(prediction, truth, stroke_masks=(), *, stroke_recall=0.5):
     return result
 
 
-class _VideoClock:
-    now = 0.0
-
-    def __call__(self):
-        return self.now
-
-
-class _SynchronousDetector:
-    """Só adapta a execução; a decisão é a mesma de draw.app."""
-
-    error = None
-
-    def __init__(self, neural):
-        from draw.app import _detect_sheet_combined_traced
-
-        self.detect = lambda frame: _detect_sheet_combined_traced(frame, neural)
-        self.result = None
-        self.sequence = 0
-
-    def submit(self, frame, captured_at, frame_index=None):
-        from draw.contracts import DetectionResult
-        from draw.tracker import _gate_info_from_trace
-
-        outcome = self.detect(frame)
-        corners, verdict, trace = outcome[0], outcome[1], outcome[2]
-        extras = outcome[3] if len(outcome) > 3 else None
-        self.sequence += 1
-        self.result = DetectionResult(
-            sequence=self.sequence,
-            corners=corners,
-            verdict=verdict,
-            captured_at=captured_at,
-            detect_ms=0.0,
-            gate_info=_gate_info_from_trace(trace),
-            coverage_mask=(extras.get("coverage_mask") if extras else None),
-            hand_mask=(extras.get("hand_mask") if extras else None),
-        )
-
-    def poll(self, after_seq):
-        if self.result is not None and self.result.sequence > after_seq:
-            return self.result
-        return None
-
-    def take_traces(self, upto_result_seq=None):
-        return []
-
-
-class _SynchronousHandPresence:
-    """Mesmo protocolo da worker de mão, com amostragem real síncrona."""
-
-    def __init__(self, presence):
-        self.presence = presence
-        self.result = None
-        self.sequence = 0
-        self.available_samples = 0
-        self.error = None
-
-    def submit(self, frame, captured_at, *, source_id):
-        from draw.contracts import HandPresenceResult
-
-        try:
-            sample = self.presence.sample(
-                frame, captured_at * 1000.0, source_id=source_id
-            )
-        except Exception as error:
-            # Como a worker do app: o laço degrada para sinal indisponível.
-            self.error = error
-            return
-        self.sequence += 1
-        self.available_samples += int(sample.present is not None)
-        self.result = HandPresenceResult(self.sequence, captured_at, source_id, sample)
-
-    def poll(self, after_seq):
-        if self.result is not None and self.result.sequence > after_seq:
-            return self.result
-        return None
-
-
 def run_pipeline(
     capture,
     *,
@@ -229,7 +155,7 @@ def run_pipeline(
     neural = NeuralSheetDetector(neural_model, verify=verify) if neural_model else None
     if neural is not None:
         neural.load()
-    clock = _VideoClock()
+    clock = StepClock(1.0 / fps)
     hand_presence_worker = None
     page_clean = PageCleanInk(page_clean_model, verify=verify)
     page_clean.load()
@@ -248,8 +174,8 @@ def run_pipeline(
     )
     presence = make_hand_presence(hand_model, verify=verify)
     if presence is not None:
-        hand_presence_worker = _SynchronousHandPresence(presence)
-    detector = _SynchronousDetector(neural)
+        hand_presence_worker = SyncPresence(presence)
+    detector = SyncDetector(neural, detect_ms=0.0)
     loop = Pipeline(
         detection_worker=detector,
         ink_worker=worker,
@@ -280,11 +206,9 @@ def run_pipeline(
             ok, frame = capture.read()
             if not ok:
                 break
-            clock.now = frame_index / fps
+            clock.t = frame_index * clock.dt
             outcome = loop.step(
-                FramePacket(
-                    image=frame, captured_at=clock.now, sequence=frame_index + 1
-                )
+                FramePacket(image=frame, captured_at=clock.t, sequence=frame_index + 1)
             )
             passes_before = worker.stats()["passes_total"]
             pumped = worker.pump()
@@ -370,9 +294,7 @@ def run_pipeline(
             hand_presence_worker.sequence if hand_presence_worker is not None else 0
         ),
         "hand_presence_available_samples": (
-            hand_presence_worker.available_samples
-            if hand_presence_worker is not None
-            else 0
+            hand_presence_worker.real_samples if hand_presence_worker is not None else 0
         ),
     }
 

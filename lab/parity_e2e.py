@@ -32,67 +32,18 @@ import subprocess
 import sys
 from pathlib import Path
 
-import cv2
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp"}
+sys.path.insert(0, str(_REPO_ROOT))
+sys.path.insert(0, str(_REPO_ROOT / "src"))
 
-
-def iter_frames(source, limit):
-    path = Path(source)
-    if path.is_dir():
-        files = sorted(p for p in path.iterdir() if p.suffix.lower() in IMG_EXTS)
-        for i, f in enumerate(files):
-            if i >= limit:
-                break
-            frame = cv2.imread(str(f))
-            if frame is not None:
-                yield i, frame
-        return
-    capture = cv2.VideoCapture(str(path))
-    try:
-        index = 0
-        while index < limit:
-            ok, frame = capture.read()
-            if not ok:
-                break
-            yield index, frame
-            index += 1
-    finally:
-        capture.release()
-
-
-class _SyncPresence:
-    """Presença de mão síncrona — o contrato poll/submit do worker de
-    presença, sem thread: a amostra roda na hora do submit e o poll
-    devolve a mais nova, como no replay_lab/eval_capture."""
-
-    def __init__(self, presence):
-        self._presence = presence
-        self._result = None
-        self._seq = 0
-        self.error = None
-        # Amostras com sinal real (present != None): zero denuncia
-        # ambiente sem mediapipe/modelo — a paridade de mão não foi
-        # medida e o relatório precisa dizer isso.
-        self.real_samples = 0
-
-    def submit(self, frame, captured_at, *, source_id):
-        from draw.contracts import HandPresenceResult
-
-        self._seq += 1
-        sample = self._presence.sample(frame, captured_at * 1000.0, source_id=source_id)
-        self._result = HandPresenceResult(self._seq, captured_at, source_id, sample)
-        if sample.present is not None:
-            self.real_samples += 1
-
-    def poll(self, after_seq):
-        if self._result is None or self._result.sequence <= after_seq:
-            return None
-        return self._result
+from lab.sync_workers import (  # noqa: E402
+    StepClock,
+    SyncDetector,
+    SyncPresence,
+    iter_frames,
+)
 
 
 def run_new(
@@ -105,8 +56,7 @@ def run_new(
     ficam sem paridade medida e o relatório diz isso.
     """
     from draw import hand as hand_module
-    from draw.app import _detect_sheet_combined_traced
-    from draw.contracts import DetectionResult, FramePacket
+    from draw.contracts import FramePacket
     from draw.hand_presence import make_hand_presence
     from draw.ink.config import InkConfig
     from draw.ink.worker import PageCleanWorker
@@ -114,7 +64,6 @@ def run_new(
     from draw.perception import NeuralSheetDetector
     from draw.pipeline import Pipeline
     from draw.settings import PipelineConfig
-    from draw.tracker import _gate_info_from_trace
 
     detector = NeuralSheetDetector(str(sheet_model), verify=verify)
     detector.load()
@@ -127,52 +76,9 @@ def run_new(
     )
     presence = make_hand_presence(hand_model, verify=verify) if hand_model else None
 
-    class Clock:
-        def __init__(self, dt):
-            self.dt = dt
-            self.t = 0.0
-
-        def __call__(self):
-            return self.t
-
-    clock = Clock(1.0 / fps)
-
-    class SyncDet:
-        """Mesma decisão do app (detecção combinada), execução síncrona."""
-
-        def __init__(self):
-            self._result = None
-            self._seq = 0
-            self.error = None
-            self.traces = []
-
-        def submit(self, frame, captured_at, frame_index=None):
-            outcome = _detect_sheet_combined_traced(frame, detector)
-            corners, verdict, trace = outcome[0], outcome[1], outcome[2]
-            extras = outcome[3] if len(outcome) > 3 else None
-            self._seq += 1
-            self._result = DetectionResult(
-                sequence=self._seq,
-                corners=corners,
-                verdict=verdict,
-                captured_at=captured_at,
-                detect_ms=1.0,
-                gate_info=_gate_info_from_trace(trace),
-                coverage_mask=(extras.get("coverage_mask") if extras else None),
-                hand_mask=(extras.get("hand_mask") if extras else None),
-            )
-            self.traces.append(trace)
-
-        def poll(self, after_seq):
-            if self._result is None or self._result.sequence <= after_seq:
-                return None
-            return self._result
-
-        def take_traces(self, upto_result_seq=None):
-            return []
-
-    det = SyncDet()
-    presence_worker = _SyncPresence(presence) if presence is not None else None
+    clock = StepClock(1.0 / fps)
+    det = SyncDetector(detector)
+    presence_worker = SyncPresence(presence) if presence is not None else None
     # A régua de paridade compara contra o SheetInkLoop legado (Tier A, sem
     # ganho, sem Detect-Wake e com voto/cadência legados): fixa a mesma base
     # em Pipeline e PageCleanWorker para não misturar o preset de produção.

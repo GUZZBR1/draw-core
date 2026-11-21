@@ -30,7 +30,11 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO_ROOT))
+sys.path.insert(0, str(_REPO_ROOT / "src"))
+
+from lab.sync_workers import StepClock, SyncDetector  # noqa: E402
 
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp"}
 
@@ -249,15 +253,6 @@ def build_panel(frame, quad, warp, ink_mask, canvas_mask=None):
 # ------------------------------------------------------------------
 # Replay pelo laço real
 # ------------------------------------------------------------------
-class _SceneClock:
-    def __init__(self, dt):
-        self.dt = dt
-        self.t = 0.0
-
-    def __call__(self):
-        return self.t
-
-
 def _default_model(name):
     return Path(__file__).resolve().parents[1] / "models" / name
 
@@ -283,8 +278,7 @@ def run_replay(
     None = só telemetria (1ª passagem). verify é o callable de
     integridade dos modelos: "manifest" injeta o verificador de
     assets/manifest.json; None desliga (bancadas/testes fora dele)."""
-    from draw.app import _detect_sheet_combined_traced
-    from draw.contracts import DetectionResult, FramePacket
+    from draw.contracts import FramePacket
     from draw.infra.manifest import verify_model
     from draw.ink.worker import PageCleanWorker
     from draw.page_clean import PageCleanInk
@@ -292,7 +286,6 @@ def run_replay(
     from draw.perception import NeuralSheetDetector
     from draw.photometry import division_normalize
     from draw.pipeline import Pipeline
-    from draw.tracker import _gate_info_from_trace
     from lab.sim_writer import _parse_flags
 
     if verify == "manifest":
@@ -313,48 +306,8 @@ def run_replay(
         )
         page_clean.load()
 
-    clock = _SceneClock(1.0 / scene_fps)
-
-    class SyncDetectionWorker:
-        """Protocolo da trabalhadora real, síncrono (padrão F88):
-        submit roda a detecção combinada real; poll entrega no
-        step seguinte (atraso de pipeline de 1 quadro)."""
-
-        def __init__(self):
-            self._result = None
-            self._seq = 0
-            self.error = None
-            self.traces = []
-            self.seq_frames = []
-            self.frame_hint = None
-
-        def submit(self, frame, captured_at, frame_index=None):
-            outcome = _detect_sheet_combined_traced(frame, detector)
-            corners, verdict, trace = outcome[0], outcome[1], outcome[2]
-            extras = outcome[3] if len(outcome) > 3 else None
-            self._seq += 1
-            self._result = DetectionResult(
-                sequence=self._seq,
-                corners=corners,
-                verdict=verdict,
-                captured_at=captured_at,
-                detect_ms=1.0,
-                gate_info=_gate_info_from_trace(trace),
-                coverage_mask=(extras.get("coverage_mask") if extras else None),
-                hand_mask=(extras.get("hand_mask") if extras else None),
-            )
-            self.traces.append(trace)
-            self.seq_frames.append(self.frame_hint)
-
-        def poll(self, after_seq):
-            if self._result is None or self._result.sequence <= after_seq:
-                return None
-            return self._result
-
-        def take_traces(self, upto_result_seq=None):
-            return []
-
-    det_worker = SyncDetectionWorker()
+    clock = StepClock(1.0 / scene_fps)
+    det_worker = SyncDetector(detector)
     ink_worker = PageCleanWorker(
         page_clean, None, clock=clock, config=config.ink, ink_divnorm=config.ink_divnorm
     )
