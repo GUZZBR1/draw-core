@@ -1845,6 +1845,44 @@ runpy.run_path(sys.argv[1], run_name="__main__")
         decoder.close()
 
 
+def test_decoder_delayed_frame_response_uses_frame_deadline(monkeypatch):
+    launch = subprocess.Popen
+    processes = []
+    # O worker confirma READY sem atraso, mas so responde ao pedido de
+    # frame depois de timeout_s — ainda dentro de startup_timeout_s. Se a
+    # fase de decode recebesse o prazo de inicializacao, a resposta
+    # chegaria a tempo e decode() devolveria um quadro em vez de falhar.
+    script = """
+import struct, sys, time
+sink = sys.stdout.buffer
+sink.write(b"\x01")
+sink.flush()
+(size,) = struct.unpack("<I", sys.stdin.buffer.read(4))
+sys.stdin.buffer.read(size)
+time.sleep(0.6)
+sink.write(struct.pack("<II", 2, 1))
+sink.write(bytes(6))
+sink.flush()
+"""
+
+    def worker(command, **kwargs):
+        if not processes:
+            command = [sys.executable, "-c", script]
+        proc = launch(command, **kwargs)
+        processes.append(proc)
+        return proc
+
+    monkeypatch.setattr(mjpeg_module.subprocess, "Popen", worker)
+    decoder = mjpeg_module._MjpegDecoder(timeout_s=0.2, startup_timeout_s=5)
+    try:
+        with pytest.raises(ValueError, match="tempo limite do decode MJPEG"):
+            decoder.decode(np.zeros(16, np.uint8))
+        assert processes[0].poll() is not None
+        assert decoder._process is None
+    finally:
+        decoder.close()
+
+
 def test_decoder_kills_worker_that_never_reports_ready(monkeypatch):
     launch = subprocess.Popen
     processes = []
