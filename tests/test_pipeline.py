@@ -1327,6 +1327,36 @@ def test_hand_mask_with_sheet_marks_cornerless_results():
     assert not loop.last_hand_mask_with_sheet
 
 
+def test_hand_mask_with_sheet_drops_during_tracker_grace_after_removal():
+    """A graça do tracker segura `sheet_present` por alguns quadros
+    depois que a folha some — nessa janela um veto com máscara de mão
+    não pode alimentar a auto-rotação. A flag que o app consulta vira
+    False no resultado sem cantos mesmo com `sheet_present` True
+    (review do PR #123 — caminho do laço, não só a flag isolada)."""
+    mask = np.zeros((480, 640), np.uint8)
+    mask[150:250, 200:300] = 255
+    seen = [True]
+
+    def detect(_i):
+        if seen[0]:
+            return QUAD.copy(), "paper", {"hand_mask": mask}
+        return None, None, {"hand_mask": mask}
+
+    loop, _det, _ink = _make_loop(detect)
+    _drive(loop, 8)
+    assert loop.sheet_present
+    assert loop.last_hand_mask is not None
+    assert loop.last_hand_mask_with_sheet
+
+    seen[0] = False
+    _drive(loop, 4)
+    # A folha segue "presente" na graça do tracker, mas o veto não
+    # traz evidência de folha — é a flag que fecha o consumo.
+    assert loop.sheet_present
+    assert loop.last_hand_mask is not None
+    assert not loop.last_hand_mask_with_sheet
+
+
 def test_expired_hand_mask_without_mediapipe_cannot_confirm_hand_as_ink(monkeypatch):
     class _DarkIsInk:
         threshold = 0.5
