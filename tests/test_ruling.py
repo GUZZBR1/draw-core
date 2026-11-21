@@ -984,3 +984,64 @@ def test_off_frame_extrapolated_rule_does_not_erase_border_dash():
     enter_y = np.round(-160.0 + 0.15 * enter_x).astype(np.int32)
     assert (out[enter_y, enter_x] > 0.5).sum() == 0
     assert (out[enter_y + 1, enter_x] > 0.5).sum() == 0
+
+
+def test_staggered_shoulders_on_different_rows_do_not_drop_crossing_strokes():
+    """Ombros de 13 colunas em linhas diferentes de cada lado (1..4 a esquerda,
+    4..7 a direita) e tres tracos de 20 colunas (linhas 8..10): cada ponta
+    estima seu ombro usando os votos daquele lado e os 3 tracos ficam."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        y = 80 + 40 * k
+        prob[y : y + 2, :] = 0.95
+        prob[y : y + 6, 560:700] = 0.95
+    for k in range(1, 5):
+        y = 80 + 40 * k
+        prob[y : y + 6, 547:560] = 0.95
+    for k in range(4, 8):
+        y = 80 + 40 * k
+        prob[y : y + 6, 700:713] = 0.95
+    for k in range(8, 11):
+        y = 80 + 40 * k
+        prob[y : y + 6, 540:720] = 0.95
+    out = ruling.RulingFilter().apply(prob.copy())
+    for k in range(8, 11):
+        y = 80 + 40 * k
+        assert (out[y : y + 6, 562:698] > 0.5).all()
+    others = out[:, 562:698] > 0.5
+    for k in range(8, 11):
+        y = 80 + 40 * k
+        others[y : y + 6, :] = False
+    assert others.sum() == 0
+
+
+def test_a_stroke_at_the_split_with_only_one_ruled_half_is_kept():
+    """Pauta apenas na metade esquerda [0, 600), vinco em [560, 600) e traco
+    de 6 px correndo de 540 a 630: sem trilha na direita, o voto da esquerda
+    basta para preservar o traco dentro do vinco."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        y = 80 + 40 * k
+        prob[y : y + 2, :600] = 0.95
+        prob[y : y + 6, 560:600] = 0.95
+    y = 80 + 40 * 5
+    prob[y : y + 6, 540:630] = 0.95
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[y : y + 6, 562:600] > 0.5).all()
+    others = out[:, 562:598] > 0.5
+    others[y : y + 6, :] = False
+    assert others.sum() == 0
+
+
+def test_a_1px_two_column_shadow_bump_inside_the_fold_is_erased():
+    """Flutuacao de +1 px por apenas 2 colunas na sombra de 6 px nao pode
+    sobreviver como se fosse cruzamento de caneta."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        y = 80 + 40 * k
+        prob[y : y + 2, :] = 0.95
+        prob[y : y + 6, 560:640] = 0.8
+    y = 80 + 40 * 5
+    prob[y : y + 7, 575:577] = 0.8  # +1 px por 2 colunas = 14 px de ruido
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[:, 566:634] > 0.5).sum() == 0

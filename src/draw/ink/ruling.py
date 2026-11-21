@@ -72,7 +72,8 @@ _GUTTER_FRAC = 0.6  # fração das linhas grossas na coluna
 _GUTTER_MIN_W = 16  # colunas contínuas (mais largo que qualquer traço de caneta)
 _GUTTER_EDGE_RUN = 3  # colunas bastam num trecho que encosta na divisa
 _GUTTER_EXTRA = 4  # px a mais de espessura apagável dentro da faixa
-_STROKE_RUN = 2  # colunas seguidas de desvio numa so linha = traco dentro da sombra
+_STROKE_RUN = 4  # colunas de desvio de 1 px numa so linha = traco dentro da sombra
+_STROKE_SHORT_RUN = 2  # desvio >= 2 px basta em 2 colunas (cruzamento estreito)
 
 
 @dataclass(frozen=True)
@@ -690,7 +691,10 @@ def _joined_through_bands(tracks, thick, valid_list, gutter_full):
     com o próprio ombro local e o mesmo veredito vale para os dois lados.
     """
     joined = [np.zeros_like(raw) for raw in thick]
-    if not tracks:
+    edges = np.flatnonzero(
+        np.diff(np.concatenate([[0], gutter_full.view(np.uint8), [0]]))
+    )
+    if not tracks or edges.size == 0:
         return joined
     matches = [
         _match_tracks(tracks[i], valid_list[i], tracks[i + 1], valid_list[i + 1])
@@ -700,9 +704,6 @@ def _joined_through_bands(tracks, thick, valid_list, gutter_full):
     ]
     w = gutter_full.size
     need = _PROB_MIN_RUN
-    edges = np.flatnonzero(
-        np.diff(np.concatenate([[0], gutter_full.view(np.uint8), [0]]))
-    )
     for a, b in zip(edges[::2], edges[1::2], strict=False):
         over = [i for i, t in enumerate(tracks) if t.x0 < b and t.x1 > a]
         if not over:
@@ -739,22 +740,24 @@ def _joined_through_bands(tracks, thick, valid_list, gutter_full):
             if right_cols is not None and right_cols.shape[1] >= need
             else None
         )
+        left_at_edge = a == 0 or (left_cols is not None and left_cols.shape[1] == 0)
+        right_at_edge = b == w or (right_cols is not None and right_cols.shape[1] == 0)
         sides = [v for v in (left_vote, right_vote) if v is not None]
-        if not (len(sides) == 2 or (len(sides) == 1 and (a == 0 or b == w))):
+        if not (
+            len(sides) == 2 or (len(sides) == 1 and (left_at_edge or right_at_edge))
+        ):
             continue
         cont = np.logical_and.reduce(sides)
         n_lines = max(tracks[i].paths.shape[0] for i in over)
-        if cont.sum() > max(2, n_lines // 4):
-            keep = np.ones(cont.size, bool)
-            if left_vote is not None:
-                ext_l = _extent(left_cols, need)
-                bulk_l = _bulk_ext(ext_l[cont])
-                keep &= ext_l > bulk_l + _GUTTER_EDGE_RUN
-            if right_vote is not None:
-                ext_r = _extent(right_cols, need)
-                bulk_r = _bulk_ext(ext_r[cont])
-                keep &= ext_r > bulk_r + _GUTTER_EDGE_RUN
-            cont &= keep
+        min_bulk = max(2, n_lines // 4)
+        if left_vote is not None and left_vote.sum() > min_bulk:
+            ext_l = _extent(left_cols, need)
+            bulk_l = _bulk_ext(ext_l[left_vote])
+            cont &= ext_l > bulk_l + _GUTTER_EDGE_RUN
+        if right_vote is not None and right_vote.sum() > min_bulk:
+            ext_r = _extent(right_cols, need)
+            bulk_r = _bulk_ext(ext_r[right_vote])
+            cont &= ext_r > bulk_r + _GUTTER_EDGE_RUN
         if i_left == i_right:
             t = tracks[i_left]
             joined[i_left][kl, a - t.x0 : b - t.x0] |= cont[:, None]
@@ -810,6 +813,7 @@ def _stroke_on_shade(run, gutter, valid=None):
         above = valid & (run > med[None, :]) & gutter[None, :]
     # uma ondulação da sombra desvia várias linhas na mesma coluna; um traço
     # desvia só a linha que ele toca — conta só o desvio isolado
+    base = np.broadcast_to(med[None, :].astype(np.float32), run.shape).copy()
     shared = above.sum(axis=0) > max(2, above.shape[0] // 4)
     if shared.any():
         sel = above[:, shared]
@@ -819,8 +823,12 @@ def _stroke_on_shade(run, gutter, valid=None):
         # o nível da ondulação é o desvio comum da coluna; quem vai acima
         # dele segue valendo como traço
         level = srt[(n - 1) // 2, np.arange(sel.shape[1])]
+        base[:, shared] = level[None, :]
         above[:, shared] = sel & (run[:, shared] > level[None, :])
-    return _long_runs(above, _STROKE_RUN, _STROKE_RUN)
+    strong = above & (run >= base + 2)
+    return _long_runs(above, _STROKE_RUN, _STROKE_RUN) | _long_runs(
+        strong, _STROKE_SHORT_RUN, _STROKE_SHORT_RUN
+    )
 
 
 def _opening_cols(mask, length):
