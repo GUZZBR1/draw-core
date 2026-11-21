@@ -1424,3 +1424,25 @@ def test_unmatched_shadow_lines_do_not_veto_a_matched_stroke():
     out = ruling.RulingFilter().apply(prob.copy())
     assert (out[y : y + 6, 562:598] > 0.5).all()
     assert (out[y : y + 6, 602:638] > 0.5).all()
+
+
+def test_a_fold_reaching_the_image_edge_with_a_short_tail_is_erased():
+    """Borda do dominio, nao borda de evidencia: faixa [4, 1200) cobre as
+    duas metades ate a borda da imagem, e sobram so 4 col observaveis a
+    esquerda. Continuacao de 4 col nao prova a janela de 12 — o veredito
+    abstem e a sombra sai, mesmo com um traco chegando ate a coluna 0."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        yl, yr = 80 + 40 * k, 80 + 40 * k
+        prob[yl : yl + 2, :600] = 0.95
+        prob[yr : yr + 2, 600:] = 0.95
+        prob[yl : yl + 6, 4:600] = 0.95
+        prob[yr : yr + 6, 600:] = 0.95
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[:, 6:1200] > 0.5).sum() == 0
+
+    prob2 = prob.copy()
+    y = 80 + 40 * 5
+    prob2[y : y + 6, 0:1200] = 0.95  # traco real encostando na borda esquerda
+    out = ruling.RulingFilter().apply(prob2.copy())
+    assert (out[:, 6:1200] > 0.5).sum() == 0

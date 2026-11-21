@@ -848,15 +848,13 @@ def _project_forest(
     yc0 = int(round(float(t_src.paths[k_src, seam_col - t_src.x0])))
     limit_dst = w if direction > 0 else -1
     nodes, tips = _trace_ink_run(ink, yc0, seam_col, limit_dst, direction, band_in_edge)
-    space_d = w - band_in_edge if direction > 0 else band_in_edge + 1
-    need_d = max(1, min(need, space_d))
-    stop_dst = max(need_d, bulk_dst + _GUTTER_EDGE_RUN + 1) if has_dst else need_d + 1
+    stop_dst = max(need, bulk_dst + _GUTTER_EDGE_RUN + 1) if has_dst else need + 1
     qual_dst = set()
     qual_tips = []
     for tid in tips:
         x_e, top_e, bot_e, _ = nodes[tid]
         ok, ext, x_end, end_runs = _trace_branch_out(
-            ink, x_e, top_e, bot_e, limit_dst, direction, h_run, need_d, stop_dst
+            ink, x_e, top_e, bot_e, limit_dst, direction, h_run, need, stop_dst
         )
         if not ok:
             continue
@@ -887,8 +885,6 @@ def _project_forest(
         # uma dobra pode sair da faixa por uma linha diferente da pauta de onde
         # o traço começou, então a floresta de volta nasce na ponta e não no
         # caminho da linha
-        space_s = band_out_edge if direction > 0 else w - band_out_edge
-        need_s = max(1, min(need, space_s))
         qual_s = set()
         for tid in qual_tips:
             x_e, top_e, bot_e, _ = nodes[tid]
@@ -898,7 +894,7 @@ def _project_forest(
             for tb in tips_b:
                 x_b, t_b, b_b, _ = nodes_b[tb]
                 ok, _e, _x, _r = _trace_branch_out(
-                    ink, x_b, t_b, b_b, limit_src, -direction, h_run, need_s, need_s + 1
+                    ink, x_b, t_b, b_b, limit_src, -direction, h_run, need, need + 1
                 )
                 if not ok:
                     continue
