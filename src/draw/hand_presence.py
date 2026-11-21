@@ -80,9 +80,6 @@ class MediaPipeHandPresence:
         self.close()
         return False
 
-    def present(self, frame):
-        return self.sample(frame).present
-
     def sample(self, frame, timestamp_ms=None, *, source_id=0):
         if source_id != self._source_id:
             self._source_id = source_id
