@@ -120,6 +120,29 @@ def test_detached_hand_still_counts_against_the_quad():
     assert _coverage_iou(QUAD, coverage, hand) < 0.2
 
 
+def test_hand_bridge_does_not_pull_false_paper_into_the_union():
+    """Mão entre a folha e a mancha falsa não arrasta a mancha.
+
+    A mão entra inteira na união, mas a componentização roda sobre o
+    não-fundo SEM a classe mão (achado da revisão): uma mancha de
+    falso papel que só alcança o quad através de pixels de mão fica
+    fora — a mão não pode virar ponte para um blob espúrio.
+    """
+    sheet = _mask_block(100, 400, 100, 500)  # sob o QUAD
+    bridge = _mask_block(150, 350, 500, 560)  # mão colada na folha
+    false_paper = _mask_block(150, 350, 560, 800)  # só alcança via mão
+    coverage = ((sheet | bridge | false_paper) > 0).astype(np.uint8) * 255
+    # Sem máscara de mão a ponte cola tudo num componente só e a
+    # mancha entra na união — é o limite do modelo, não da medida:
+    assert _coverage_iou(QUAD, coverage) < _coverage_iou(QUAD, sheet)
+    with_hand = _coverage_iou(QUAD, coverage, bridge)
+    # A mancha atrás da ponte some da união: mesmo IoU de quando ela
+    # nem existia na cobertura.
+    without_blob = ((sheet | bridge) > 0).astype(np.uint8) * 255
+    assert with_hand == pytest.approx(_coverage_iou(QUAD, without_blob, bridge))
+    assert with_hand > 0.8
+
+
 def test_ink_pass_vetoed_when_distant_hand_fills_the_scene():
     """Ponta a ponta: o fantasma com mão desconectada não sobe.
 

@@ -377,6 +377,48 @@ def test_run_interrompida_grava_resumo_marcado(tmp_path):
     assert len((out / "frames.jsonl").read_text(encoding="utf-8").splitlines()) == 1
 
 
+def test_main_interrompida_avisa_e_sai_130(tmp_path, monkeypatch, capsys):
+    """Ctrl+C: resumo parcial gravado, CLI avisa e sai 130.
+
+    Reproduz o achado da revisão: o resumo parcial continua saindo
+    em audit.json, mas a linha de comando precisa dizer que a
+    auditoria não cobriu a captura toda — não o "fim" de sucesso.
+    """
+    src = tmp_path / "frames"
+    src.mkdir()
+    frame = np.zeros((80, 100, 3), np.uint8)
+    for i in range(3):
+        assert cv2.imwrite(str(src / f"f_{i:05d}.png"), frame)
+
+    class _InterruptDet(_FakeDet):
+        def __call__(self, frame, *, return_mask=True):
+            if self.calls == 1:
+                raise KeyboardInterrupt
+            return super().__call__(frame, return_mask=return_mask)
+
+    det = _InterruptDet([_exploded_item()])
+    monkeypatch.setattr("draw.perception.NeuralSheetDetector", lambda *a, **k: det)
+    out = tmp_path / "audit"
+
+    code = sa.main(
+        [
+            "--source",
+            str(src),
+            "--model",
+            "fake.onnx",
+            "--out",
+            str(out),
+            "--allow-unverified",
+        ]
+    )
+
+    assert code == 130
+    printed = capsys.readouterr().out
+    assert "interrompido" in printed and "fim" not in printed
+    audit = json.loads((out / "audit.json").read_text(encoding="utf-8"))
+    assert audit["interrupted"] is True and audit["frames"] == 1
+
+
 def test_run_com_dump_overlays_grava_overlay(tmp_path):
     src = tmp_path / "frames"
     src.mkdir()

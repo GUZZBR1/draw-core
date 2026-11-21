@@ -540,6 +540,14 @@ def main(argv=None):
         )
     except (ValueError, RuntimeError, OSError, KeyError, cv2.error) as error:
         parser.exit(2, f"erro: {error}\n")
+    if summary["interrupted"]:
+        # O resumo parcial ja esta em audit.json; a saida diz que a
+        # auditoria nao cobriu a captura toda (130 = 128+SIGINT).
+        print(
+            f"interrompido: resumo parcial de {summary['frames']} "
+            f"quadros gravado em {args.out}"
+        )
+        return 130
     failures = summary["failures"]
     thresholds = summary["thresholds"]
     print(

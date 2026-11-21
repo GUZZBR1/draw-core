@@ -133,8 +133,11 @@ def _coverage_iou(corners, coverage_mask, hand_mask=None):
     sobre a uniao total e a mesa fantasma so afunda por causa dos
     pixels de mao fora do quad (settings.py, coverage_iou_floor) —
     exclui-la por desconexao devolvia o fantasma a passada de tinta.
-    A exclusao por componente vale apenas para o nao-fundo sem classe
-    propria: o falso papel disjunto.
+    A componentizacao, por sua vez, roda sobre o nao-fundo SEM a
+    classe mao: uma mancha de falso papel que so alcanca o quad
+    atraves de pixels de mao fica fora — a mao nao pode virar ponte
+    para um blob espurio. Sem mascara de mao (contrato de dois
+    canais), o nao-fundo inteiro e o melhor proxy da folha.
     """
     quad = np.zeros(coverage_mask.shape, np.uint8)
     cv2.fillConvexPoly(quad, np.round(corners).astype(np.int32), 1)
@@ -144,13 +147,17 @@ def _coverage_iou(corners, coverage_mask, hand_mask=None):
     )
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * ring + 1, 2 * ring + 1))
     quad_reach = cv2.dilate(quad, kernel) > 0
-    n_labels, labels = cv2.connectedComponents((coverage_mask > 0).astype(np.uint8))
+    has_hand = hand_mask is not None and hand_mask.shape == coverage_mask.shape
+    non_hand = coverage_mask > 0
+    if has_hand:
+        non_hand &= ~(np.asarray(hand_mask) > 0)
+    n_labels, labels = cv2.connectedComponents(non_hand.astype(np.uint8))
     keep = np.zeros(n_labels, bool)
     keep[np.unique(labels[quad_reach])] = True
     keep[0] = False  # o rotulo 0 e o fundo
     touching = keep[labels]
     union_mask = (quad > 0) | touching
-    if hand_mask is not None and hand_mask.shape == coverage_mask.shape:
+    if has_hand:
         union_mask |= np.asarray(hand_mask) > 0
     union = np.count_nonzero(union_mask)
     if not union:
