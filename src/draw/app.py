@@ -54,7 +54,6 @@ import glob
 import itertools
 import os
 import re
-import select
 import subprocess
 import sys
 import threading
@@ -691,6 +690,14 @@ _window_sized = set()
 _window_place_until = [0.0]
 _WINDOW_PLACE_SECONDS = 2.5
 _WINDOW_PLACE_X, _WINDOW_PLACE_Y = 96, 48
+# Titulo unico por lancamento no WSLg: "Draw <pid>" identifica a hwnd
+# desta sessao para o helper de foreground, sem confundir sessoes
+# abertas. Volta a "Draw" quando o helper renomeia a janela ou, na
+# falta dele, ao expirar o prazo local (busca do helper + margem).
+_window_token = [None]
+_window_title_restore_at = [0.0]
+_WSL_RAISE_POLLS = 240  # ~60 s: o RAIL pode demorar a publicar a hwnd
+_WSL_TITLE_RESTORE_SECONDS = _WSL_RAISE_POLLS / 4 + 10.0
 
 
 _mouse = {}
@@ -1062,32 +1069,22 @@ def _window_size():
     return rect if rect and rect[0] >= 320 and rect[1] >= 160 else default
 
 
-_WSL_HELPER_WAIT_SECONDS = 4.0
-
-
-def _wslg_active():
-    """So o WSLg monta /mnt/wslg e expoe as janelas no desktop do Windows."""
-    return Path("/mnt/wslg").is_dir()
-
-
-def _start_wsl_foreground_helper():
-    """Lanca o helper que traz a janela para frente do desktop Windows.
+def _start_wsl_foreground_helper(token):
+    """Lanca o helper que traz a janela nova para frente do desktop Windows.
 
     O WSLg mapeia a janela abaixo da janela ativa do Windows — com um
     browser maximizado ela nasce invisivel mesmo dentro da tela. O
     Wayland nao deixa o cliente se levantar (move/raise/_NET_ACTIVE_WINDOW
     e o TOPMOST do Qt sao engolidos), entao a subida vai pelo lado
     Windows: AttachThreadInput na thread da janela ativa +
-    SetForegroundWindow, depois de achar a janela pelo titulo (ate
-    20 s — o RAIL pode demorar para mapear). O helper faz um snapshot
-    das janelas "Draw (*)" existentes,
-    escreve 'ready' no stdout e espera uma hwnd nova — com outra sessao
-    aberta, ativar a antiga seria pior do que nao fazer nada; no timeout
-    cai para a "Draw" mais fundo na ordem (a recem-criada nasce abaixo).
-    Retorna o processo para o chamado aguardar o 'ready' antes de criar
-    a janela, ou None fora do WSLg/se o powershell nao subir.
+    SetForegroundWindow. A hwnd e identificada pelo titulo unico do
+    lancamento ("Draw <pid> (*)" no lado Windows) — sessoes antigas
+    nunca entram na busca. Ao achar, o helper levanta a janela e
+    devolve o titulo normal via SetWindowText. Retorna o processo ou
+    None fora do WSL/se o powershell nao subir; falhar em qualquer
+    passo so perde a subida, nada mais.
     """
-    if not _wslg_active():
+    if not camera_module.is_wsl():
         return None
     ps = (
         "$s='using System;using System.Text;using System.Runtime.InteropServices;"
@@ -1095,6 +1092,8 @@ def _start_wsl_foreground_helper():
         "EnumWindows(E e,IntPtr l);public delegate bool E(IntPtr h,IntPtr l);"
         '[DllImport("user32.dll")]public static extern int GetWindowTextA('
         'IntPtr h,StringBuilder s,int n);[DllImport("user32.dll")]public static '
+        "extern bool SetWindowTextA(IntPtr h,string s);"
+        '[DllImport("user32.dll")]public static '
         'extern IntPtr GetForegroundWindow();[DllImport("user32.dll")]public '
         "static extern uint GetWindowThreadProcessId(IntPtr h,out uint p);"
         '[DllImport("user32.dll")]public static extern bool AttachThreadInput('
@@ -1104,20 +1103,13 @@ def _start_wsl_foreground_helper():
         '[DllImport("user32.dll")]public static extern bool ShowWindowAsync('
         'IntPtr h,int n);[DllImport("kernel32.dll")]public static extern uint '
         "GetCurrentThreadId();}';"
-        "Add-Type -TypeDefinition $s;$known=@{};"
+        "Add-Type -TypeDefinition $s;$t=[IntPtr]::Zero;$n=0;"
+        "while($t -eq [IntPtr]::Zero -and $n -lt __POLLS__){$n++;"
         "[W]::EnumWindows({param($h,$l)$b=New-Object Text.StringBuilder 512;"
         "[W]::GetWindowTextA($h,$b,512)|Out-Null;"
-        "if($b.ToString() -like 'Draw (*)'){$script:known[$h]=$true};"
-        "return $true},[IntPtr]::Zero)|Out-Null;Write-Output 'ready';"
-        "$t=[IntPtr]::Zero;$last=[IntPtr]::Zero;$n=0;"
-        "while($t -eq [IntPtr]::Zero -and $n -lt 80){$n++;$last=[IntPtr]::Zero;"
-        "[W]::EnumWindows({param($h,$l)$b=New-Object Text.StringBuilder 512;"
-        "[W]::GetWindowTextA($h,$b,512)|Out-Null;"
-        "if($b.ToString() -like 'Draw (*)'){$script:last=$h;"
-        "if(!$script:known.ContainsKey($h)){$script:t=$h}};return $true},"
+        "if($b.ToString() -like '__TOKEN__ (*)'){$script:t=$h};return $true},"
         "[IntPtr]::Zero)|Out-Null;"
         "if($t -eq [IntPtr]::Zero){Start-Sleep -Milliseconds 250}};"
-        "if($t -eq [IntPtr]::Zero -and $last -ne [IntPtr]::Zero){$t=$last};"
         "if($t -ne [IntPtr]::Zero){$fg=[W]::GetForegroundWindow();"
         "$ft=[W]::GetWindowThreadProcessId($fg,[ref]([uint32]$p=0));"
         "$me=[W]::GetCurrentThreadId();"
@@ -1125,31 +1117,47 @@ def _start_wsl_foreground_helper():
         "[W]::ShowWindowAsync($t,5)|Out-Null;"
         "[W]::BringWindowToTop($t)|Out-Null;"
         "[W]::SetForegroundWindow($t)|Out-Null;"
-        "[W]::AttachThreadInput($me,$ft,$false)|Out-Null}"
+        "[W]::AttachThreadInput($me,$ft,$false)|Out-Null;"
+        "[W]::SetWindowTextA($t,'__TITLE__')|Out-Null}"
+    )
+    ps = (
+        ps.replace("__TOKEN__", token)
+        .replace("__POLLS__", str(_WSL_RAISE_POLLS))
+        .replace("__TITLE__", _WINDOW)
     )
     try:
         return subprocess.Popen(
             ["powershell.exe", "-NoProfile", "-Command", ps],
-            stdout=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            text=True,
         )
     except OSError:
         return None
 
 
+def _publish_unique_title_and_raise():
+    """Publica o titulo unico do lancamento e dispara o helper de foreground.
+
+    A janela sai como "Draw <pid>" — o RAIL a apresenta no Windows como
+    "Draw <pid> (Ubuntu)" — e o helper casa esse titulo exato, entao
+    nenhuma sessao antiga pode ser levantada por engano. O titulo volta
+    a "Draw" quando o helper renomeia a hwnd ou, sem ele, ao expirar o
+    prazo local. Sem GUI do Qt o passo e ignorado.
+    """
+    if not camera_module.is_wsl():
+        return
+    token = f"{_WINDOW} {os.getpid()}"
+    try:
+        cv2.setWindowTitle(_WINDOW, token)
+    except cv2.error:
+        return
+    _window_token[0] = token
+    _window_title_restore_at[0] = time.monotonic() + _WSL_TITLE_RESTORE_SECONDS
+    _start_wsl_foreground_helper(token)
+
+
 def _open_window(fullscreen):
     """Cria a janela do Draw: sem barras do Qt, redimensionavel, com mouse."""
-    helper = _start_wsl_foreground_helper()
-    if helper is not None:
-        # A janela so e criada depois do snapshot do helper: a hwnd nova
-        # nunca entra no conjunto das antigas. A espera e curta — se o
-        # powershell travar, o startup nao fica refem.
-        try:
-            if select.select([helper.stdout], [], [], _WSL_HELPER_WAIT_SECONDS)[0]:
-                helper.stdout.readline()
-        except OSError:
-            pass
     cv2.namedWindow(
         _WINDOW,
         cv2.WINDOW_NORMAL | cv2.WINDOW_GUI_NORMAL | cv2.WINDOW_FREERATIO,
@@ -1159,6 +1167,7 @@ def _open_window(fullscreen):
     _settings["on"]["fullscreen"] = fullscreen
     _fullscreen_applied[0] = False
     cv2.setMouseCallback(_WINDOW, _on_mouse)
+    _publish_unique_title_and_raise()
 
 
 def _ui_wait_seconds():
@@ -1239,6 +1248,12 @@ def _show(image):
             cv2.moveWindow(_WINDOW, _WINDOW_PLACE_X, _WINDOW_PLACE_Y)
         except cv2.error:
             _window_place_until[0] = 0.0
+    if _window_token[0] is not None and time.monotonic() >= _window_title_restore_at[0]:
+        try:
+            cv2.setWindowTitle(_WINDOW, _WINDOW)
+        except cv2.error:
+            pass
+        _window_token[0] = None
     w, h = _window_rect() or (0, 0)
     _view_map.update(scale=1.0, offset=(0, 0))
     if w > 0 and h > 0 and (w, h) != (iw, ih):

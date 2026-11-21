@@ -844,23 +844,44 @@ def test_show_nao_reabre_posicionamento_ao_sair_do_fullscreen(monkeypatch):
     assert moves == []
 
 
-def test_start_wsl_foreground_helper_so_dispara_powershell_em_wslg(monkeypatch):
-    """A subida pelo lado Windows so sai onde ha WSLg.
+def test_start_wsl_foreground_helper_so_dispara_powershell_em_wsl(monkeypatch):
+    """A subida pelo lado Windows so sai em WSL.
 
-    Sem /mnt/wslg nao ha janela hospedada no Windows: o helper nem e
-    invocado. Com WSLg, ele procura a janela pelo titulo e a traz para
-    frente via AttachThreadInput + SetForegroundWindow.
+    Fora do WSL nao ha powershell.exe nem janela hospedada no Windows:
+    o helper nem e invocado. Em WSL, ele procura a hwnd pelo titulo
+    unico do lancamento e a traz para frente via AttachThreadInput +
+    SetForegroundWindow.
     """
     calls = []
-    monkeypatch.setattr(app_module, "_wslg_active", lambda: False)
+    monkeypatch.setattr(app_module.camera_module, "is_wsl", lambda: False)
     monkeypatch.setattr(app_module.subprocess, "Popen", lambda *a, **k: calls.append(a))
-    assert app_module._start_wsl_foreground_helper() is None
+    assert app_module._start_wsl_foreground_helper("Draw 4242") is None
     assert calls == []
-    monkeypatch.setattr(app_module, "_wslg_active", lambda: True)
-    app_module._start_wsl_foreground_helper()
+    monkeypatch.setattr(app_module.camera_module, "is_wsl", lambda: True)
+    app_module._start_wsl_foreground_helper("Draw 4242")
     assert len(calls) == 1
     assert calls[0][0][0] == "powershell.exe"
     assert "SetForegroundWindow" in calls[0][0][3]
+    assert "Draw 4242" in calls[0][0][3]
+
+
+def test_show_restaura_o_titulo_depois_do_prazo_do_helper(monkeypatch):
+    """O titulo unico do lancamento e temporario: _show devolve 'Draw'."""
+    moves = []
+    _stub_show_gui(monkeypatch, moves)
+    now = [1000.0]
+    monkeypatch.setattr(app_module, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    titles = []
+    monkeypatch.setattr(app_module.cv2, "setWindowTitle", lambda w, t: titles.append(t))
+    monkeypatch.setattr(app_module, "_window_token", ["Draw 4242"])
+    monkeypatch.setattr(app_module, "_window_title_restore_at", [now[0] + 10.0])
+    frame = np.zeros((640, 1600, 3), np.uint8)
+    app_module._show(frame)
+    assert titles == []
+    now[0] += 11.0
+    app_module._show(frame)
+    assert titles == [app_module._WINDOW]
+    assert app_module._window_token[0] is None
 
 
 def test_camera_menu_with_many_cameras_scrolls_and_selects_absolute_rows(monkeypatch):
