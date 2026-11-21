@@ -542,7 +542,7 @@ class Pipeline:
                 if visible is not None:
                     gain_mask &= visible
                 target_gain = exposure.paper_gain(frame, gain_mask)
-                gain_at = self._clock() if captured_at is None else captured_at
+                gain_at = packet.captured_at
                 self.last_ink_gain = self._paper_gain_smoother.update(
                     target_gain, gain_at, image=frame, mask=gain_mask
                 )
