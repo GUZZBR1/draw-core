@@ -497,6 +497,43 @@ def test_confirmed_ink_under_guard_does_not_trigger_page_turn():
     assert not any(turns)
 
 
+def test_border_noise_does_not_reset_returning_page_identity():
+    """Ruido escuro nas faixas de borda (fora da guarda) nao pode
+    derrubar o containment da recuperacao de identidade: o canvas
+    confirmado — inclusive o que a passada de volta nao reproduz —
+    e preservado."""
+    quad = np.array([[200, 100], [560, 100], [560, 600], [200, 600]], dtype=np.float32)
+    img = np.full((1200, 850, 3), 215, np.uint8)
+    img[200:400, 200:320] = 25  # A1: reaparece na volta
+    img[200:400, 400:440] = 25  # A2: nao reaparece na volta
+
+    clock = _Clock()
+    cfg = InkConfig.strict_vote(0.85, border_guard_px=None)
+    worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
+    for _ in range(5):
+        clock.now += 1.1
+        worker.submit(contracts.WarpedPage(img, 0, quad, captured_at=clock.now))
+        worker.pump()
+    gen = worker.new_generation(preserve_identity=True)
+
+    img_return = np.full((1200, 850, 3), 215, np.uint8)
+    img_return[200:400, 200:320] = 25  # A1 reaparece
+    img_return[:8, :] = 25  # ruido escuro nas 4 faixas de borda
+    img_return[-8:, :] = 25
+    img_return[:, :8] = 25
+    img_return[:, -8:] = 25
+    for _ in range(6):
+        clock.now += 1.1
+        worker.submit(
+            contracts.WarpedPage(img_return, gen, quad, captured_at=clock.now)
+        )
+        worker.pump()
+    snap = worker.poll(gen, 0)
+    assert snap is not None
+    assert int(np.count_nonzero(snap.confirmed[200:400, 400:440])) > 0
+    assert int(np.count_nonzero(snap.confirmed[200:400, 200:320])) > 0
+
+
 def test_stale_provisional_ink_clears_when_reanchor_widens_guard():
     """Marcas provisorias antigas que caem na nova faixa da guarda apos
     reancoragem nao ficam congeladas indefinidamente."""

@@ -67,19 +67,30 @@ def _border_guard_mask(
     if configured is None and corners is not None:
         inset_cam = _inset_quad(corners, camera_jitter_px)
         if inset_cam is not None:
-            src = np.asarray(corners, dtype=np.float32)
-            dst = np.array(
-                [[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]],
-                dtype=np.float32,
-            )
-            homography = cv2.getPerspectiveTransform(src, dst)
+            # Mesma homografia camera->pagina do warp/registration
+            # (destino (0,0)..(W,H)): a grade w-1/h-1 deslocava o
+            # inset ~0,5 px e admitia amostras dentro do jitter.
+            homography = registration._corners_page_matrix(corners, w, h)
             inset_page = cv2.perspectiveTransform(
                 inset_cam.reshape(1, 4, 2).astype(np.float32),
                 homography,
             )[0]
-            cam_mask = np.zeros((h, w), dtype=np.uint8)
-            cv2.fillConvexPoly(cam_mask, np.round(inset_page).astype(np.int32), 1)
-            mask &= cam_mask > 0
+            # Rasteriza o inset no centro de cada pixel (coordenadas
+            # inteiras), testando os quatro semi-planos. Arredondar
+            # o vertice projetado para o pixel mais proximo admitia
+            # a amostra de fronteira, mais perto da borda do que o
+            # inset de camera previsto.
+            xs = np.arange(w, dtype=np.float64)[None, :]
+            ys = np.arange(h, dtype=np.float64)[:, None]
+            cx, cy = inset_page.mean(axis=0)
+            inside = np.ones((h, w), dtype=bool)
+            for i in range(4):
+                p1 = inset_page[i].astype(np.float64)
+                p2 = inset_page[(i + 1) % 4].astype(np.float64)
+                ex, ey = p2[0] - p1[0], p2[1] - p1[1]
+                cross = ex * (ys - p1[1]) - ey * (xs - p1[0])
+                inside &= cross * (ex * (cy - p1[1]) - ey * (cx - p1[0])) >= 0
+            mask &= inside
     return mask
 
 
@@ -1672,73 +1683,76 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     prior = identity_reference > 0
                     prior_px = int(np.count_nonzero(prior))
                     identity_reference_px = prior_px
-                    if prior_px == 0:
+                    # Dominio inspecionado da comparacao: a guarda do
+                    # quad salvo, cruzada com a visibilidade. Resposta
+                    # de borda fora da area util nao pode derrubar o
+                    # containment nem rejeitar a pagina vazia; a
+                    # guarda do voto final segue amarrada a ancora
+                    # final, calculada depois.
+                    identity_guard = _border_guard_mask(
+                        prob.shape,
+                        self._config.border_guard_px,
+                        identity_corners,
+                        min_auto_side=200,
+                    )
+                    inspected = identity_visible
+                    if inspected is None:
+                        inspected = identity_guard
+                    elif identity_guard is not None:
+                        inspected = inspected & identity_guard
+                    prior_eval = prior if inspected is None else (prior & inspected)
+                    prior_eval_px = int(np.count_nonzero(prior_eval))
+                    if (
+                        identity_visible is not None
+                        and prior_px > 0
+                        and prior_eval_px
+                        < max(
+                            identity._IDENTITY_MIN_VISIBLE_PX,
+                            int(identity._IDENTITY_MIN_VISIBLE_FRACTION * prior_px),
+                        )
+                    ):
+                        # Tinta anterior quase toda coberta pela mao:
+                        # decidir agora seria condenar a pagina pelo
+                        # que a passada nao ve. Adia; a referencia
+                        # fica para a proxima passada.
+                        identity_visible_reference_px = prior_eval_px
+                        identity_deferred = True
+                        quarantine_reason = "occlusion"
+                    elif prior_eval_px == 0:
+                        # Sem tinta salva no dominio inspecionado
+                        # (canvas vazio ou tinta toda sob a guarda,
+                        # que e estatica e nao vai descobrir nada):
+                        # a comparacao vale so pela evidencia vista.
                         seen_any = candidate > self._accumulator.threshold
-                        if identity_visible is not None:
-                            seen_any = seen_any & identity_visible
+                        if inspected is not None:
+                            seen_any = seen_any & inspected
                         keep_page = not np.any(seen_any)
                         identity_recall = 1.0 if keep_page else 0.0
                     else:
+                        if identity_visible is not None:
+                            identity_visible_reference_px = prior_eval_px
                         seen = candidate > self._accumulator.threshold
+                        if inspected is not None:
+                            seen = seen & inspected
                         kernel = np.ones(
                             (identity._IDENTITY_DILATION_KERNEL,) * 2, np.uint8
                         )
                         seen_d = cv2.dilate(seen.astype(np.uint8), kernel) > 0
-                        if identity_visible is not None:
-                            prior_visible = prior & identity_visible
-                            prior_visible_px = int(np.count_nonzero(prior_visible))
-                            identity_visible_reference_px = prior_visible_px
-                            if prior_visible_px < max(
-                                identity._IDENTITY_MIN_VISIBLE_PX,
-                                int(identity._IDENTITY_MIN_VISIBLE_FRACTION * prior_px),
-                            ):
-                                # Tinta anterior quase toda
-                                # coberta: decidir agora seria
-                                # condenar a pagina pela mao.
-                                # Adia; a referencia fica para a
-                                # proxima passada.
-                                identity_deferred = True
-                                quarantine_reason = "occlusion"
-                            else:
-                                prior_d = (
-                                    cv2.dilate(
-                                        prior_visible.astype(np.uint8),
-                                        kernel,
-                                    )
-                                    > 0
-                                )
-                                identity_recall = (
-                                    np.count_nonzero(prior_visible & seen_d)
-                                    / prior_visible_px
-                                )
-                                seen_px = int(np.count_nonzero(seen))
-                                identity_containment = (
-                                    0.0
-                                    if seen_px == 0
-                                    else (np.count_nonzero(seen & prior_d) / seen_px)
-                                )
-                                keep_page = (
-                                    identity_recall
-                                    >= identity._PAGE_IDENTITY_MIN_RECALL
-                                    and identity_containment
-                                    >= identity._PAGE_IDENTITY_MIN_CONTAINMENT
-                                )
-                        else:
-                            prior_d = cv2.dilate(prior.astype(np.uint8), kernel) > 0
-                            identity_recall = (
-                                np.count_nonzero(prior & seen_d) / prior_px
-                            )
-                            seen_px = int(np.count_nonzero(seen))
-                            identity_containment = (
-                                0.0
-                                if seen_px == 0
-                                else (np.count_nonzero(seen & prior_d) / seen_px)
-                            )
-                            keep_page = (
-                                identity_recall >= identity._PAGE_IDENTITY_MIN_RECALL
-                                and identity_containment
-                                >= identity._PAGE_IDENTITY_MIN_CONTAINMENT
-                            )
+                        prior_d = cv2.dilate(prior_eval.astype(np.uint8), kernel) > 0
+                        identity_recall = (
+                            np.count_nonzero(prior_eval & seen_d) / prior_eval_px
+                        )
+                        seen_px = int(np.count_nonzero(seen))
+                        identity_containment = (
+                            0.0
+                            if seen_px == 0
+                            else (np.count_nonzero(seen & prior_d) / seen_px)
+                        )
+                        keep_page = (
+                            identity_recall >= identity._PAGE_IDENTITY_MIN_RECALL
+                            and identity_containment
+                            >= identity._PAGE_IDENTITY_MIN_CONTAINMENT
+                        )
                 if identity_deferred:
                     self._identity_defer_count += 1
                     quarantine_frames = self._identity_defer_count
