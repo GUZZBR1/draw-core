@@ -731,7 +731,7 @@ def audit_one(scen_dir, out_dir, flags, detector_kind="real"):
     page_clean = PageCleanInk(str(INK_MODEL), verify=verify_model)
     page_clean.load()
 
-    clock = StepClock(1.0 / SCENE_FPS)
+    clock = StepClock()
 
     if detector_kind == "oracle":
         true_corners = {
@@ -791,7 +791,7 @@ def audit_one(scen_dir, out_dir, flags, detector_kind="real"):
     canvas_bin = np.zeros((CANVAS_H, CANVAS_W), bool)
     for idx, path in enumerate(files):
         frame = cv2.imread(str(path))
-        clock.t = idx * clock.dt
+        clock.t = idx / SCENE_FPS
         loop.step(FramePacket(image=frame, captured_at=clock.t, sequence=idx + 1))
         worker.pump()
         loop.collect_ink()

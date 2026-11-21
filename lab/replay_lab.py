@@ -306,8 +306,8 @@ def run_replay(
         )
         page_clean.load()
 
-    clock = StepClock(1.0 / scene_fps)
-    det_worker = SyncDetector(detector)
+    clock = StepClock()
+    det_worker = SyncDetector(detector, keep_history=True)
     ink_worker = PageCleanWorker(
         page_clean, None, clock=clock, config=config.ink, ink_divnorm=config.ink_divnorm
     )
@@ -342,7 +342,7 @@ def run_replay(
         frame = cv2.imread(str(path))
         if frame is None:
             continue
-        clock.t = idx * clock.dt
+        clock.t = idx / scene_fps
         det_worker.frame_hint = idx
         loop.step(FramePacket(image=frame, captured_at=clock.t, sequence=idx + 1))
         # Uma chamada de pump por frame (o padrão dos replays do

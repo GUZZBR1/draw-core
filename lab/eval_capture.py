@@ -155,7 +155,7 @@ def run_pipeline(
     neural = NeuralSheetDetector(neural_model, verify=verify) if neural_model else None
     if neural is not None:
         neural.load()
-    clock = StepClock(1.0 / fps)
+    clock = StepClock()
     hand_presence_worker = None
     page_clean = PageCleanInk(page_clean_model, verify=verify)
     page_clean.load()
@@ -206,7 +206,7 @@ def run_pipeline(
             ok, frame = capture.read()
             if not ok:
                 break
-            clock.t = frame_index * clock.dt
+            clock.t = frame_index / fps
             outcome = loop.step(
                 FramePacket(image=frame, captured_at=clock.t, sequence=frame_index + 1)
             )

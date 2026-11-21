@@ -76,9 +76,11 @@ def run_new(
     )
     presence = make_hand_presence(hand_model, verify=verify) if hand_model else None
 
-    clock = StepClock(1.0 / fps)
+    clock = StepClock()
     det = SyncDetector(detector)
-    presence_worker = SyncPresence(presence) if presence is not None else None
+    presence_worker = (
+        SyncPresence(presence, strict=True) if presence is not None else None
+    )
     # A régua de paridade compara contra o SheetInkLoop legado (Tier A, sem
     # ganho, sem Detect-Wake e com voto/cadência legados): fixa a mesma base
     # em Pipeline e PageCleanWorker para não misturar o preset de produção.
@@ -107,7 +109,7 @@ def run_new(
     records, canvases = [], []
     try:
         for idx, frame in iter_frames(corpus, frames):
-            clock.t = idx * clock.dt
+            clock.t = idx / fps
             loop.step(FramePacket(image=frame, captured_at=clock.t, sequence=idx + 1))
             worker.pump()
             loop.collect_ink()

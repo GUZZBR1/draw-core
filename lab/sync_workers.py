@@ -43,10 +43,14 @@ def iter_frames(source, limit):
 
 
 class StepClock:
-    """Relógio de cena: quem dirige o laço avança `t` (dt por quadro)."""
+    """Relógio de cena: quem dirige o laço atribui `t`.
 
-    def __init__(self, dt):
-        self.dt = dt
+    Atribua `indice / fps` (divisão): `indice * (1 / fps)` pode cair um
+    ulp abaixo do limiar de confirmação do tracker (0,6 s) e deixar o
+    candidato pendente no fim de um clipe curto.
+    """
+
+    def __init__(self):
         self.t = 0.0
 
     def __call__(self):
@@ -58,13 +62,14 @@ class SyncDetector:
 
     Contrato do SheetDetectionWorker sem thread: submit roda a
     detecção na hora; poll devolve o resultado mais novo.
-    `seq_frames`/`frame_hint` deixam o replay registrar qual quadro
-    gerou cada resultado.
+    `keep_history` guarda `traces`/`seq_frames` (só o replay lê); sem
+    ele, capturas longas não acumulam rastro por quadro.
     """
 
-    def __init__(self, detector, detect_ms=1.0):
+    def __init__(self, detector, detect_ms=1.0, keep_history=False):
         self._detector = detector
         self._detect_ms = detect_ms
+        self._keep_history = keep_history
         self.result = None
         self.sequence = 0
         self.error = None
@@ -91,8 +96,9 @@ class SyncDetector:
             coverage_mask=(extras.get("coverage_mask") if extras else None),
             hand_mask=(extras.get("hand_mask") if extras else None),
         )
-        self.traces.append(trace)
-        self.seq_frames.append(self.frame_hint)
+        if self._keep_history:
+            self.traces.append(trace)
+            self.seq_frames.append(self.frame_hint)
 
     def poll(self, after_seq):
         if self.result is not None and self.result.sequence > after_seq:
@@ -106,8 +112,9 @@ class SyncDetector:
 class SyncPresence:
     """Presença de mão síncrona — mesmo protocolo da worker real."""
 
-    def __init__(self, presence):
+    def __init__(self, presence, strict=False):
         self.presence = presence
+        self.strict = strict
         self.result = None
         self.sequence = 0
         self.error = None
@@ -121,6 +128,9 @@ class SyncPresence:
                 frame, captured_at * 1000.0, source_id=source_id
             )
         except Exception as error:
+            if self.strict:
+                # Paridade: amostra perdida não pode virar "mão medida".
+                raise
             # Como a worker do app: o laço degrada para sinal indisponível.
             self.error = error
             return
