@@ -397,3 +397,64 @@ def test_load_manifest_absent_and_bad_schema(tmp_path):
     )
     with pytest.raises(ValueError):
         load_manifest(tmp_path)
+
+
+# --- Pin do sha256 do manifesto ---------------------------------------------
+#
+# O stream que ``hash_clip`` alimenta ao hasher e contrato de
+# compatibilidade: todo ``corpus.json`` ja gravado so revalida se, para cada
+# arquivo na ordem LEXICA do nome, entrarem
+#
+#     name_utf8 + b"\0" + str(len(data)).encode("ascii") + b"\0" + data + b"\0"
+#
+# cobrindo clip.json, regions.json (quando presente) e os f*.png. A literal
+# abaixo foi calculada a partir dessa especificacao (hashlib sobre o stream
+# descrito) e conferida uma unica vez contra a implementacao — nao e "lida"
+# de hash_clip. Mudar ordem, separadores ou cobertura reescreve todos os
+# digests registrados e DEVE falhar aqui.
+_PINNED_CLIP_SHA256 = "51033e2a9f78e6599c2cfa3b19ef97f1b23855a65ea1a980c8310f88e7f7eb9e"
+
+_PINNED_CLIP_FILES = {
+    "clip.json": b'{"scene_fps": 10.0, "frames": 3, "desc": "pin"}\n',
+    # Quadros com sufixos cuja ordem numerica (1, 2, 10) diverge da lexica
+    # (f1.png, f10.png, f2.png) — o digest segue a lexica.
+    "f1.png": b"frame-one",
+    "f2.png": b"frame-two",
+    "f10.png": b"frame-ten",
+    "regions.json": b'{"writing": [[0, 0, 8, 8]]}\n',
+}
+
+
+def _write_pinned_clip(clip_dir):
+    clip_dir.mkdir(parents=True)
+    for name, data in _PINNED_CLIP_FILES.items():
+        (clip_dir / name).write_bytes(data)
+    return clip_dir
+
+
+def test_hash_clip_digest_is_pinned_to_known_byte_stream(tmp_path):
+    """Pin anti-tautologico: build_manifest e verify_manifest usam o mesmo
+    hash_clip, entao uma mudanca que reescrevesse todo sha256 armazenado
+    (ordem do stream, separadores, arquivos cobertos) ainda se
+    auto-verificaria. A literal congela o stream inteiro."""
+    clip_dir = _write_pinned_clip(tmp_path / "pin")
+
+    assert hash_clip(clip_dir) == _PINNED_CLIP_SHA256
+    # E e esse mesmo digest pinado que o manifesto registra no corpus.json.
+    manifest = build_manifest(tmp_path)
+    assert manifest["clips"]["pin"]["sha256"] == _PINNED_CLIP_SHA256
+
+
+def test_hash_clip_orders_files_lexically_not_numerically(tmp_path):
+    """O inventario numerico e [f1, f2, f10], mas o stream do sha256 segue
+    a ordem LEXICA dos nomes (clip.json, f1.png, f10.png, f2.png,
+    regions.json): a literal foi computada nessa ordem, entao hashear na
+    ordem numerica mudaria o digest e quebraria manifests gravados."""
+    clip_dir = _write_pinned_clip(tmp_path / "pin")
+
+    assert [p.name for p in clip_frames(clip_dir)] == [
+        "f1.png",
+        "f2.png",
+        "f10.png",
+    ]
+    assert hash_clip(clip_dir) == _PINNED_CLIP_SHA256
