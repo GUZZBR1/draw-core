@@ -591,6 +591,27 @@ def test_staggered_shadow_shoulders_longer_than_a_stroke_do_not_exempt_the_fold(
     assert (out[:, 566:634] > 0.5).sum() == 0
 
 
+def test_a_stroke_crossing_the_fold_through_staggered_shoulders_is_kept():
+    """Caso do review: ombros de 13 colunas em linhas alternadas E um traco
+    de 6 px na linha 7, de 540 a 660. O padrao comum e sombra (sai), mas o
+    traco continua ALEM do comprimento comum e o miolo dele fica."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        y = 80 + 40 * k
+        prob[y : y + 2, :] = 0.95
+        prob[y : y + 6, 560:640] = 0.95
+        if k % 2 == 0:
+            prob[y : y + 6, 547:560] = 0.95
+            prob[y : y + 6, 640:653] = 0.95
+    y = 80 + 40 * 7
+    prob[y : y + 6, 540:660] = 0.95  # mesma espessura da sombra
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[y : y + 6, 566:634] > 0.5).all()  # o miolo do traco
+    others = out[:, 566:634] > 0.5
+    others[y : y + 6, :] = False
+    assert others.sum() == 0  # e so ele
+
+
 def test_a_long_continuation_on_a_single_line_is_still_a_stroke():
     """Ombros de 20 colunas dos dois lados, mas numa linha so: continuacao
     rara = traco de caneta. A faixa dessa linha fica; a das outras sai
@@ -625,6 +646,21 @@ def test_an_8_column_dash_inside_the_fold_is_kept():
     out = ruling.RulingFilter().apply(prob.copy())
     assert ((out > 0.5) & dash).sum() >= 0.97 * dash.sum()
     assert ((out > 0.5) & ~dash)[:, 560:640].sum() == 0
+
+
+def test_a_shadow_ripple_shared_by_many_lines_is_erased():
+    """Ondulacao da sombra: seis linhas engrossam 1 px a mais por 8 colunas
+    dentro do vinco. Desvio compartilhado = sombra, nao seis tracos curtos;
+    so o desvio isolado vale como caneta (review #139)."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        y = 80 + 40 * k
+        prob[y : y + 2, :] = 0.95
+        prob[y : y + 6, 560:640] = 0.8
+        if k % 2 == 0:
+            prob[y : y + 7, 580:588] = 0.8  # a ondulacao
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[:, 566:634] > 0.5).sum() == 0
 
 
 def _two_line_segment(n, second):

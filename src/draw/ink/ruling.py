@@ -602,6 +602,13 @@ def _gutter_mask(tracks_raw, width):
     return out
 
 
+def _leading_run(mask):
+    """(K,) comprimento do trecho True no início de cada linha."""
+    inv = ~mask
+    first = inv.argmax(axis=1)
+    return np.where(inv.any(axis=1), first, mask.shape[1])
+
+
 def _joined_through(raw, gutter):
     """(K, X): trecho da linha dentro da faixa que continua grosso fora dela.
 
@@ -610,9 +617,9 @@ def _joined_through(raw, gutter):
     a linha segue grossa (>= pauta + margem) por _PROB_MIN_RUN colunas logo
     antes E logo depois da faixa. O ombro da sombra, que afina de forma
     irregular, não dura isso — e quando dura, aparece escalonado em muitas
-    linhas; um traço de caneta continua só nas linhas que ele toca (poucas).
-    Na divisa das metades a trilha só vê um lado, e a borda da trilha não
-    conta como ponta a conferir.
+    linhas: nesse padrão comum só isenta quem continua ALÉM do comprimento
+    comum do ombro (um traço atravessa mais longe). Na divisa das metades a
+    trilha só vê um lado, e a borda da trilha não conta como ponta a conferir.
     """
     k, x = raw.shape
     out = np.zeros_like(raw)
@@ -620,16 +627,21 @@ def _joined_through(raw, gutter):
     for a, b in zip(edges[::2], edges[1::2], strict=False):
         need = _PROB_MIN_RUN
         left = right = None
+        ext_l = ext_r = None
         if a >= need:
             left = raw[:, a - need : a].mean(axis=1) >= 0.85
+            ext_l = _leading_run(raw[:, :a][:, ::-1])
         if b + need <= x:
             right = raw[:, b : b + need].mean(axis=1) >= 0.85
+            ext_r = _leading_run(raw[:, b:])
         sides = [s for s in (left, right) if s is not None]
         if len(sides) == 2 or (len(sides) == 1 and (a == 0 or b == x)):
             cont = np.logical_and.reduce(sides)
-            # continuação em muitas linhas é a sombra afinando, não um traço
-            if cont.sum() <= max(2, k // 4):
-                out[:, a:b] = cont[:, None]
+            if cont.sum() > max(2, k // 4):
+                ext = np.minimum.reduce([e for e in (ext_l, ext_r) if e is not None])
+                common = float(np.median(ext[cont]))
+                cont &= ext > common + _GUTTER_EDGE_RUN
+            out[:, a:b] = cont[:, None]
     return out
 
 
@@ -663,7 +675,10 @@ def _stroke_on_shade(run, gutter):
     """
     med = np.median(run, axis=0)
     above = (run > med[None, :]) & gutter[None, :]
-    return _long_runs(above, _STROKE_RUN, _GUTTER_EDGE_RUN)
+    # uma ondulação da sombra desvia várias linhas na mesma coluna; um traço
+    # desvia só a linha que ele toca — conta só o desvio isolado
+    shared = above.sum(axis=0) > max(2, above.shape[0] // 4)
+    return _long_runs(above & ~shared[None, :], _STROKE_RUN, _GUTTER_EDGE_RUN)
 
 
 def _opening_cols(mask, length):
