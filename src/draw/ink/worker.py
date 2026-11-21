@@ -1327,8 +1327,15 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     self._ruling.reset()
                     self._ruling_generation = generation
                 prob = self._ruling.apply(prob, visible)
+            # O suporte de preenchimento conta a evidência no nível que
+            # o voto confirma (vote_hit), não num piso fixo: um bloco
+            # sustentado em [vote_hit, 0,7) confirmaria no voto mas
+            # ficava vetado para sempre (Devin Review do PR #144).
             exposure = self._paper_exposure.observe(
-                photometric_image, visible, ink_prob=prob
+                photometric_image,
+                visible,
+                ink_prob=prob,
+                ink_support_threshold=self._config.vote_hit,
             )
             # Cobertura de folha (cobertura de folha do loop) viaja em
             # canal proprio ate depois do registro: o veto nao e

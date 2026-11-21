@@ -37,6 +37,13 @@ _CHROMA_REFERENCE_MAX = 255.0 / 20.0
 # produz: o tile continua anômalo para o segundo veredito.
 _FILL_INK_PIXEL_THRESHOLD = 0.7
 _FILL_INK_TILE_SUPPORT = 0.15
+# Fração de pixels fortes não basta: uma faixa fina e forte — a borda
+# de uma sombra parada lida como tinta — cobre ~15% dos pixels do tile
+# a 0,9 e adotava o veto errado (média ~0,15). O piso de média exige
+# que a evidência de tinta domine o tile: um preenchimento real
+# sustenta média bem maior (>= ~0,4 nas tiles parcialmente cobertas
+# dos testes), a faixa fina fica em ~0,15 (Devin Review do PR #144).
+_FILL_INK_TILE_MEAN = 0.25
 _FILL_RECOVERY_PASSES = 4
 
 
@@ -89,7 +96,7 @@ class PaperExposureGuard:
         segurar o orçamento enquanto o bloco seguir adotado."""
         return self._last_fill_adoption
 
-    def observe(self, image, visible=None, ink_prob=None):
+    def observe(self, image, visible=None, ink_prob=None, ink_support_threshold=None):
         """Return separate masks for safe additions and paper exposure.
 
         Only uint8 camera images carry reliable photometric evidence. An
@@ -103,7 +110,13 @@ class PaperExposureGuard:
         grade) alimenta a recuperação por preenchimento: um bloco que o
         modelo lê como tinta por _FILL_RECOVERY_PASSES passadas, sempre
         com o tile à vista, deixa de vetar adições. Sem o mapa o veto é
-        permanente, como antes.
+        permanente, como antes. `ink_support_threshold` é o nível de
+        prob em que um pixel conta como tinta forte; o chamador passa o
+        `vote_hit` da sua configuração para que a guarda some exatamente
+        a evidência que a camada de voto consegue confirmar — com o
+        piso fixo de 0,7 um preenchimento sustentado em [vote_hit, 0,7)
+        confirmava no voto mas nunca chegava a votar (Devin Review do
+        PR #144). None mantém o piso histórico.
         """
         # Borda de adoção dura uma observação: qualquer retorno —
         # precoce ou completo — apaga a do ciclo anterior antes de
@@ -287,14 +300,21 @@ class PaperExposureGuard:
         if ink_prob is not None and np.any(anomalous):
             ink_prob = np.asarray(ink_prob, dtype=np.float32)
             if ink_prob.shape == (height, width):
-                pixel_support = ink_prob >= _FILL_INK_PIXEL_THRESHOLD
+                support_level = (
+                    _FILL_INK_PIXEL_THRESHOLD
+                    if ink_support_threshold is None
+                    else float(ink_support_threshold)
+                )
+                pixel_support = ink_prob >= support_level
                 support_fraction = cv2.resize(
                     pixel_support.astype(np.float32), size, interpolation=cv2.INTER_AREA
                 )
+                support_mean = cv2.resize(ink_prob, size, interpolation=cv2.INTER_AREA)
                 supported = (
                     anomalous
                     & updateable
                     & (support_fraction >= _FILL_INK_TILE_SUPPORT)
+                    & (support_mean >= _FILL_INK_TILE_MEAN)
                 )
         self._ink_streak[supported] = np.minimum(
             self._ink_streak[supported].astype(np.uint16) + 1, 255

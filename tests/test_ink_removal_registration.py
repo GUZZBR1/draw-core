@@ -552,6 +552,51 @@ def test_fill_streak_only_counts_with_a_clear_hand():
     assert not last.paper_exposed[48, 48]
 
 
+def test_fill_recovery_counts_evidence_at_the_caller_vote_level():
+    """O nível de "tinta forte" vem do chamador: um preenchimento
+    sustentado a 0,6 — abaixo do piso histórico de 0,7, mas dentro do
+    que o voto confirma (vote_hit 0,5) — adota quando a guarda mede a
+    evidência no nível do voto; no piso fixo o mesmo bloco ficava
+    vetado para sempre (Devin Review do PR #144)."""
+    paper = np.full((120, 168, 3), 220, dtype=np.uint8)
+    filled = paper.copy()
+    filled[24:96, 24:96] = 60
+    ink = np.zeros((120, 168), np.float32)
+    ink[24:96, 24:96] = 0.6
+
+    vetoed = occlusion_mod.PaperExposureGuard()
+    vetoed.observe(paper)
+    for _ in range(occlusion_mod._FILL_RECOVERY_PASSES + 2):
+        blocked = vetoed.observe(filled, ink_prob=ink)
+    assert not blocked.visible[48, 48]
+
+    guard = occlusion_mod.PaperExposureGuard()
+    guard.observe(paper)
+    for _ in range(occlusion_mod._FILL_RECOVERY_PASSES):
+        assessment = guard.observe(filled, ink_prob=ink, ink_support_threshold=0.5)
+    assert assessment.visible is None or assessment.visible[48, 48]
+    assert not assessment.paper_exposed[48, 48]
+
+
+def test_fill_support_rejects_a_thin_strong_ink_band():
+    """Faixa fina e forte não é preenchimento: 4 px de altura a 0,9
+    cobrem ~17% dos pixels do tile (passam a fração 0,15) mas a média
+    do tile fica ~0,15 — assinatura de borda de sombra parada, não de
+    área pintada. O piso de média por tile segura a adoção e o veto
+    de adição permanece (Devin Review do PR #144)."""
+    guard = occlusion_mod.PaperExposureGuard()
+    paper = np.full((120, 168, 3), 220, dtype=np.uint8)
+    guard.observe(paper)
+    shadow = paper.copy()
+    shadow[24:96, 24:96] = 60  # sombra parada: tiles (1:4, 1:4) anômalos
+    ink = np.zeros((120, 168), np.float32)
+    ink[40:44, 24:96] = 0.9  # faixa fina lida como tinta dentro da sombra
+    for _ in range(occlusion_mod._FILL_RECOVERY_PASSES + 2):
+        assessment = guard.observe(shadow, ink_prob=ink, ink_support_threshold=0.5)
+    assert assessment.visible is not None
+    assert not assessment.visible[40:44, 24:96].any()
+
+
 def test_uncertain_photometry_does_not_advance_removal_streak():
     acc = accumulator_mod.LayeredInkAccumulator()
     prob = _big_ink()
