@@ -1,11 +1,10 @@
 """Recorte do tools/replay_reregister.py so com o que os testes do
 motor usam: paginas sinteticas, relogio de cena, trabalhadora
-sincrona e a page_clean falsa (_ProbIsWarp / ScenePageClean)."""
+sincrona e a page_clean falsa (_ProbIsWarp)."""
 
 import copy
 import threading
 import zlib
-from pathlib import Path
 
 import cv2
 import numpy as np
@@ -14,14 +13,7 @@ from draw.ink.accumulator import LayeredInkAccumulator
 from draw.ink.registration import _corners_page_matrix
 from draw.ink.worker import PageCleanWorker
 
-HOME = Path.home()
-THRESHOLD = 0.7
-PASSES_PER_WARP = 3
-FPS = 30
-DT = 1.0 / FPS
 CAMERA_W, CAMERA_H = 1280, 720
-DETECTOR_NOISE_PX = 1.0
-DETECT_MS = 36.7
 SYNTHETIC_SHAPE = (600, 424)
 
 
@@ -125,17 +117,6 @@ def camera_mask(page_mask, corners):
     )
 
 
-def transform_quad(quad, shift=(0.0, 0.0), angle=0.0, scale=1.0):
-    center = quad.mean(axis=0)
-    rad = np.deg2rad(angle)
-    rot = np.array(
-        [[np.cos(rad), -np.sin(rad)], [np.sin(rad), np.cos(rad)]],
-        np.float32,
-    )
-    out = (quad - center) @ rot.T * scale + center
-    return (out + np.asarray(shift, np.float32)).astype(np.float32)
-
-
 def _page_matrix(quad, shape):
     h, w = shape
     return _corners_page_matrix(quad, w, h)
@@ -191,40 +172,6 @@ class SceneClock:
         return self.now
 
 
-class SceneWarp:
-    """O "warp" que a câmera de cena entrega ao laço.
-
-    Carrega a página, o quad verdadeiro e o quad com que o laço
-    retificou; o mapa só é renderizado quando a passada da
-    trabalhadora roda (latest-wins: warps substituídos nunca custam).
-    """
-
-    __slots__ = ("page", "true_quad", "corners")
-
-    def __init__(self, page, true_quad, corners):
-        self.page = page
-        self.true_quad = true_quad
-        self.corners = corners
-
-
-class ScenePageClean:
-    """page_clean falso: o mapa de probabilidade é o da cena re-warpado."""
-
-    threshold = THRESHOLD
-
-    def __init__(self):
-        self.worker = None
-
-    def bind(self, worker):
-        self.worker = worker
-
-    def ink_prob(self, warped):
-        return self.observe(warped.page, warped.true_quad, warped.corners)
-
-    def observe(self, page, true_quad, corners):
-        return render_pass(page, true_quad, corners)
-
-
 class CountingAccumulator(LayeredInkAccumulator):
     """O acumulador real; só conta os sinais de virada e guarda o resultado."""
 
@@ -275,10 +222,6 @@ def make_ink_worker(page_clean, clock, config=None):
     if bind is not None:
         bind(worker)
     return worker
-
-
-def _noisy(quad, rng, sigma=DETECTOR_NOISE_PX):
-    return (quad + rng.normal(0.0, sigma, size=quad.shape)).astype(np.float32)
 
 
 def _rng(*names):

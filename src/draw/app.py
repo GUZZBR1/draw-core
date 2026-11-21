@@ -51,11 +51,8 @@ g = ligar ou desligar a captura automatica de frames, q/Esc = sair.
 
 import argparse
 import dataclasses
-import glob
 import itertools
 import os
-import re
-import subprocess
 import sys
 import threading
 import time
@@ -68,18 +65,17 @@ from . import camera as camera_module
 from . import config
 from . import paper as paper_module
 from . import perception as neural_module
+from . import ui as ui_module
 from . import view as view_module
 from .auto_orient import AutoPageOrientation, AutoRotationDetector
 from .camera import (
     LatestFrameCapture,
     PngWriter,
-    is_wsl,
     open_capture,
     parse_source,
 )
 from .hand import HandMasker, hand_model_available
 from .hand_presence import HandPresenceWorker, make_hand_presence
-from .hvcam import HvcamCapture, is_hvcam_source
 from .infra import manifest as manifest_module
 from .infra import session_report as session_report_module
 from .infra import telemetry as telemetry_module
@@ -87,10 +83,16 @@ from .infra.safe_io import ensure_private_dir
 from .ink import render as ink_render
 from .ink.config import InkConfig
 from .ink.worker import PageCleanWorker
-from .page_clean import PageCleanInk, resolve_threshold
+from .page_clean import PageCleanInk
 from .perception import NeuralSheetDetector
 from .pipeline import INK_WORKER_FAILED, Pipeline
-from .protocol import HelperCapture, ProtocolError, is_helper_source
+from .selfcheck import (
+    _gui_backend_compiled as _gui_backend_compiled,
+)
+from .selfcheck import (
+    _require_gui_backend,
+    run_check,
+)
 from .settings import PipelineConfig
 from .tracker import SheetDetectionWorker, _corners_json
 
@@ -98,10 +100,6 @@ from .tracker import SheetDetectionWorker, _corners_json
 # Sem ele, a morte da fonte e um congelamento silencioso. O waitKey
 # devolve antes se qualquer tecla for apertada.
 _DEAD_NOTICE_MS = 3000
-# Janela curta de espera por quadro novo: longa demais e uma fonte
-# em stall TCP (HelperCapture com stall_windows) congela as teclas
-# de saida dentro de um unico read().
-_FRAME_WAIT_SECONDS = 0.25
 
 # Teto do pool paralelo do OpenCV. Sem teto, o pool abre com as
 # CPUs logicas do host (16 no Ryzen) e vira o terceiro disputante
@@ -254,344 +252,6 @@ def _detect_sheet_combined_traced(frame, neural_detector):
     return _done(corners, verdict, "classic" if corners is not None else "none")
 
 
-def _detect_sheet_combined(frame, neural_detector):
-    corners, verdict = _detect_sheet_combined_traced(frame, neural_detector)[:2]
-    return corners, verdict
-
-
-def run_check(source=0, helper_token_file=None):
-    """Validacao da camera, porta por porta. Retorna 0 ou 1.
-
-    O `source` importa: o indice pedido e o testado, e uma URL e
-    aberta como URL.
-    """
-    print(f"PASS: OpenCV disponivel. Versao {cv2.__version__}.")
-    try:
-        _require_gui_backend()
-    except RuntimeError:
-        print(
-            "AVISO: backend de janela (HighGUI) indisponivel; a janela "
-            "do Draw nao abre. Correcao: pip install 'draw-core[gui]'."
-        )
-    else:
-        print("PASS: backend de janela (HighGUI) disponivel.")
-    all_ok = _check_models()
-
-    if not isinstance(source, int):
-        if is_hvcam_source(source):
-            return 0 if _check_hvcam_source(source) and all_ok else 1
-        if is_helper_source(source):
-            return (
-                0 if _check_helper_source(source, helper_token_file) and all_ok else 1
-            )
-        return 0 if _check_remote_source(source) and all_ok else 1
-
-    if not sys.platform.startswith("linux"):
-        print(
-            "AVISO: as checagens de /dev/video* e de permissoes Unix "
-            "valem so no Linux; testando a abertura direta da camera."
-        )
-        return 0 if _check_camera_open(source, f"camera {source}") and all_ok else 1
-
-    nodes = _video_nodes()
-    if not nodes:
-        if source >= 0 and is_wsl():
-            candidate, hv_cap = camera_module.open_wsl_hvcam_fallback(
-                source, timeout_ms=5000
-            )
-            if hv_cap is not None:
-                ok, frame = hv_cap.read()
-                hv_cap.release()
-                if ok and frame is not None:
-                    print(
-                        f"PASS: quadro lido da fonte hvcam ({candidate}). "
-                        f"Formato (altura, largura, canais): {frame.shape}."
-                    )
-                    return 0 if all_ok else 1
-                print(f"FAIL: a fonte {candidate} abriu, mas nenhum quadro chegou.")
-                return 1
-        print("FAIL: nenhum /dev/video* existe neste sistema.")
-        if is_wsl():
-            print(
-                "  Correcao: no Windows rode 'hvcam-host.exe --reverse' "
-                "(santleme/hvcam) ou anexe a camera com "
-                "bash scripts/setup_camera_wsl.sh. A alternativa e uma "
-                "camera via rede com --source."
-            )
-        else:
-            print("  Correcao: conecte uma webcam a este computador.")
-        return 1
-    print(f"PASS: dispositivos de video encontrados: {', '.join(nodes)}.")
-
-    node = f"/dev/video{source}"
-    if node not in nodes:
-        if source == 0:
-            for alt_node in nodes:
-                alt_idx = int(alt_node[len("/dev/video") :])
-                if os.access(alt_node, os.R_OK | os.W_OK) and _check_camera_open(
-                    alt_idx, alt_node
-                ):
-                    return 0 if all_ok else 1
-        print(
-            f"FAIL: {node} nao existe. Os dispositivos deste sistema "
-            f"sao: {', '.join(nodes)}."
-        )
-        print(
-            "  Correcao: use --source com um dos indices acima, ou "
-            "conecte a camera pedida."
-        )
-        return 1
-
-    access = os.access(node, os.R_OK | os.W_OK)
-    group_note = ""
-    try:
-        import grp
-
-        gid = os.stat(node).st_gid
-        try:
-            group_name = grp.getgrgid(gid).gr_name
-        except KeyError:
-            group_name = str(gid)
-        in_group = gid in os.getgroups()
-        group_note = (
-            f" Grupo dono de {node}: {group_name}. "
-            f"Este processo esta nesse grupo: {'sim' if in_group else 'nao'}."
-        )
-    except Exception:
-        group_note = ""
-    models_ok = all_ok
-    if access:
-        print(f"PASS: este processo le e escreve em {node}.{group_note}")
-        if _check_camera_open(source, node):
-            return 0 if models_ok else 1
-
-    if source == 0:
-        for alt_node in nodes:
-            if alt_node == node:
-                continue
-            alt_idx = int(alt_node[len("/dev/video") :])
-            if os.access(alt_node, os.R_OK | os.W_OK) and _check_camera_open(
-                alt_idx, alt_node
-            ):
-                return 0 if models_ok else 1
-
-    if not access:
-        print(
-            f"FAIL: este processo nao tem permissao de leitura e "
-            f"escrita em {node}.{group_note}"
-        )
-        print(
-            "  Correcao definitiva: sudo usermod -aG video $USER "
-            "(vale nas proximas sessoes)."
-        )
-        print('  Correcao nesta sessao: sg video -c "python -m draw".')
-    return 1
-
-
-def _check_camera_open(source, label):
-    """Abre a fonte local e espera um quadro por 3 s. True/False."""
-    capture = cv2.VideoCapture(source)
-    if not capture.isOpened():
-        print(
-            f"FAIL: nao consegui abrir {label}. Outro programa "
-            "provavelmente esta usando a camera."
-        )
-        return False
-    camera_module._configure_local_capture(capture)
-    frame = None
-    deadline = time.time() + 3.0
-    while time.time() < deadline:
-        ok, candidate = capture.read()
-        if ok and candidate is not None:
-            frame = candidate
-            break
-        time.sleep(0.1)
-    capture.release()
-    if frame is not None:
-        print(
-            f"PASS: quadro lido de {label}. "
-            f"Formato (altura, largura, canais): {frame.shape}."
-        )
-        return True
-    print(
-        f"FAIL: {label} abriu, mas nenhum quadro chegou em 3 "
-        "segundos. A camera pode estar ocupada ou travada."
-    )
-    return False
-
-
-def _check_helper_source(source, token_file=None):
-    """Abre uma fonte do ajudante (.drawcap/tcp://) e confere um quadro."""
-    print(f"PASS: fonte do ajudante informada: {source}.")
-    try:
-        # stall_windows=0 + prazo de registro: o check mede UM quadro
-        # dentro de um deadline total — retentar esticaria a janela,
-        # e so o timeout por recv deixaria um frame pingando passar.
-        capture = HelperCapture(
-            source,
-            timeout=5.0,
-            token_file=token_file,
-            stall_windows=0,
-            record_timeout_s=5.0,
-        )
-    except (ProtocolError, OSError) as error:
-        print(f"FAIL: {error}")
-        return 0
-    if not capture.isOpened():
-        print(
-            "FAIL: nao consegui abrir a fonte do ajudante. Confira se "
-            "o arquivo .drawcap existe ou se o ajudante esta escutando "
-            "na porta TCP."
-        )
-        return 0
-    ok, frame = capture.read()
-    capture.release()
-    if not ok or frame is None:
-        print("FAIL: a fonte abriu, mas nenhum quadro chegou em 5 segundos.")
-        return 0
-    print(
-        "PASS: quadro lido da fonte do ajudante. "
-        f"Formato (altura, largura, canais): {frame.shape}."
-    )
-    return 1
-
-
-def _check_hvcam_source(source):
-    """Abre uma fonte hvcam:// e confere que um quadro chega. 0/1."""
-    print(f"PASS: fonte hvcam informada: {source}.")
-    capture = HvcamCapture(source, timeout_ms=5000)
-    if not capture.isOpened():
-        if capture.open_error is not None:
-            print(f"FAIL: {capture.open_error}")
-        else:
-            print(
-                "FAIL: nao consegui conectar na fonte hvcam. Confira se o "
-                "hvcam-host.exe esta rodando no Windows; fora do WSL use "
-                "--source hvcam+tcp://<host>:<porta>."
-            )
-        return 0
-    ok, frame = capture.read()
-    capture.release()
-    if not ok or frame is None:
-        print("FAIL: a fonte abriu, mas nenhum quadro chegou em 5 segundos.")
-        return 0
-    print(
-        "PASS: quadro lido da fonte hvcam. "
-        f"Formato (altura, largura, canais): {frame.shape}."
-    )
-    return 1
-
-
-def _check_remote_source(url):
-    """Abre uma fonte de rede e confere que um quadro chega. 0/1."""
-    print(f"PASS: fonte de rede informada: {url}.")
-    capture = cv2.VideoCapture(url)
-    if not capture.isOpened():
-        print(
-            "FAIL: nao consegui abrir a fonte de rede. Confira a URL, "
-            "se a camera esta transmitindo e se este computador "
-            "alcanca o endereco."
-        )
-        return 0
-    frame = None
-    deadline = time.time() + 5.0
-    while time.time() < deadline:
-        ok, candidate = capture.read()
-        if ok and candidate is not None:
-            frame = candidate
-            break
-        time.sleep(0.1)
-    capture.release()
-    if frame is None:
-        print("FAIL: a fonte abriu, mas nenhum quadro chegou em 5 segundos.")
-        return 0
-    print(
-        "PASS: quadro lido da fonte de rede. "
-        f"Formato (altura, largura, canais): {frame.shape}."
-    )
-    return 1
-
-
-def _check_models():
-    """Confere os modelos contra assets/manifest.json. True se tudo bate.
-
-    Sem manifesto (o caso de um clone novo), imprime o aviso e
-    devolve True: nada a verificar nao e falha. Um .onnx/.task em
-    models/ sem entrada no manifesto e FAIL no modo estrito (padrao)
-    e AVISO com DRAW_MODEL_STRICT=0. Se algum modelo registrado estiver
-    ausente em models/, tenta baixa-lo da Release oficial antes de
-    conferir.
-    """
-    manifest_path, models = manifest_module.load_manifest()
-    ok = True
-    strict = manifest_module.strict_enabled()
-    for extra in manifest_module.unregistered_model_files():
-        label = "FAIL" if strict else "AVISO"
-        print(
-            f"{label}: {extra.name} esta em models/ e nao tem entrada no "
-            "manifesto; a carga dele e recusada no modo estrito."
-        )
-        ok = ok and not strict
-    if not models:
-        print(
-            f"AVISO: {manifest_path} sem modelos registrados; "
-            "nenhum binario foi conferido."
-        )
-        return ok
-    for name in sorted(models):
-        path = manifest_module.DEFAULT_MODELS_DIR / name
-        if not path.exists():
-            try:
-                manifest_module.ensure_models(
-                    [name],
-                    models_dir=manifest_module.DEFAULT_MODELS_DIR,
-                    manifest_path=manifest_path,
-                )
-            except RuntimeError as error:
-                print(
-                    f"AVISO: {name} esta no manifesto e nao esta em models/ "
-                    f"({error}). Baixe os modelos oficiais pela Release do repositorio."
-                )
-                continue
-        if not path.exists():
-            print(
-                f"AVISO: {name} esta no manifesto e nao esta em models/. "
-                "Baixe os modelos oficiais pela Release do repositorio."
-            )
-            continue
-        try:
-            # strict=True aqui de propósito: mismatch de hash/tamanho
-            # nunca sai como "confere com o manifesto" — vira FAIL no
-            # modo estrito e AVISO com --allow-unverified.
-            entry = manifest_module.verify_model(path, strict=True)
-        except RuntimeError as error:
-            print(f"{'FAIL' if strict else 'AVISO'}: {error}")
-            ok = ok and not strict
-            continue
-        if entry is None:
-            print(f"AVISO: {name} nao tem entrada no manifesto.")
-            continue
-        try:
-            # Calibração inválida derruba o load() da tinta; o
-            # preflight tem de dizer isso antes, não um PASS.
-            resolve_threshold(entry)
-        except RuntimeError as error:
-            print(f"FAIL: {name}: {error}")
-            ok = False
-            continue
-        print(
-            f"PASS: {name} confere com o manifesto "
-            f"({entry.get('approved_by', 'sem régua registrada')})."
-        )
-    return ok
-
-
-def _video_nodes():
-    return sorted(
-        path for path in glob.glob("/dev/video*") if path[len("/dev/video") :].isdigit()
-    )
-
-
 _SNAPSHOT_SEQ = itertools.count()
 
 
@@ -603,687 +263,6 @@ def _save_stamp():
     o contador zera a chance sem depender de resolução de relógio.
     """
     return f"{time.time_ns() // 1_000_000}_{next(_SNAPSHOT_SEQ)}"
-
-
-_GUI_PROBE = (
-    "import cv2;"
-    "cv2.namedWindow('draw-gui-probe', cv2.WINDOW_NORMAL);"
-    "cv2.destroyWindow('draw-gui-probe')"
-)
-
-
-def _gui_backend_compiled():
-    """True se a roda instalada tem backend de janela compilado.
-
-    A seção GUI de cv2.getBuildInformation lista QT/GTK/Win32/Cocoa
-    com YES/NO; a roda headless sai de fábrica com tudo NO. Formato
-    desconhecido não bloqueia — a sonda de display decide em seguida.
-    """
-    info = cv2.getBuildInformation()
-    match = re.search(
-        r"^(?P<indent>[ \t]*)GUI:[ \t]*(?P<inline>\S*)", info, re.MULTILINE
-    )
-    if match is None:
-        return True  # formato desconhecido: não bloqueia
-    inline = match.group("inline")
-    if inline:
-        # Valor inline explícito (GUI: NONE, e variantes de build
-        # que listam o backend na mesma linha).
-        return inline.upper() not in ("NONE", "NO", "OFF", "FALSE", "0")
-    # Seção multilinha: entradas mais indentadas que o cabeçalho GUI.
-    # Seções irmãs (Media I/O etc.) também são indentadas — o corte é
-    # pelo recuo do próprio "GUI:", não por "linha sem espaço".
-    base = len(match.group("indent").expandtabs())
-    for line in info[match.end() :].splitlines():
-        if not line.strip():
-            continue
-        indent = len(line) - len(line.lstrip())
-        if indent <= base:
-            break
-        if ":" in line and "YES" in line:
-            return True
-    return False
-
-
-def _require_gui_backend():
-    """Falha cedo e claro quando a janela do Draw nao pode abrir.
-
-    Dois motivos distintos: a roda headless nao compila HighGUI
-    (detectado pelo build info, sem abrir janela) e um build COM GUI
-    sem display utilizavel — o Qt aborta o processo inteiro nesse
-    caso, entao a sonda de janela roda num subprocesso descartavel.
-    """
-    if not _gui_backend_compiled():
-        raise RuntimeError(
-            "O OpenCV instalado nao tem backend de janela (HighGUI) "
-            "compilado — a roda headless nao abre cv2.imshow. Para "
-            "desenhar na tela: pip install 'draw-core[gui]'. Sem tela "
-            "(CI/servidor), use as ferramentas de lab/."
-        )
-    try:
-        result = subprocess.run(
-            [sys.executable, "-c", _GUI_PROBE],
-            timeout=15,
-            capture_output=True,
-        )
-    except (OSError, subprocess.SubprocessError):
-        result = None
-    if result is None or result.returncode != 0:
-        raise RuntimeError(
-            "O OpenCV tem backend de janela compilado, mas nenhum "
-            "display utilizavel (o Qt encerraria o processo ao abrir "
-            "a janela). Conecte um display, use X11 forwarding ou "
-            "rode as ferramentas de lab/ que nao precisam de tela."
-        )
-
-
-_WINDOW = "Draw"
-_window_sized = set()
-# Posicao de abertura. O WM escolhe sozinho e pode mapear a janela
-# fora da area visivel: sob WSLg ela nasceu em x=2237 num desktop de
-# 2944 px ("abre mas nao aparece"). O Qt so honra moveWindow com a
-# janela ja realizada, entao o pedido se repete ate o prazo — em
-# segundos, nao em exibicoes, para durar o mesmo em qualquer
-# cadencia de quadros; depois o usuario posiciona livre. Em
-# fullscreen o pedido nao sai — moveria a janela sem borda para
-# fora da origem do monitor — mas o prazo corre igual: sair da
-# tela cheia depois nao reabre o posicionamento.
-_window_place_until = [0.0]
-_WINDOW_PLACE_SECONDS = 2.5
-_WINDOW_PLACE_X, _WINDOW_PLACE_Y = 96, 48
-# Titulo unico por lancamento no WSLg: "Draw <pid>-<hex>" identifica a
-# hwnd desta sessao para o helper de foreground, sem confundir sessoes
-# abertas — o pid sozinho colide entre distros (namespaces separados).
-# Volta a "Draw" quando o helper renomeia a janela ou, na falta dele,
-# ao expirar o prazo local (busca do helper + margem).
-_window_token = [None]
-_window_title_restore_at = [0.0]
-_WSL_RAISE_POLLS = 240  # ~60 s: o RAIL pode demorar a publicar a hwnd
-_WSL_RAISE_POLL_MS = 250
-# O prazo local cobre a vida inteira do helper com folga: cada sonda
-# paga o EnumWindows alem do sleep, entao a duracao real passa do
-# nominal — restaurar o titulo no meio da busca perderia o raise.
-_WSL_TITLE_RESTORE_SECONDS = _WSL_RAISE_POLLS * _WSL_RAISE_POLL_MS / 1000 * 1.5 + 10.0
-
-
-_mouse = {}
-
-
-_UI_TICK_SECONDS = 0.016
-_HOVER_SECONDS = 0.22
-_WORDMARK_SECONDS = 0.6
-_wordmark_state = {"progress": 0.0, "origin": None, "time": None, "inside": False}
-_button_state = {"progress": [], "pressed": None, "queue": [], "time": None}
-
-
-def _button_at(x, y):
-    for i, (bx, by, bw, bh) in enumerate(view_module.button_rects(_window_size())):
-        if bx <= x < bx + bw and by - 3 <= y < by + bh:
-            return i
-    return None
-
-
-_CAMERA_MENU_SECONDS = 0.18
-_SWITCH_READY_SECONDS = 10.0
-_TOGGLE_SECONDS = 0.35
-_REACT_SECONDS = 0.9
-_camera_menu = {
-    "open": False,
-    "progress": 0.0,
-    "dot": 0.0,
-    "rows": [],
-    "items": [],
-    "current": None,
-    "busy": None,
-    "notice": None,
-    "notice_until": 0.0,
-    "request": None,
-    "time": None,
-    "scroll": 0,
-    "cam_shape": (512, 512, 3),
-}
-
-
-def _camera_label(source):
-    if isinstance(source, int):
-        return f"Camera {source}"
-    text = str(source)
-    if "://" in text:
-        return "Rede: " + text.split("://", 1)[1].split("/")[0][:20]
-    return os.path.basename(text)[:22] or text[:22]
-
-
-def _list_cameras(current):
-    """Cameras para o menu: os /dev/video* e a fonte atual, se for outra."""
-    items = [
-        (_camera_label(index), index)
-        for index in (int(node[len("/dev/video") :]) for node in _video_nodes())
-    ]
-    if current not in [source for _, source in items]:
-        items.insert(0, (_camera_label(current), current))
-    return items
-
-
-def _camera_layout():
-    count = len(_camera_menu["items"])
-    return view_module.camera_menu_layout(
-        _window_size(),
-        _camera_menu["cam_shape"],
-        view_module.blank_sheet().shape,
-        count,
-        _camera_menu["scroll"],
-    )
-
-
-def _camera_click(x, y):
-    """Clique na bolinha ou no menu de cameras. True se o clique foi usado."""
-    state = _camera_menu
-    layout = _camera_layout()
-    if state["open"]:
-        step = view_module.scroll_hit(layout, (x, y))
-        if step is not None:
-            top = layout["count"] - layout["visible"]
-            state["scroll"] = max(0, min(top, layout["first"] + step))
-            return True
-        row = view_module.row_at(layout, (x, y))
-        on_dot = view_module.point_in_dot(layout, (x, y))
-        state["open"] = False
-        row = None if row is None else layout["first"] + row
-        if row is not None and row < len(state["items"]):
-            source = state["items"][row][1]
-            if source != state["current"] and state["busy"] is None:
-                state["request"] = source
-            return True
-        return on_dot
-    if view_module.point_in_dot(layout, (x, y)):
-        state["items"] = _list_cameras(state["current"])
-        state["scroll"] = 0
-        state["open"] = True
-        _settings["open"] = False
-        return True
-    return False
-
-
-def _camera_fx():
-    """Estado animado da bolinha e do menu de cameras para o desenho."""
-    state = _camera_menu
-    now = time.monotonic()
-    last, state["time"] = state["time"], now
-    dt = 0.0 if last is None else now - last
-    pos = _mouse.get("pos")
-    layout = _camera_layout()
-    step = dt / _CAMERA_MENU_SECONDS
-    on_dot = pos is not None and view_module.point_in_dot(layout, pos)
-    state["dot"] += max(-step, min(step, (1.0 if on_dot else 0.0) - state["dot"]))
-    target = 1.0 if state["open"] else 0.0
-    state["progress"] += max(-step, min(step, target - state["progress"]))
-    count = len(state["items"])
-    if len(state["rows"]) != count:
-        state["rows"] = [0.0] * count
-    hovered = (
-        view_module.row_at(layout, pos) if pos is not None and state["open"] else None
-    )
-    if hovered is not None:
-        hovered += layout["first"]
-    for i in range(count):
-        goal = 1.0 if hovered == i else 0.0
-        state["rows"][i] += max(-step, min(step, goal - state["rows"][i]))
-    items = []
-    for (label, source), hover in zip(state["items"], state["rows"], strict=True):
-        if source == state["busy"]:
-            label = "Abrindo..."
-        elif source == state["notice"] and now < state["notice_until"]:
-            label = "Nao abriu"
-        items.append(
-            {"label": label, "selected": source == state["current"], "hover": hover}
-        )
-    first = layout["first"]
-    return {
-        "dot": state["dot"],
-        "opened": state["open"],
-        "progress": state["progress"],
-        "items": items[first : first + layout["visible"]],
-        "count": count,
-        "first": first,
-    }
-
-
-_SETTINGS_ITEMS = (
-    ("probe", "Coordenadas e RGB"),
-    ("latency", "Latencia"),
-    ("fps", "FPS"),
-    ("fullscreen", "Tela cheia"),
-)
-_settings = {
-    "open": False,
-    "progress": 0.0,
-    "gear": 0.0,
-    "rows": [0.0] * len(_SETTINGS_ITEMS),
-    "on_p": [0.0] * len(_SETTINGS_ITEMS),
-    "react": [1.0] * len(_SETTINGS_ITEMS),
-    "dir": [1] * len(_SETTINGS_ITEMS),
-    "time": None,
-    "on": {key: False for key, _ in _SETTINGS_ITEMS},
-}
-_hud = {"captured_at": None, "fps": None}
-_fullscreen_applied = [False]
-
-
-def _settings_layout():
-    return view_module.settings_menu_layout(_window_size(), len(_SETTINGS_ITEMS))
-
-
-def _settings_click(x, y):
-    """Clique na engrenagem ou no menu de opcoes. True se foi usado."""
-    state = _settings
-    layout = _settings_layout()
-    on_gear = view_module.point_in_gear(layout, (x, y))
-    if state["open"]:
-        row = view_module.row_at(layout, (x, y))
-        if row is not None and row < len(_SETTINGS_ITEMS):
-            key = _SETTINGS_ITEMS[row][0]
-            state["on"][key] = not state["on"][key]
-            state["dir"][row] = 1 if state["on"][key] else -1
-            state["react"][row] = 0.0
-            return True
-        state["open"] = False
-        return on_gear
-    if on_gear:
-        state["open"] = True
-        _camera_menu["open"] = False
-        return True
-    return False
-
-
-def _settings_fx():
-    """Estado animado da engrenagem e do menu de opcoes para o desenho."""
-    state = _settings
-    now = time.monotonic()
-    last, state["time"] = state["time"], now
-    step = 0.0 if last is None else (now - last) / _CAMERA_MENU_SECONDS
-    pos = _mouse.get("pos")
-    layout = _settings_layout()
-    on_gear = pos is not None and view_module.point_in_gear(layout, pos)
-    state["gear"] += max(-step, min(step, (1.0 if on_gear else 0.0) - state["gear"]))
-    target = 1.0 if state["open"] else 0.0
-    state["progress"] += max(-step, min(step, target - state["progress"]))
-    hovered = (
-        view_module.row_at(layout, pos) if pos is not None and state["open"] else None
-    )
-    items = []
-    for i, (key, label) in enumerate(_SETTINGS_ITEMS):
-        goal = 1.0 if hovered == i else 0.0
-        state["rows"][i] += max(-step, min(step, goal - state["rows"][i]))
-        dt = 0.0 if last is None else now - last
-        slide = dt / _TOGGLE_SECONDS
-        aim = 1.0 if state["on"][key] else 0.0
-        state["on_p"][i] += max(-slide, min(slide, aim - state["on_p"][i]))
-        state["react"][i] = min(1.0, state["react"][i] + dt / _REACT_SECONDS)
-        items.append(
-            {
-                "label": label,
-                "on": state["on"][key],
-                "hover": state["rows"][i],
-                "on_p": state["on_p"][i],
-                "dir": state["dir"][i],
-                "react": state["react"][i],
-            }
-        )
-    return {
-        "gear": state["gear"],
-        "opened": state["open"],
-        "progress": state["progress"],
-        "items": items,
-    }
-
-
-def _hud_values():
-    """Valores do painel da camera: so o que esta ligado na engrenagem."""
-    on = _settings["on"]
-    captured_at = _hud["captured_at"]
-    latency = None
-    if on["latency"] and captured_at is not None:
-        latency = (time.monotonic() - captured_at) * 1000.0
-    return {
-        "probe": _mouse.get("pos") if on["probe"] else None,
-        "latency": latency,
-        "fps": _hud["fps"] if on["fps"] else None,
-    }
-
-
-_view_map = {"scale": 1.0, "offset": (0, 0)}
-
-
-def _on_mouse(event, x, y, flags, param):
-    scale, (ox, oy) = _view_map["scale"], _view_map["offset"]
-    x, y = int((x - ox) / scale), int((y - oy) / scale)
-    _mouse["pos"] = (x, y)
-    if event == cv2.EVENT_LBUTTONUP and (_settings_click(x, y) or _camera_click(x, y)):
-        _button_state["pressed"] = None
-        return
-    if event == cv2.EVENT_LBUTTONDOWN:
-        _button_state["pressed"] = _button_at(x, y)
-    elif event == cv2.EVENT_LBUTTONUP:
-        pressed, _button_state["pressed"] = _button_state["pressed"], None
-        if pressed is not None and pressed == _button_at(x, y):
-            keys = view_module.footer_buttons()
-            _button_state["queue"].append(ord(keys[pressed][2]))
-
-
-def _button_fx():
-    """Progresso de hover (0..1) por botao, suavizado no tempo."""
-    count = len(view_module.footer_buttons())
-    progress = _button_state["progress"]
-    if len(progress) != count:
-        progress[:] = [0.0] * count
-    now = time.monotonic()
-    last = _button_state["time"]
-    _button_state["time"] = now
-    step = 0.0 if last is None else (now - last) / _HOVER_SECONDS
-    pos = _mouse.get("pos")
-    hovered = _button_at(*pos) if pos is not None else None
-    for i in range(count):
-        target = 1.0 if hovered == i else 0.0
-        progress[i] += max(-step, min(step, target - progress[i]))
-    return list(progress)
-
-
-def _ui_state():
-    """Estado visual da interface fora da camera: pisca, botoes, mouse, janela."""
-    return {
-        "rec_on": _rec_on(),
-        "buttons": _button_fx(),
-        "pressed": _button_state["pressed"],
-        "size": _window_size(),
-        "pos": _mouse.get("pos"),
-        "wordmark": _wordmark_fx(),
-        "camera": _camera_fx(),
-        "settings": _settings_fx(),
-        "hud": _hud_values(),
-    }
-
-
-def _ui_signature(ui):
-    return (
-        ui["rec_on"],
-        tuple(round(v, 3) for v in ui["buttons"]),
-        ui["pressed"],
-        ui["size"],
-        ui["pos"],
-        round(ui["wordmark"][0], 3),
-        round(ui["camera"]["dot"], 3),
-        round(ui["camera"]["progress"], 3),
-        tuple(round(item["hover"], 3) for item in ui["camera"]["items"]),
-        tuple(item["label"] for item in ui["camera"]["items"]),
-        round(ui["settings"]["gear"], 3),
-        round(ui["settings"]["progress"], 3),
-        tuple(
-            (round(item["hover"], 3), round(item["on_p"], 3), round(item["react"], 3))
-            for item in ui["settings"]["items"]
-        ),
-        None if ui["hud"]["latency"] is None else int(ui["hud"]["latency"] // 25),
-        None if ui["hud"]["fps"] is None else round(ui["hud"]["fps"], 1),
-    )
-
-
-def _wordmark_fx():
-    """Progresso do hover no nome DRAW e ponto onde o mouse o tocou."""
-    state = _wordmark_state
-    now = time.monotonic()
-    last, state["time"] = state["time"], now
-    step = 0.0 if last is None else (now - last) / _WORDMARK_SECONDS
-    pos = _mouse.get("pos")
-    inside = False
-    if pos is not None:
-        bx, by, bw, bh = view_module.wordmark_rect(_window_size())
-        inside = bx <= pos[0] < bx + bw and by <= pos[1] < by + bh
-    if inside and not state["inside"]:
-        state["origin"] = pos
-    state["inside"] = inside
-    target = 1.0 if inside else 0.0
-    state["progress"] += max(-step, min(step, target - state["progress"]))
-    return state["progress"], state["origin"]
-
-
-def _next_key():
-    """Tecla do waitKey ou, se nao houver, um clique de botao pendente."""
-    key = cv2.waitKey(1) & 0xFF
-    queue = _button_state["queue"]
-    if key == 0xFF and queue:
-        return queue.pop(0)
-    return key
-
-
-def _rec_on():
-    """Alterna o ponto de gravacao a cada 1 s."""
-    return int(time.monotonic() / 1.0) % 2 == 0
-
-
-def _window_rect():
-    """Largura e altura da area de desenho da janela, ou None sem janela."""
-    try:
-        _, _, w, h = cv2.getWindowImageRect(_WINDOW)
-    except cv2.error:
-        return None
-    return w, h
-
-
-def _window_size():
-    """Tamanho atual da area de desenho da janela (padrao antes de abrir)."""
-    default = (1600, 640)
-    rect = _window_rect() if _window_sized else None
-    return rect if rect and rect[0] >= 320 and rect[1] >= 160 else default
-
-
-def _start_wsl_foreground_helper(token):
-    """Lanca o helper que traz a janela nova para frente do desktop Windows.
-
-    O WSLg mapeia a janela abaixo da janela ativa do Windows — com um
-    browser maximizado ela nasce invisivel mesmo dentro da tela. O
-    Wayland nao deixa o cliente se levantar (move/raise/_NET_ACTIVE_WINDOW
-    e o TOPMOST do Qt sao engolidos), entao a subida vai pelo lado
-    Windows: AttachThreadInput na thread da janela ativa +
-    SetForegroundWindow. A hwnd e identificada pelo titulo unico do
-    lancamento — o RAIL pode adicionar afixos em volta (" (Ubuntu)",
-    "[WARN:COPY MODE] ..." com captura de tela ativa), entao a busca e
-    por substring e sessoes antigas nunca entram nela. Ao achar, o
-    helper levanta a janela e
-    devolve o titulo normal via SetWindowText. Retorna o processo ou
-    None fora do WSL/se o powershell nao subir; falhar em qualquer
-    passo so perde a subida, nada mais.
-    """
-    if not camera_module.is_wsl():
-        return None
-    ps = (
-        "$s='using System;using System.Text;using System.Runtime.InteropServices;"
-        'public class W{[DllImport("user32.dll")]public static extern bool '
-        "EnumWindows(E e,IntPtr l);public delegate bool E(IntPtr h,IntPtr l);"
-        '[DllImport("user32.dll")]public static extern int GetWindowTextA('
-        'IntPtr h,StringBuilder s,int n);[DllImport("user32.dll")]public static '
-        "extern bool SetWindowTextA(IntPtr h,string s);"
-        '[DllImport("user32.dll")]public static '
-        'extern IntPtr GetForegroundWindow();[DllImport("user32.dll")]public '
-        "static extern uint GetWindowThreadProcessId(IntPtr h,out uint p);"
-        '[DllImport("user32.dll")]public static extern bool AttachThreadInput('
-        'uint a,uint b,bool at);[DllImport("user32.dll")]public static extern '
-        'bool SetForegroundWindow(IntPtr h);[DllImport("user32.dll")]public '
-        "static extern bool BringWindowToTop(IntPtr h);"
-        '[DllImport("user32.dll")]public static extern bool ShowWindowAsync('
-        'IntPtr h,int n);[DllImport("kernel32.dll")]public static extern uint '
-        "GetCurrentThreadId();}';"
-        "Add-Type -TypeDefinition $s;$t=[IntPtr]::Zero;$n=0;"
-        "while($t -eq [IntPtr]::Zero -and $n -lt __POLLS__){$n++;"
-        "[W]::EnumWindows({param($h,$l)$b=New-Object Text.StringBuilder 512;"
-        "[W]::GetWindowTextA($h,$b,512)|Out-Null;"
-        "if($b.ToString() -like '*__TOKEN__*'){$script:t=$h};return $true},"
-        "[IntPtr]::Zero)|Out-Null;"
-        "if($t -eq [IntPtr]::Zero){Start-Sleep -Milliseconds __POLLMS__}};"
-        "if($t -ne [IntPtr]::Zero){$fg=[W]::GetForegroundWindow();"
-        "$ft=[W]::GetWindowThreadProcessId($fg,[ref]([uint32]$p=0));"
-        "$me=[W]::GetCurrentThreadId();"
-        "[W]::AttachThreadInput($me,$ft,$true)|Out-Null;"
-        "[W]::ShowWindowAsync($t,5)|Out-Null;"
-        "[W]::BringWindowToTop($t)|Out-Null;"
-        "[W]::SetForegroundWindow($t)|Out-Null;"
-        "[W]::AttachThreadInput($me,$ft,$false)|Out-Null;"
-        "[W]::SetWindowTextA($t,'__TITLE__')|Out-Null}"
-    )
-    ps = (
-        ps.replace("__TOKEN__", token)
-        .replace("__POLLS__", str(_WSL_RAISE_POLLS))
-        .replace("__POLLMS__", str(_WSL_RAISE_POLL_MS))
-        .replace("__TITLE__", _WINDOW)
-    )
-    try:
-        return subprocess.Popen(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except OSError:
-        return None
-
-
-def _publish_unique_title_and_raise():
-    """Publica o titulo unico do lancamento e dispara o helper de foreground.
-
-    A janela sai como "Draw <pid>-<hex>" — o RAIL a apresenta no Windows
-    como "Draw <pid>-<hex> (Ubuntu)", com possiveis afixos extras — e
-    o helper casa por substring, entao nenhuma sessao antiga pode ser
-    levantada por engano. O
-    titulo volta a "Draw" quando o helper renomeia a hwnd ou, sem ele,
-    ao expirar o prazo local. Sem GUI do Qt o passo e ignorado.
-    """
-    if not camera_module.is_wsl():
-        return
-    token = f"{_WINDOW} {os.getpid()}-{os.urandom(3).hex()}"
-    try:
-        cv2.setWindowTitle(_WINDOW, token)
-    except cv2.error:
-        return
-    _window_token[0] = token
-    _window_title_restore_at[0] = time.monotonic() + _WSL_TITLE_RESTORE_SECONDS
-    _start_wsl_foreground_helper(token)
-
-
-def _open_window(fullscreen):
-    """Cria a janela do Draw: sem barras do Qt, redimensionavel, com mouse."""
-    cv2.namedWindow(
-        _WINDOW,
-        cv2.WINDOW_NORMAL | cv2.WINDOW_GUI_NORMAL | cv2.WINDOW_FREERATIO,
-    )
-    _window_sized.clear()
-    _window_place_until[0] = 0.0
-    _settings["on"]["fullscreen"] = fullscreen
-    _fullscreen_applied[0] = False
-    cv2.setMouseCallback(_WINDOW, _on_mouse)
-    _publish_unique_title_and_raise()
-
-
-def _ui_wait_seconds():
-    """Espera por quadro: curta com o mouse na janela, para a interface fluir."""
-    return _UI_TICK_SECONDS if _mouse.get("pos") is not None else _FRAME_WAIT_SECONDS
-
-
-def _apply_fullscreen():
-    """Liga ou desliga a tela cheia, que esconde a moldura da janela."""
-    want = _settings["on"]["fullscreen"]
-    if _fullscreen_applied[0] != want:
-        _fullscreen_applied[0] = want
-        cv2.setWindowProperty(
-            _WINDOW,
-            cv2.WND_PROP_FULLSCREEN,
-            cv2.WINDOW_FULLSCREEN if want else cv2.WINDOW_NORMAL,
-        )
-
-
-def _open_ready_source(target, helper_token_file=None, ready_seconds=None, rotation=0):
-    """Abre a fonte e so a devolve depois do primeiro quadro; senao levanta.
-
-    A fonte antiga so e trocada por uma que ja entregou quadro: uma
-    camera que abre mas nao le deixa a atual no ar. O orcamento de
-    ready_seconds conta desde o inicio da abertura (a recuperacao de
-    exposicao do open_capture pode gastar varios segundos); a espera
-    pelo primeiro quadro usa o que sobrou, com piso de 1 s. A abertura
-    em si nao e cancelavel, mas roda numa thread e nao trava a janela.
-    """
-    started = time.monotonic()
-    capture = open_capture(target, helper_token_file=helper_token_file)
-    candidate = LatestFrameCapture(capture, rotation=rotation).start()
-    budget = _SWITCH_READY_SECONDS if ready_seconds is None else ready_seconds
-    remaining = max(1.0, budget - (time.monotonic() - started))
-    if candidate.wait_next(0, timeout=remaining) is None:
-        candidate.stop(force=False)
-        raise RuntimeError("a camera abriu mas nao entregou quadros")
-    return candidate
-
-
-def _waiting_view():
-    """Quadro de camera vazio com o aviso, para a interface seguir completa."""
-    image = np.zeros((720, 1280, 3), dtype=np.uint8)
-    for i, text in enumerate(
-        ("Aguardando quadros da fonte", "A leitura esta lenta ou parada.")
-    ):
-        cv2.putText(
-            image,
-            text,
-            (320, 330 + i * 48),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1.0 if i == 0 else 0.7,
-            (230, 235, 235) if i == 0 else (150, 156, 154),
-            2 if i == 0 else 1,
-            cv2.LINE_AA,
-        )
-    return image
-
-
-def _show(image):
-    """Mostra o quadro na janela sem deixar o Qt reescalar a imagem.
-
-    A vista tem tamanho fixo; maximizada, o Qt a esticaria com filtro
-    barato. Aqui o redimensionamento e feito com interpolacao de
-    qualidade, mantendo a proporcao e preenchendo o resto com o fundo.
-    Na primeira exibicao a janela abre no tamanho nativo da vista.
-    """
-    _apply_fullscreen()
-    ih, iw = image.shape[:2]
-    if not _window_sized:
-        cv2.resizeWindow(_WINDOW, iw, ih)
-        _window_sized.add(True)
-        _window_place_until[0] = time.monotonic() + _WINDOW_PLACE_SECONDS
-    elif (
-        not _settings["on"]["fullscreen"] and time.monotonic() < _window_place_until[0]
-    ):
-        try:
-            cv2.moveWindow(_WINDOW, _WINDOW_PLACE_X, _WINDOW_PLACE_Y)
-        except cv2.error:
-            _window_place_until[0] = 0.0
-    if _window_token[0] is not None and time.monotonic() >= _window_title_restore_at[0]:
-        try:
-            cv2.setWindowTitle(_WINDOW, _WINDOW)
-        except cv2.error:
-            pass
-        _window_token[0] = None
-    w, h = _window_rect() or (0, 0)
-    _view_map.update(scale=1.0, offset=(0, 0))
-    if w > 0 and h > 0 and (w, h) != (iw, ih):
-        scale = min(w / iw, h / ih)
-        nw, nh = max(1, round(iw * scale)), max(1, round(ih * scale))
-        interp = cv2.INTER_AREA if scale < 1 else cv2.INTER_LANCZOS4
-        image = cv2.resize(image, (nw, nh), interpolation=interp)
-        dx, dy = max(0, w - nw), max(0, h - nh)
-        _view_map.update(scale=nw / iw, offset=(dx // 2, dy // 2))
-        image = cv2.copyMakeBorder(
-            image,
-            dy // 2,
-            dy - dy // 2,
-            dx // 2,
-            dx - dx // 2,
-            cv2.BORDER_CONSTANT,
-            value=view_module.COLOR_BG_STUDIO,
-        )
-    cv2.imshow(_WINDOW, image)
 
 
 def _report_format_suggestion(telemetry, suggestion):
@@ -1383,7 +362,7 @@ def run(
 
     _apply_opencv_thread_cap()
     _require_gui_backend()
-    _open_window(fullscreen)
+    ui_module._open_window(fullscreen)
 
     # Recursos que o finally derruba; None = ainda nao iniciado.
     # Depois do probe de GUI, TODO o setup roda dentro do try: uma
@@ -1685,7 +664,6 @@ def run(
                 on_acquisition=emit_acquisition,
                 on_ink=ink_stream.publish if ink_stream is not None else _ignore_ink,
                 ink_meta=ink_stream is not None,
-                save_page_snapshot=save_page_snapshot,
                 config=pipeline_config,
             )
             tracker = pipeline.tracker
@@ -1703,7 +681,7 @@ def run(
         ui_inputs = None
         ui_signature = None
 
-        _camera_menu["current"] = parse_source(source)
+        ui_module._camera_menu["current"] = parse_source(source)
         base_rotation = rotation
         seq_offset = 0
         reset_source = False
@@ -1720,13 +698,13 @@ def run(
         switch = {"thread": None, "result": None}
 
         def start_switch(target):
-            _camera_menu["busy"] = target
+            ui_module._camera_menu["busy"] = target
 
             def work():
                 try:
                     # Nova fonte abre com a rotacao base da CLI (nao herda
                     # o flip automatico inferido para a camera anterior).
-                    candidate = _open_ready_source(
+                    candidate = ui_module._open_ready_source(
                         target, helper_token_file, rotation=base_rotation
                     )
                     switch["result"] = (target, candidate, None)
@@ -1738,20 +716,20 @@ def run(
 
         def service_camera_switch():
             nonlocal frame_source, last_seq, seq_offset, reset_source, rotation
-            target = _camera_menu["request"]
+            target = ui_module._camera_menu["request"]
             if target is not None and switch["thread"] is None:
-                _camera_menu["request"] = None
+                ui_module._camera_menu["request"] = None
                 start_switch(target)
             result = switch["result"]
             if result is None:
                 return
             switch["result"], switch["thread"] = None, None
             target, candidate, error = result
-            _camera_menu["busy"] = None
+            ui_module._camera_menu["busy"] = None
             if error is not None:
-                print(f"Nao consegui abrir {_camera_label(target)}: {error}")
-                _camera_menu["notice"] = target
-                _camera_menu["notice_until"] = time.monotonic() + 2.5
+                print(f"Nao consegui abrir {ui_module._camera_label(target)}: {error}")
+                ui_module._camera_menu["notice"] = target
+                ui_module._camera_menu["notice_until"] = time.monotonic() + 2.5
                 return
             old, frame_source = frame_source, candidate
             old.stop(force=False)
@@ -1763,14 +741,14 @@ def run(
             if auto_orienter is not None:
                 auto_orienter.reset_streak()
             reset_source = True
-            _camera_menu["current"] = target
-            print(f"Camera trocada para {_camera_label(target)}.")
+            ui_module._camera_menu["current"] = target
+            print(f"Camera trocada para {ui_module._camera_label(target)}.")
 
         def render_ui(status, canvas):
             nonlocal last_view, ui_signature
-            ui = _ui_state()
-            _camera_menu["cam_shape"] = status.shape
-            ui_signature = _ui_signature(ui)
+            ui = ui_module._ui_state()
+            ui_module._camera_menu["cam_shape"] = status.shape
+            ui_signature = ui_module._ui_signature(ui)
             # O resize do painel e cacheado por publicacao: geracao +
             # versao identificam o conteudo do canvas acumulado (a
             # versao reinicia por geracao). Canvas sem publicacao
@@ -1793,11 +771,13 @@ def run(
                 hud=ui["hud"],
                 canvas_version=canvas_version,
             )
-            _show(last_view)
+            ui_module._show(last_view)
 
         while True:
             service_camera_switch()
-            packet = frame_source.wait_next(last_seq, timeout=_ui_wait_seconds())
+            packet = frame_source.wait_next(
+                last_seq, timeout=ui_module._ui_wait_seconds()
+            )
             if packet is None and not frame_source.dead:
                 # Fonte viva sem quadro novo na janela: a leitura pode
                 # estar dentro de um stall TCP prolongado. Antes do
@@ -1806,11 +786,11 @@ def run(
                 # segue viva com o ultimo quadro. As teclas sao
                 # atendidas sem realimentar o quadro velho no pipeline.
                 if ui_inputs is None:
-                    ui_inputs = (_waiting_view(), view_module.blank_sheet())
+                    ui_inputs = (ui_module._waiting_view(), view_module.blank_sheet())
                     render_ui(*ui_inputs)
-                elif _ui_signature(_ui_state()) != ui_signature:
+                elif ui_module._ui_signature(ui_module._ui_state()) != ui_signature:
                     render_ui(*ui_inputs)
-                key = _next_key()
+                key = ui_module._next_key()
                 if key == ord("s"):
                     # Marcadores nao tem mascara confirmada: o salvavel
                     # visivel na tela de espera e a folha retificada.
@@ -1832,12 +812,12 @@ def run(
                     "A camera abriu, mas parou de entregar quadros. "
                     "Feche outros programas usando a camera e tente de novo."
                 )
-                _show(view_module.dead_source_view(last_view))
+                ui_module._show(view_module.dead_source_view(last_view))
                 cv2.waitKey(_DEAD_NOTICE_MS)
                 break
             frame = packet.image
             last_seq = packet.sequence
-            _hud["captured_at"] = packet.captured_at
+            ui_module._hud["captured_at"] = packet.captured_at
             if seq_offset:
                 packet = dataclasses.replace(packet, sequence=last_seq + seq_offset)
             if reset_source:
@@ -1861,7 +841,7 @@ def run(
                 tel_loop_fps = round(
                     tel_window_frames / (tel_now - tel_window_start), 2
                 )
-                _hud["fps"] = tel_loop_fps
+                ui_module._hud["fps"] = tel_loop_fps
                 tel_window_start = tel_now
                 tel_window_frames = 0
             tel_fields = {
@@ -1948,7 +928,7 @@ def run(
                             f"{new_orient} ({config.PAPER_W}x{config.PAPER_H})."
                         )
                 if loop_outcome == INK_WORKER_FAILED:
-                    _show(
+                    ui_module._show(
                         view_module.error_view(
                             last_view,
                             "A tinta pagina->limpa falhou",
@@ -1997,7 +977,7 @@ def run(
                 )
                 render_ui(status, panel)
                 ui_inputs = (status, panel)
-                key = _next_key()
+                key = ui_module._next_key()
                 if key == ord("s"):
                     # Sem folha, so o canvas confirmado retido salva.
                     save_canvas_snapshot()
@@ -2055,7 +1035,7 @@ def run(
                 render_ui(status, canvas)
                 ui_inputs = (status, canvas)
 
-                key = _next_key()
+                key = ui_module._next_key()
                 if key == ord("s"):
                     save_canvas_snapshot(canvas)
                 handle_baseline_key(key)
@@ -2357,9 +1337,11 @@ def main():
             )
     try:
         if legacy_ink:
-            ink_config = InkConfig()
+            # Comparacao com o legado: sem a guarda de papel (#129), que o
+            # laco legado nao tem.
+            ink_config = InkConfig(paper_guard=False)
             if args.ink_vote is not None:
-                ink_config = InkConfig.strict_vote(args.ink_vote)
+                ink_config = InkConfig.strict_vote(args.ink_vote, paper_guard=False)
             if args.ink_interval is not None:
                 ink_config = dataclasses.replace(
                     ink_config, pass_interval_s=args.ink_interval

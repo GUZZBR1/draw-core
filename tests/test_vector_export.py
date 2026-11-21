@@ -67,6 +67,75 @@ def test_pipeline_simplifies_and_roundtrips(tmp_path):
     assert ev.iou(r_dxf, ink) >= 0.45
 
 
+def test_simplify_polylines_keeps_collinear_backtrack_overshoot():
+    """O approxPolyDP media distância à reta infinita das âncoras: um
+    retrocesso colinear que ultrapassa a âncora tinha distância zero e
+    sumia do SVG/DXF. Com distância ao SEGMENTO (simplify compartilhado
+    com vectorize.py), o vai-e-vem do traço fica."""
+    raw = [
+        {
+            "points": np.array([[0, 0], [30, 0], [10, 0]], dtype=np.float64),
+            "closed": False,
+        }
+    ]
+    simplified = ev.simplify_polylines(raw, 1.0)
+    assert len(simplified[0]["points"]) == 3
+    assert (simplified[0]["points"][1] == [30, 0]).all()
+
+
+def test_simplify_polylines_keeps_small_closed_loop():
+    """Laço fechado menor que a tolerância não vira reta de ida e volta:
+    quando a simplificação deixaria só 2 vértices distintos, o laço
+    original é mantido."""
+    diamond = np.array([[0, 1], [1, 0], [2, 1], [1, 2]], dtype=np.float64)
+    raw = [{"points": diamond, "closed": True}]
+    simplified = ev.simplify_polylines(raw, 2.5)
+    assert len(simplified[0]["points"]) == 4
+    assert (simplified[0]["points"] == diamond).all()
+
+
+def test_simplify_closed_collapse_does_not_repeat_anchor():
+    """Com os dois arcos colapsados o laço fechado tem 2 vértices
+    distintos e 2 entradas — não [p, q, p]."""
+    diamond = np.array([[0, 1], [1, 0], [2, 1], [1, 2]], dtype=np.float64)
+    out = ev.simplify(diamond, 2.5, True)
+    assert len(out) == len(np.unique(out, axis=0)) == 2
+
+
+def test_simplify_closed_mixed_collapsed_arc_keeps_interior_vertex():
+    """Um arco colapsa (s2 com 2 vértices) e o outro mantém o vértice
+    interno: o resultado é o triângulo, sem repetir a âncora inicial."""
+    pts = np.array([[0, 0], [5, 3], [10, 0], [5, 0.2]], dtype=np.float64)
+    out = ev.simplify(pts, 1.0, True)
+    assert out.tolist() == [[0, 0], [5, 3], [10, 0]]
+
+
+def _same_cycle(out, expected):
+    """True se `out` é `expected` percorrido na mesma ordem, de qualquer
+    ponto de partida (a âncora inicial do laço fechado pode variar)."""
+    out = [tuple(p) for p in np.asarray(out).tolist()]
+    expected = [tuple(p) for p in expected]
+    if len(out) != len(expected):
+        return False
+    return any(out[k:] + out[:k] == expected for k in range(len(out)))
+
+
+def test_simplify_closed_no_arc_collapses_keeps_every_vertex_in_order():
+    """Nenhum arco colapsa: todos os 6 vértices ficam, na ordem original."""
+    pts = np.array(
+        [[0, 0], [5, -3], [10, 0], [10, 10], [5, 13], [0, 10]], dtype=np.float64
+    )
+    out = ev.simplify(pts, 1.0, True)
+    assert _same_cycle(out, pts.tolist())
+
+
+def test_simplify_closed_drops_shallow_point_and_keeps_corner_order():
+    """O ponto raso (5, 0.2) sai; os quatro cantos ficam em ordem."""
+    pts = np.array([[0, 0], [5, 0.2], [10, 0], [10, 10], [0, 10]], dtype=np.float64)
+    out = ev.simplify(pts, 1.0, True)
+    assert _same_cycle(out, [(0, 0), (10, 0), (10, 10), (0, 10)])
+
+
 def test_two_by_two_dot_survives_thinning_and_exports(tmp_path):
     # Um ponto 2x2 passa por filter_microfragments (area=4) mas o
     # Zhang-Suen o apagava inteiro: o export omitia o ponto.

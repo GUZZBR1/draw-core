@@ -247,9 +247,11 @@ types in `contracts.py`.
 - `draw/ink.py`: still imported by `ink_layers`, `loop`, `app`, `view`, but
   mostly for `render_canvas`. `extract_ink`, `InkAccumulator` and
   `SessionBaselineInk` serve only the `--legacy-ink` / `--markers` paths.
-  Migrate only `render_canvas` + paper constants; drop the legacy ink stack,
-  `--legacy-ink`, `--markers`, `--ink-model` (the `ink_model` module does not
-  even exist).
+  Migrate only `render_canvas` + paper constants; drop the legacy ink stack
+  and `--ink-model` (the `ink_model` module does not even exist).
+  What survived, revising the original decision: `--legacy-ink` stays as a
+  compat preset that turns off gain and detect-wake (kept by 2e3c1cf), and
+  `--markers` stays as a live mode that kept evolving (PRs #50, #84, #91).
 
 ## Intentional deviations from legacy
 
@@ -266,6 +268,13 @@ or by the migration). Parity runs must account for them.
   quads with a rolled anchor and never rested).
 - Pipeline: the detector's hand mask feeds `seg_hand_occlusion` regardless
   of `coverage` (legacy tied both detection extras to the same flag).
+- Ink worker: photometric occlusion guard (`InkConfig.paper_guard`, issue
+  #129). Regions that do not look like exposed paper (dark/chromatic block
+  versus the p90 paper reference) are frozen like an occlusion: no removal of
+  confirmed ink, no new votes, provisional layer held, for
+  `occlusion_hold_passes` passes after the evidence disappears. Independent of
+  MediaPipe. Limitation: a solid dark fill wider than ~32 px reads as shadow
+  (thin and thick pen strokes do not).
 - Pipeline: with `canvas_persist` off, a tracker drop also clears the
   rendered canvas and the provisional layer (legacy cleared only the
   confirmed mask). Neither change alters the production preset.

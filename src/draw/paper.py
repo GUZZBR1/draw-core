@@ -425,15 +425,6 @@ def perspective_matrix(corners, destination=None):
     return cv2.getPerspectiveTransform(src, dst)
 
 
-def warp_points(points, corners, destination=None):
-    """Projeta pontos Nx2 do frame da câmera para o espaço retificado."""
-    pts = np.asarray(points, dtype=np.float32).reshape(-1, 1, 2)
-    if pts.size == 0:
-        return np.zeros((0, 2), dtype=np.float32)
-    matrix = perspective_matrix(corners, destination=destination)
-    return cv2.perspectiveTransform(pts, matrix).reshape(-1, 2)
-
-
 def warp_sheet(frame, corners, destination=None):
     """Retifica a folha a partir de quatro cantos explícitos."""
     matrix = perspective_matrix(corners, destination=destination)
