@@ -609,6 +609,18 @@ def _leading_run(mask):
     return np.where(inv.any(axis=1), first, mask.shape[1])
 
 
+def _extent(cols, need):
+    """(K,) até onde vai o trecho grosso a partir da borda da faixa.
+
+    A primeira janela de `need` colunas vale com a mesma tolerância do voto
+    (>= 85% grosso: uma coluna fina logo na borda não zera a medida); dali em
+    diante o trecho tem de ser contínuo.
+    """
+    lead = _leading_run(cols)
+    ok = cols[:, :need].mean(axis=1) >= 0.85
+    return np.where(ok, need + _leading_run(cols[:, need:]), lead)
+
+
 def _joined_through(raw, gutter):
     """(K, X): trecho da linha dentro da faixa que continua grosso fora dela.
 
@@ -617,9 +629,10 @@ def _joined_through(raw, gutter):
     a linha segue grossa (>= pauta + margem) por _PROB_MIN_RUN colunas logo
     antes E logo depois da faixa. O ombro da sombra, que afina de forma
     irregular, não dura isso — e quando dura, aparece escalonado em muitas
-    linhas: nesse padrão comum só isenta quem continua ALÉM do comprimento
-    comum do ombro (um traço atravessa mais longe). Na divisa das metades a
-    trilha só vê um lado, e a borda da trilha não conta como ponta a conferir.
+    linhas: nesse padrão comum só isenta quem vai claramente ALÉM do ombro
+    mais longo das outras linhas (um traço atravessa mais longe). Na divisa
+    das metades a trilha só vê um lado, e a borda da trilha não conta como
+    ponta a conferir.
     """
     k, x = raw.shape
     out = np.zeros_like(raw)
@@ -627,20 +640,27 @@ def _joined_through(raw, gutter):
     for a, b in zip(edges[::2], edges[1::2], strict=False):
         need = _PROB_MIN_RUN
         left = right = None
-        ext_l = ext_r = None
         if a >= need:
             left = raw[:, a - need : a].mean(axis=1) >= 0.85
-            ext_l = _leading_run(raw[:, :a][:, ::-1])
         if b + need <= x:
             right = raw[:, b : b + need].mean(axis=1) >= 0.85
-            ext_r = _leading_run(raw[:, b:])
         sides = [s for s in (left, right) if s is not None]
         if len(sides) == 2 or (len(sides) == 1 and (a == 0 or b == x)):
             cont = np.logical_and.reduce(sides)
             if cont.sum() > max(2, k // 4):
-                ext = np.minimum.reduce([e for e in (ext_l, ext_r) if e is not None])
-                common = float(np.median(ext[cont]))
-                cont &= ext > common + _GUTTER_EDGE_RUN
+                exts = []
+                if left is not None:
+                    exts.append(_extent(raw[:, :a][:, ::-1], need))
+                if right is not None:
+                    exts.append(_extent(raw[:, b:], need))
+                ext = np.minimum.reduce(exts)
+                vals = ext[cont]
+                srt = np.sort(vals)
+                top, second = srt[-1], srt[-2]
+                n_top = int((vals == top).sum())
+                others = np.where((vals == top) & (n_top == 1), second, top)
+                keep = vals > others + _GUTTER_EDGE_RUN
+                cont &= np.isin(np.arange(k), np.flatnonzero(cont)[keep])
             out[:, a:b] = cont[:, None]
     return out
 
@@ -678,7 +698,16 @@ def _stroke_on_shade(run, gutter):
     # uma ondulação da sombra desvia várias linhas na mesma coluna; um traço
     # desvia só a linha que ele toca — conta só o desvio isolado
     shared = above.sum(axis=0) > max(2, above.shape[0] // 4)
-    return _long_runs(above & ~shared[None, :], _STROKE_RUN, _GUTTER_EDGE_RUN)
+    if shared.any():
+        sel = above[:, shared]
+        vals = np.where(sel, run[:, shared].astype(np.float32), np.inf)
+        srt = np.sort(vals, axis=0)
+        n = sel.sum(axis=0)
+        # o nível da ondulação é o desvio comum da coluna; quem vai acima
+        # dele segue valendo como traço
+        level = srt[(n - 1) // 2, np.arange(sel.shape[1])]
+        above[:, shared] = sel & (run[:, shared] > level[None, :])
+    return _long_runs(above, _STROKE_RUN, _GUTTER_EDGE_RUN)
 
 
 def _opening_cols(mask, length):
