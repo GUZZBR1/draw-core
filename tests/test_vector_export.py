@@ -83,6 +83,17 @@ def test_simplify_polylines_keeps_collinear_backtrack_overshoot():
     assert (simplified[0]["points"][1] == [30, 0]).all()
 
 
+def test_simplify_polylines_keeps_small_closed_loop():
+    """Laço fechado menor que a tolerância não vira reta de ida e volta:
+    quando a simplificação deixaria só 2 vértices distintos, o laço
+    original é mantido."""
+    diamond = np.array([[0, 1], [1, 0], [2, 1], [1, 2]], dtype=np.float64)
+    raw = [{"points": diamond, "closed": True}]
+    simplified = ev.simplify_polylines(raw, 2.5)
+    assert len(simplified[0]["points"]) == 4
+    assert (simplified[0]["points"] == diamond).all()
+
+
 def test_two_by_two_dot_survives_thinning_and_exports(tmp_path):
     # Um ponto 2x2 passa por filter_microfragments (area=4) mas o
     # Zhang-Suen o apagava inteiro: o export omitia o ponto.

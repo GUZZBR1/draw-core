@@ -366,8 +366,13 @@ def simplify_polylines(polylines, epsilon):
         if len(pts) <= 2:
             out.append(line)
             continue
-        approx = simplify(pts, float(epsilon), bool(line["closed"]))
-        if len(approx) >= 2:
+        closed = bool(line["closed"])
+        approx = simplify(pts, float(epsilon), closed)
+        # Laço fechado com menos de 3 vértices distintos é uma reta
+        # percorrida duas vezes: mantém o laço original (o approxPolyDP
+        # devolvia 1 ponto e o fallback já fazia isso).
+        min_distinct = 3 if closed else 2
+        if len(np.unique(approx, axis=0)) >= min_distinct:
             # Preserva chaves extras (width_px, t_*, meta): a largura por
             # traço morre aqui se o dict for reconstruído do zero.
             out.append({**line, "points": approx})
