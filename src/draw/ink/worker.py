@@ -12,7 +12,19 @@ from .. import photometry
 from ..contracts import InkDelta, InkDisplaySnapshot, InkSnapshot
 from . import accumulator, identity, motion, registration, ruling, votes
 from . import anchor as anchor_mod
-from .config import InkConfig
+from .config import InkConfig, resolve_border_guard_px
+
+
+def _zero_border(prob, guard_px):
+    if guard_px <= 0:
+        return prob
+    out = np.array(prob, copy=True)
+    out[:guard_px, :] = 0.0
+    out[-guard_px:, :] = 0.0
+    out[:, :guard_px] = 0.0
+    out[:, -guard_px:] = 0.0
+    return out
+
 
 # Porta de ociosidade sem mao: no maximo uma sonda a cada
 # _IDLE_PROBE_SECONDS. A porta e a presenca da mao, nao um
@@ -1218,6 +1230,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     self._ruling.reset()
                     self._ruling_generation = generation
                 prob = self._ruling.apply(prob, visible)
+            guard_px = resolve_border_guard_px(
+                prob.shape, self._config.border_guard_px, min_auto_side=200
+            )
+            prob = _zero_border(prob, guard_px)
             # Cobertura de folha (cobertura de folha do loop) viaja em
             # canal proprio ate depois do registro: o veto nao e
             # cego nem se confunde com oclusao de mao — ver o
@@ -1927,6 +1943,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 # None para o avaliador nao projetar GT por uma
                 # geometria que nunca chegou ao canvas.
                 self._last_registration = None
+            prob = _zero_border(prob, guard_px)
             result = self._accumulator.add(
                 prob,
                 visible,
