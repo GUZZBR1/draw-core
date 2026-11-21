@@ -1304,7 +1304,11 @@ def test_step_tail_matrix(step, tail, content):
     fb = 600 - tail
     left_sh = 13 if content == "one_sided_shoulder" else 0
     if step == 0:
-        prob = _fold_page(fa=fa, fb=fb, left_sh=left_sh, x_end=600)
+        # paginas alinhadas: a janela de voto atravessa a divisa pela linha
+        # pareada da trilha vizinha (gap apontado no review d64716a1)
+        prob = _fold_page(
+            fa=fa, fb=fb, left_sh=left_sh, split_x=600, offset_r=0, x_end=1200
+        )
     else:
         prob = _fold_page(
             fa=fa, fb=fb, left_sh=left_sh, split_x=600, offset_r=step, x_end=1200
@@ -1330,3 +1334,93 @@ def test_step_tail_matrix(step, tail, content):
         inside = np.zeros(prob.shape, bool)
         inside[:, fa + 2 : fb - 2] = True
         assert (out[stroke_mask & inside] > 0.5).all()
+
+
+def test_a_stroke_ending_in_blank_space_past_the_fold_is_kept():
+    """Review d64716a1: costura escura + traco na pauta esquerda terminando
+    na col 653 (13 col em branco alem do vinco), com ombros de 13 nas linhas
+    do destino. O veredito de ombro so vale para ramos que aterrissam em
+    pauta do destino — o miolo do traco fica INTEIRO."""
+    prob = _fold_page(right_sh=13, split_x=600, offset_r=20)
+    y_seam = 80 + 40 * 2
+    prob[y_seam : y_seam + 26, 599:601] = 0.95
+    y = 80 + 40 * 5
+    prob[y : y + 6, 540:653] = 0.95
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[y : y + 6, 562:653] > 0.5).all()
+    # a costura escura (pauta do destino) segue apagada no vinco
+    assert (out[y_seam : y_seam + 6, 562:598] > 0.5).sum() == 0
+
+
+def test_a_long_stroke_on_one_side_does_not_save_a_shoulder_on_the_other():
+    """Review d64716a1: numa trilha so, traco longo a esquerda (40 col,
+    acima do ombro comum) e so ombro de 13 a direita: o filtro de ombro tem
+    de valer mesmo quando origem e destino sao a mesma trilha — a faixa sai
+    inteira."""
+    prob = np.zeros((600, 1200), np.float32)
+    fa, fb = 560, 640
+    for k in range(12):
+        y = 80 + 40 * k
+        prob[y : y + 2, :] = 0.95
+        prob[y : y + 6, fa:fb] = 0.95
+        if k % 2 == 0:
+            prob[y : y + 6, fa - 13 : fa] = 0.95
+            prob[y : y + 6, fb : fb + 13] = 0.95
+    y = 80 + 40 * 5
+    prob[y : y + 6, 520 : fb + 13] = 0.95  # traco longo a esq, ombro comum a dir
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[:, fa + 2 : fb - 2] > 0.5).sum() == 0
+
+
+def test_a_shadow_shoulder_on_a_short_tail_does_not_protect_the_fold():
+    """Review d64716a1: vinco [560, 594) a 6 col do fim da trilha. Um ombro
+    de 13 col numa linha nao isenta a faixa — cauda curta exige continuacao
+    conectada para alem do limite do vinco."""
+    prob = _fold_page(fa=560, fb=594, x_end=600)
+    y = 80 + 40 * 5
+    prob[y : y + 6, 547:560] = 0.95
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[:, 562:594] > 0.5).sum() == 0
+
+
+def test_a_stroke_on_a_short_tail_still_crosses_the_fold():
+    """Espelho do anterior: mesma cauda curta de 6 col, mas com traco real
+    continuando 26 col alem do vinco — continua inteiro."""
+    prob = _fold_page(fa=560, fb=594, x_end=600)
+    y = 80 + 40 * 5
+    prob[y : y + 6, 540:620] = 0.95
+    out = ruling.RulingFilter().apply(prob.copy())
+    _assert_only_stroke_kept(out, slice(y, y + 6), 562, 594)
+
+
+def test_aligned_pages_split_the_vote_window_across_the_seam():
+    """Duas metades alinhadas e o vinco termina 6 col antes da divisa: a
+    janela de voto do lado direito atravessa a costura (6 col de cauda +
+    colunas da trilha vizinha). Com traco, fica; sem traco, sai."""
+    prob = _fold_page(fa=560, fb=594, split_x=600, offset_r=0)
+    y = 80 + 40 * 5
+    prob[y : y + 6, 540:612] = 0.95  # 6 na cauda + 6 na trilha vizinha + folga
+    out = ruling.RulingFilter().apply(prob.copy())
+    _assert_only_stroke_kept(out, slice(y, y + 6), 562, 594)
+
+
+def test_unmatched_shadow_lines_do_not_veto_a_matched_stroke():
+    """Pautas com periodos diferentes (40 vs 48 col): quase todas as linhas
+    ficam sem par e levam ombros de 18 col. O traco de 16 col na linha
+    pareada e julgado pelo conjunto pareado, nao pelo bulk dos sem-par."""
+    prob = np.zeros((600, 1400), np.float32)
+    for k in range(12):  # esquerda: periodo 40
+        y = 80 + 40 * k
+        prob[y : y + 2, :600] = 0.95
+        prob[y : y + 6, 560:600] = 0.95
+    for j in range(11):  # direita: periodo 48, so a linha 250 casa
+        y = 90 + 48 * j
+        prob[y : y + 2, 600:1400] = 0.95
+        prob[y : y + 6, 600:640] = 0.95
+        if j % 2 == 0:
+            prob[y : y + 6, 640 : 640 + 18] = 0.95  # ombros nas linhas sem par
+    y = 80 + 40 * 4  # 240 ~ pauta dir 250 -> par
+    prob[y : y + 6, 544:656] = 0.95
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[y : y + 6, 562:598] > 0.5).all()
+    assert (out[y : y + 6, 602:638] > 0.5).all()
