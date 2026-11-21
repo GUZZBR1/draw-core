@@ -48,13 +48,12 @@ um manifesto corrompido nunca vira "sem verificação".
 import hashlib
 import os
 import re
-import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from .safe_io import InputLimitError, read_json
+from .safe_io import InputLimitError, atomic_publish, read_json
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 # O manifesto mora em assets/ na raiz do repositório; os binários
@@ -337,64 +336,43 @@ def download_model(
     asset_name = Path(name).name
     url = f"{base_url}/{urllib.parse.quote(asset_name)}"
     opener = urllib.request.urlopen if urlopen is None else urlopen
-    fd = None
-    tmp_path = None
     digest = hashlib.sha256()
     total = 0
     try:
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            fd, tmp_name = tempfile.mkstemp(
-                prefix=f".{target.name}.", suffix=".part", dir=str(target.parent)
-            )
-            tmp_path = Path(tmp_name)
-            request = urllib.request.Request(
-                url, headers={"User-Agent": "draw-core/0.1"}
-            )
-            with (
-                opener(request, timeout=timeout) as response,
-                os.fdopen(fd, "wb") as handle,
-            ):
-                fd = None
-                while True:
-                    chunk = response.read(_CHUNK)
-                    if not chunk:
-                        break
-                    total += len(chunk)
-                    if total > max_bytes:
-                        raise RuntimeError(
-                            f"download de {name} excedeu {max_bytes} bytes ({url})"
-                        )
-                    digest.update(chunk)
-                    handle.write(chunk)
-        except (urllib.error.URLError, OSError) as error:
-            raise RuntimeError(f"falha ao baixar {name} de {url}: {error}") from error
-        if isinstance(expected_bytes, int) and total != expected_bytes:
-            raise RuntimeError(
-                f"download de {name} truncado: {total} bytes != {expected_bytes} esperados"
-            )
-        actual_sha = digest.hexdigest()
-        if actual_sha != expected_sha:
-            raise RuntimeError(
-                f"sha256 divergente no download de {name}: {actual_sha} != {expected_sha}"
-            )
-        try:
-            os.replace(tmp_path, target)
-        except OSError as error:
-            raise RuntimeError(
-                f"falha ao publicar {name} em {target}: {error}"
-            ) from error
-    finally:
-        if fd is not None:
+        with atomic_publish(target) as handle:
             try:
-                os.close(fd)
-            except OSError:
-                pass
-        if tmp_path is not None and tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
+                request = urllib.request.Request(
+                    url, headers={"User-Agent": "draw-core/0.1"}
+                )
+                with opener(request, timeout=timeout) as response:
+                    while True:
+                        chunk = response.read(_CHUNK)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > max_bytes:
+                            raise RuntimeError(
+                                f"download de {name} excedeu {max_bytes} bytes ({url})"
+                            )
+                        digest.update(chunk)
+                        handle.write(chunk)
+            except (urllib.error.URLError, OSError) as error:
+                raise RuntimeError(
+                    f"falha ao baixar {name} de {url}: {error}"
+                ) from error
+            if isinstance(expected_bytes, int) and total != expected_bytes:
+                raise RuntimeError(
+                    f"download de {name} truncado: {total} bytes != "
+                    f"{expected_bytes} esperados"
+                )
+            actual_sha = digest.hexdigest()
+            if actual_sha != expected_sha:
+                raise RuntimeError(
+                    f"sha256 divergente no download de {name}: "
+                    f"{actual_sha} != {expected_sha}"
+                )
+    except OSError as error:
+        raise RuntimeError(f"falha ao publicar {name} em {target}: {error}") from error
     return target
 
 

@@ -41,7 +41,11 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO_ROOT))
+sys.path.insert(0, str(_REPO_ROOT / "src"))
+
+from lab.sync_workers import StepClock, SyncDetector  # noqa: E402
 
 # ------------------------------------------------------------------
 # Geometria e constantes
@@ -702,14 +706,12 @@ def audit_one(scen_dir, out_dir, flags, detector_kind="real"):
     o braço-oráculo isola a pilha de tinta — que é onde moram as
     perguntas da E3, das bandas finas e da fuga de impressão. O
     braço real fica como medida do gap sintético→detector."""
-    from draw.app import _detect_sheet_combined_traced
     from draw.contracts import DetectionResult, FramePacket
     from draw.infra.manifest import verify_model
     from draw.ink.worker import PageCleanWorker
     from draw.page_clean import PageCleanInk
     from draw.perception import NeuralSheetDetector
     from draw.pipeline import Pipeline
-    from draw.tracker import _gate_info_from_trace
 
     config = _parse_flags(flags)
     if config.ink_divnorm:
@@ -729,46 +731,7 @@ def audit_one(scen_dir, out_dir, flags, detector_kind="real"):
     page_clean = PageCleanInk(str(INK_MODEL), verify=verify_model)
     page_clean.load()
 
-    class Clock:
-        dt = 1.0 / SCENE_FPS
-        t = 0.0
-
-        def __call__(self):
-            return self.t
-
-    clock = Clock()
-
-    class SyncDet:
-        def __init__(self):
-            self._result = None
-            self._seq = 0
-            self.error = None
-            self.traces = []
-
-        def submit(self, frame, captured_at, frame_index=None):
-            outcome = _detect_sheet_combined_traced(frame, detector)
-            corners, verdict, trace = outcome[0], outcome[1], outcome[2]
-            extras = outcome[3] if len(outcome) > 3 else None
-            self._seq += 1
-            self._result = DetectionResult(
-                sequence=self._seq,
-                corners=corners,
-                verdict=verdict,
-                captured_at=captured_at,
-                detect_ms=1.0,
-                gate_info=_gate_info_from_trace(trace),
-                coverage_mask=(extras.get("coverage_mask") if extras else None),
-                hand_mask=(extras.get("hand_mask") if extras else None),
-            )
-            self.traces.append(trace)
-
-        def poll(self, after_seq):
-            if self._result is None or self._result.sequence <= after_seq:
-                return None
-            return self._result
-
-        def take_traces(self, upto_result_seq=None):
-            return []
+    clock = StepClock()
 
     if detector_kind == "oracle":
         true_corners = {
@@ -805,7 +768,7 @@ def audit_one(scen_dir, out_dir, flags, detector_kind="real"):
 
         det = OracleDet()
     else:
-        det = SyncDet()
+        det = SyncDetector(detector)
     worker = PageCleanWorker(
         page_clean, None, clock=clock, config=config.ink, ink_divnorm=config.ink_divnorm
     )
@@ -828,7 +791,7 @@ def audit_one(scen_dir, out_dir, flags, detector_kind="real"):
     canvas_bin = np.zeros((CANVAS_H, CANVAS_W), bool)
     for idx, path in enumerate(files):
         frame = cv2.imread(str(path))
-        clock.t = idx * clock.dt
+        clock.t = idx / SCENE_FPS
         loop.step(FramePacket(image=frame, captured_at=clock.t, sequence=idx + 1))
         worker.pump()
         loop.collect_ink()
