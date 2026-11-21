@@ -9,7 +9,7 @@ reproduzia o #133?" — com delta medido, não com opinião.
 Os clipes moram **fora do repositório**, em `~/draw-data/` (hoje
 `bench-clips/`). O `.gitignore` já proíbe versionar `captures/`,
 `sessions/` e `*.drawcap`: dentro do repo ficam só a ferramenta
-(`lab/corpus.py`), os consumidores (`lab/replay_lab.py`,
+(`lab/corpus/`), os consumidores (`lab/replay_lab.py`,
 `lab/bench_ink.py`) e esta doc. Bytes de cena nunca entram no git.
 
 ## Layout de um clipe
@@ -81,34 +81,48 @@ confere o diretório contra o manifesto antes de qualquer `run`.
 ## CLI
 
 ```sh
-python -m lab.corpus init <dir-do-clipe>      # rotula um clipe novo (escreve clip.json v2)
-python -m lab.corpus upgrade <dir-do-clipe>   # v1 -> v2
-python -m lab.corpus check <corpus>           # valida schema, frames e regioes
-python -m lab.corpus manifest <corpus>        # (re)gera corpus.json
-python -m lab.corpus verify <corpus>          # confere sha256 contra corpus.json
-python -m lab.corpus run <corpus> --bundle <nome> [--flags ...]
-python -m lab.corpus sweep <corpus> --grid <arquivo>
-python -m lab.corpus report <resultados>
+python -m lab.corpus init <dir-do-clipe> --fps <fps>   # rotula um clipe novo (clip.json v2)
+python -m lab.corpus upgrade <dir-do-clipe>            # v1 -> v2
+python -m lab.corpus check <corpus>                    # valida schema, frames e regioes
+python -m lab.corpus manifest <corpus>                 # (re)gera corpus.json
+python -m lab.corpus verify <corpus>                   # confere sha256 contra corpus.json
+python -m lab.corpus run <corpus> --bundle <nome>:<flag1,flag2> [--bundle ...]
+python -m lab.corpus sweep <corpus> --grid '<campo>=<v1,v2>[;<campo>=<v3,v4>]'
+python -m lab.corpus report <results.jsonl>
 ```
 
-`run` executa um bundle (conjunto nomeado de clipes + flags) e grava
-`results.jsonl` (uma linha por clipe × configuração, com as medidas
-do `run_clip` e o veredito das regras `expected`) mais `report.md`
-(tabela antes/depois por condição). `sweep` varre uma grade de
-parâmetros; `report` rerrenderiza a tabela de um `results.jsonl`
-existente.
+`run` executa bundles — conjuntos nomeados de flags
+(`--bundle nome:flag1,flag2`, repetível; flags separadas por
+vírgula) — sobre o corpus inteiro e grava `results.jsonl` (uma linha
+por clipe × configuração, com as medidas do `run_clip`, o veredito
+das regras `expected` e os rótulos `conditions` do clipe),
+`report.md` (tabela antes/depois por clipe e por condição) e
+`run.json` (baseline e bundles da corrida). `--baseline` escolhe o
+bundle de comparação dos deltas; sem ele, o primeiro bundle
+declarado é o baseline. `sweep` expande a grade inline
+`campo=v1,v2;campo=v3` em um bundle por combinação (`--base` traz
+flags comuns a todos). `report` rerrenderiza o Markdown de um
+`results.jsonl` existente: usa o baseline salvo no `run.json` da
+corrida (sem `run.json` ao lado, cai para o primeiro bundle dos
+resultados), e `--baseline` sobrepõe explicitamente.
 
 ## A regra de trabalho
 
 **Toda PR de robustez de tinta anexa o clipe que a reproduz.** O
 fluxo:
 
-1. Captura na mesa com `python -m lab.desk_capture` (a saída cai em
-   `captures/`, já ignorada) ou extrai os frames de um `.drawcap`
-   da sessão em que o defeito apareceu.
-2. Move o diretório para o corpus em `~/draw-data/` e rotula:
-   `corpus init` preenche o `clip.json` — `issues` aponta a issue,
-   `expected` declara o comportamento correto.
+1. Grava os quadros brutos do clipe — na mesa ou reexecutando o
+   `.drawcap` da sessão em que o defeito apareceu — com
+   `python -m lab.desk_capture --source <fonte> --fps <fps> --frames <dir-do-clipe>`.
+   `--frames` despeja a cena de cada quadro como `fNNNN.png`, sem
+   anotação e sem stride; os dumps `scene_*`/`canvas_*` e o
+   `session.json` caem em `captures/` (já ignorada) como evidência
+   de diagnóstico — não são material de clipe.
+2. Move o diretório de quadros para o corpus em `~/draw-data/` (ou
+   já aponta `--frames` direto para lá) e rotula:
+   `corpus init <dir> --fps <fps-cena>` preenche o `clip.json` —
+   `issues` aponta a issue, `expected` declara o comportamento
+   correto.
 3. `corpus manifest` registra o sha256; a PR referencia **nome do
    clipe + número da issue** na descrição.
 4. Alegação de robustez exige `corpus run` antes × depois no bundle

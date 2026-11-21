@@ -26,6 +26,20 @@ def _format_delta(d: dict) -> str:
     return f"{px:+d} px ({pct:+.0f}%)"
 
 
+def _condition_groups(results):
+    """Agrupa resultados por assinatura de ``conditions`` do clipe.
+
+    Resultados com erro ou sem rotulos nao entram em nenhuma fatia.
+    """
+    groups = {}
+    for res in results:
+        if res.error is not None or not res.conditions:
+            continue
+        label = ", ".join(f"{k}={v}" for k, v in sorted(res.conditions.items()))
+        groups.setdefault(label, []).append(res)
+    return groups
+
+
 def render_summary(results, baseline: str) -> dict:
     """Gera resumo legivel por maquina com falhas e metricas por clipe/bundle."""
     by_clip, bundles_order = _group_results(results)
@@ -135,6 +149,39 @@ def render_markdown(results, baseline: str, title="Corpus") -> str:
                     f"{status} ({verdict.get('detail', '')})"
                 )
         lines.append("")
+
+    cond_groups = _condition_groups(results)
+    if cond_groups:
+        lines.append("## Condições")
+        lines.append("")
+        for label in sorted(cond_groups):
+            group = cond_groups[label]
+            clips = sorted({r.clip for r in group})
+            lines.append(f"### {label}")
+            lines.append(f"clipes: {', '.join(clips)}")
+            lines.append("")
+            lines.append("| bundle | canvas_px | retratado | passadas | Δ vs base |")
+            lines.append("|---|---:|---:|---:|---:|")
+            by_bundle = {}
+            for res in group:
+                acc = by_bundle.setdefault(res.bundle, [0, 0, 0])
+                acc[0] += res.canvas_px
+                acc[1] += res.retracted_px_total
+                acc[2] += res.passes
+            base_tot = by_bundle.get(baseline)
+            for bundle_name, (px, ret, ok) in by_bundle.items():
+                if bundle_name == baseline or base_tot is None:
+                    delta_str = "-"
+                else:
+                    ratio = px / base_tot[0] if base_tot[0] > 0 else None
+                    delta_str = _format_delta(
+                        {
+                            "canvas_px_delta": px - base_tot[0],
+                            "canvas_px_ratio": ratio,
+                        }
+                    )
+                lines.append(f"| {bundle_name} | {px} | {ret} | {ok} | {delta_str} |")
+            lines.append("")
 
     if expectation_lines:
         lines.append("### Expectativas")

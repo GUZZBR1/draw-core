@@ -442,6 +442,65 @@ def test_run_end_to_end_grava_dumps_e_sessao(tmp_path, monkeypatch):
     assert any("anchor=sim" in line and "conf=" in line for line in lines)
 
 
+def test_run_frames_grava_quadros_brutos_de_clipe(tmp_path, monkeypatch):
+    """--frames <dir>: fNNNN.png brutos e contiguos, aceitos por corpus init."""
+    onnx_path = onnx_fixtures.page_clean_model(
+        tmp_path / "pc.onnx", patch=256, dynamic_batch=True
+    )
+    monkeypatch.setattr(ec, "_DEFAULT_SHEET_MODEL", tmp_path / "missing.onnx")
+    from draw import paper as paper_module
+
+    corners = np.array([[20, 10], [200, 10], [200, 150], [20, 150]], np.float32)
+    monkeypatch.setattr(
+        paper_module,
+        "detect_sheet_with_confidence",
+        lambda frame: (corners.copy(), "paper"),
+    )
+    out = tmp_path / "desk"
+    frames_dir = tmp_path / "clipe"
+    result = dc.run(
+        _SheetCapture(frames=6),
+        out_dir=out,
+        every=3,
+        fps=10,
+        page_clean_model=str(onnx_path),
+        hand_model="__none__",
+        verify=None,
+        log=lambda *_a: None,
+        frames_dir=frames_dir,
+    )
+    assert result["frames"] == 6
+    assert sorted(p.name for p in frames_dir.glob("f*.png")) == [
+        f"f{i:04d}.png" for i in range(6)
+    ]
+    # Quadro bruto: a cena como a fonte a gerou (folha 220, traco 20),
+    # sem a polilinha de ancora dos dumps scene_*.
+    raw = cv2.imread(str(frames_dir / "f0000.png"))
+    assert raw[0, 0, 0] == 0 and raw[100, 100, 0] == 220
+    assert raw[70, 100, 0] == 20
+
+    # O diretorio de quadros segue o caminho do corpus: init + load_clip.
+    from lab.corpus.clip import load_clip
+    from lab.corpus.labels import init_clip
+
+    init_clip(frames_dir, fps=10.0)
+    assert load_clip(frames_dir).frames == 6
+
+    # Um --frames ja povoado e recusado: capturas nao se misturam.
+    with pytest.raises(ValueError, match="quadros"):
+        dc.run(
+            _SheetCapture(frames=2),
+            out_dir=tmp_path / "desk2",
+            every=1,
+            fps=10,
+            page_clean_model=str(onnx_path),
+            hand_model="__none__",
+            verify=None,
+            log=lambda *_a: None,
+            frames_dir=frames_dir,
+        )
+
+
 def test_run_sem_fps_em_fonte_sem_get(tmp_path):
     """Fonte estilo hvcam sem --fps: erro pede a flag, nao AttributeError."""
     with pytest.raises(ValueError, match="--fps"):

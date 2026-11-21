@@ -38,6 +38,7 @@ class ClipResult:
     ruling_px: int | None = None
     expected_verdicts: list = dataclasses.field(default_factory=list)
     error: str | None = None
+    conditions: dict = dataclasses.field(default_factory=dict)
 
     @classmethod
     def from_run_dict(cls, clip, bundle, flags, d: dict) -> "ClipResult":
@@ -80,6 +81,7 @@ class ClipResult:
             "ruling_px": self.ruling_px,
             "expected_verdicts": list(self.expected_verdicts),
             "error": self.error,
+            "conditions": dict(self.conditions),
         }
 
     @classmethod
@@ -103,6 +105,7 @@ class ClipResult:
             ruling_px=d.get("ruling_px"),
             expected_verdicts=list(d.get("expected_verdicts") or []),
             error=d.get("error"),
+            conditions=dict(d.get("conditions") or {}),
         )
 
 
@@ -144,3 +147,28 @@ def load_results(path) -> list[ClipResult]:
         if stripped:
             results.append(ClipResult.from_dict(json.loads(stripped)))
     return results
+
+
+RUN_META_NAME = "run.json"
+
+
+def write_run_meta(path, meta: dict) -> Path:
+    """Grava metadados da corrida (baseline, bundles) ao lado do results.jsonl."""
+    out_path = Path(path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
+        json.dumps(dict(meta), indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return out_path
+
+
+def load_run_meta(path) -> dict:
+    """Carrega os metadados da corrida; ``{}`` quando o arquivo nao existe."""
+    in_path = Path(path)
+    if not in_path.is_file():
+        return {}
+    data = json.loads(in_path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"metadados de corrida invalidos em {in_path}")
+    return data

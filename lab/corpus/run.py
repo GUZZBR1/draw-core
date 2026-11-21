@@ -79,6 +79,7 @@ def run_bundle(
         config.PAPER_H,
         config.MARKER_CENTERS,
     )
+    conditions = {}
     try:
         clip = load_clip(clip_dir)
         frame_files = clip_frames(clip.dir)
@@ -91,6 +92,7 @@ def run_bundle(
             detector = _fresh_detector(verify)
         if page_clean is None:
             page_clean = _fresh_page_clean(verify)
+        conditions = dict(clip.conditions)
         run_dict = bench_ink.run_clip(
             clip.dir,
             list(flags),
@@ -101,6 +103,7 @@ def run_bundle(
         )
         res = ClipResult.from_run_dict(clip.name, bundle, list(flags), run_dict)
         res.expected_verdicts = evaluate_expected(clip, res)
+        res.conditions = conditions
         return res
     except Exception as exc:
         return ClipResult(
@@ -116,6 +119,7 @@ def run_bundle(
             wall_s=0.0,
             cpu_s_per_scene_s=0.0,
             error=str(exc),
+            conditions=conditions,
         )
     finally:
         (
