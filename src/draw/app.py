@@ -32,6 +32,7 @@ ganho digital, voto 0,85, remocao de pauta, histerese, veto por
 movimento, passadas a 0,15 s e Detect-Wake. --no-ink-ruling tira so a
 pauta (pode apagar lapis fino sobre a linha); --legacy-ink volta ao
 comportamento anterior; --ink-vote e --ink-interval ajustam os numeros.
+--ink-baseline captura uma referencia inicial da folha; z a recaptura.
 
 A fonte via rede (MJPEG/RTSP) e o caminho recomendado no WSL. O WSL nao
 enxerga webcams USB do Windows por padrao, mas enxerga streams de rede.
@@ -1550,6 +1551,11 @@ def run(
             "Teclas: s = salvar canvas, f = capturar frame, "
             "g = captura automatica (desligada), q/Esc = sair."
         )
+        if pipeline_config is not None and pipeline_config.ink.baseline:
+            print(
+                "Referencia inicial da tinta ativa: aguarde a captura ficar "
+                "pronta; pressione z para usar o conteudo atual como referencia."
+            )
 
         frames_path = save_path / "frames"
         frames_saved = 0
@@ -1585,6 +1591,16 @@ def run(
                     )
                 else:
                     print("Captura automatica desligada.")
+
+        def handle_baseline_key(key):
+            if key == ord("z") and pipeline is not None:
+                if pipeline.rezero_ink_baseline():
+                    print(
+                        "Recaptura da referencia solicitada; o conteudo visivel "
+                        "sera ignorado como tinta nova."
+                    )
+                elif pipeline_config is not None and pipeline_config.ink.baseline:
+                    print("Nao ha uma folha ativa para recapturar a referencia.")
 
         format_suggester = paper_module.FormatSuggester()
 
@@ -1779,6 +1795,7 @@ def run(
                     # Marcadores nao tem mascara confirmada: o salvavel
                     # visivel na tela de espera e a folha retificada.
                     save_canvas_snapshot(last_marker_warped if markers_mode else None)
+                handle_baseline_key(key)
                 if frame is not None:
                     handle_capture_key(key, frame)
                 if key in (ord("q"), 27):
@@ -1964,6 +1981,7 @@ def run(
                 if key == ord("s"):
                     # Sem folha, so o canvas confirmado retido salva.
                     save_canvas_snapshot()
+                handle_baseline_key(key)
                 handle_capture_key(key, frame)
                 if key in (ord("q"), 27):
                     break
@@ -1985,6 +2003,40 @@ def run(
                         status_color,
                         2,
                     )
+                    if pipeline_config is not None and pipeline_config.ink.baseline:
+                        baseline = pipeline.ink_baseline_state()
+                        phase = baseline.get("phase")
+                        if phase == "stabilizing":
+                            baseline_text = "Estabilizando para capturar referencia"
+                            baseline_color = (0, 255, 255)
+                        elif phase == "recapturing":
+                            baseline_text = "Recapturando referencia"
+                            baseline_color = (0, 255, 255)
+                        elif phase == "waiting_visibility":
+                            baseline_text = "Capturando referencia inicial"
+                            baseline_color = (0, 255, 255)
+                        elif phase == "ready_partial":
+                            fraction = 100 * baseline.get("fraction", 0.0)
+                            baseline_text = (
+                                f"Pronto para desenhar; referencia visivel "
+                                f"({fraction:.0f}%)"
+                            )
+                            baseline_color = (0, 255, 255)
+                        elif baseline.get("ready"):
+                            baseline_text = "Pronto para desenhar"
+                            baseline_color = (0, 255, 0)
+                        else:
+                            baseline_text = "Aguardando referencia"
+                            baseline_color = (0, 255, 255)
+                        cv2.putText(
+                            status,
+                            baseline_text,
+                            (20, 72),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.65,
+                            baseline_color,
+                            2,
+                        )
                 if markers_mode:
                     # A heuristica de tinta do legado nao migrou: no
                     # modo de marcadores o painel mostra a folha
@@ -2006,6 +2058,7 @@ def run(
                 key = _next_key()
                 if key == ord("s"):
                     save_canvas_snapshot(canvas)
+                handle_baseline_key(key)
                 handle_capture_key(key, frame)
                 if key in (ord("q"), 27):
                     break
@@ -2217,6 +2270,14 @@ def main():
         ),
     )
     parser.add_argument(
+        "--ink-baseline",
+        action="store_true",
+        help=(
+            "captura uma referencia page-clean apos estabilizar a folha; "
+            "a tinta ja presente e ignorada e z recaptura o estado atual"
+        ),
+    )
+    parser.add_argument(
         "--legacy-ink",
         action="store_true",
         help=(
@@ -2279,6 +2340,7 @@ def main():
         ("--no-ink-ruling", args.no_ink_ruling),
         ("--legacy-ink", args.legacy_ink),
         ("--preset", args.preset is not None),
+        ("--ink-baseline", args.ink_baseline),
     ):
         if args.markers and given:
             parser.error(
@@ -2322,6 +2384,8 @@ def main():
                     overrides["ruling_removal"] = False
                 if overrides:
                     ink_config = dataclasses.replace(ink_config, **overrides)
+        if args.ink_baseline:
+            ink_config = dataclasses.replace(ink_config, baseline=True)
     except ValueError as error:
         parser.error(str(error))
     # Marcadores nao tem detector neural nem tinta: preset legado, sem erro.

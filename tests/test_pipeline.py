@@ -84,6 +84,7 @@ class _FakeInkWorker:
         self.submitted = []  # (generation, corners, visible, coverage)
         self.new_generation_calls = []
         self.presence_calls = []
+        self.baseline_invalidations = 0
         self.pages = []
         self._display = display
 
@@ -113,6 +114,9 @@ class _FakeInkWorker:
 
     def set_hand_presence(self, present, moved=False):
         self.presence_calls.append((present, moved))
+
+    def invalidate_baseline(self):
+        self.baseline_invalidations += 1
 
 
 class _FakeHandPresenceWorker:
@@ -228,6 +232,35 @@ def test_coverage_mask_gates_votes_off_sheet():
     assert gated[-1].shape == (720, 1280)
     assert not gated[-1][:, 320:].any()
     assert gated[-1][10:700, 50:280].all()
+
+
+def test_pipeline_marks_baseline_stable_after_corner_history_settles():
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None),
+        config=PipelineConfig(ink=InkConfig(baseline=True), **_BASE),
+    )
+    _drive(loop, 40)
+    assert ink.pages
+    assert ink.pages[0].baseline_stable is False
+    assert any(page.baseline_stable for page in ink.pages)
+
+
+def test_pipeline_waits_for_moving_quad_to_settle_before_baseline_capture():
+    def moving_quad(index):
+        corners = QUAD.copy()
+        corners[:, 0] += min(index, 4) * 8.0
+        return corners, "paper", None
+
+    loop, _det, ink = _make_loop(
+        moving_quad,
+        config=PipelineConfig(ink=InkConfig(baseline=True), **_BASE),
+    )
+    _drive(loop, 20)
+    assert ink.pages
+    assert not any(page.baseline_stable for page in ink.pages)
+
+    _drive(loop, 90)
+    assert any(page.baseline_stable for page in ink.pages)
 
 
 def test_paper_mean_bgr_hits_integer_boundary():
@@ -736,7 +769,7 @@ def test_drop_clears_canvas_without_persist():
 def test_drop_keeps_canvas_with_persist():
     """canvas_persist: a queda congela o canvas — o usuário segue
     vendo o desenho enquanto a folha não é re-adquirida."""
-    loop, _det, _ink = _make_loop(_seen_then_lost())
+    loop, _det, ink = _make_loop(_seen_then_lost())
     _drive(loop, 8)
     canvas = np.ones((100, 100), np.uint8) * 255
     loop.clean_mask = canvas.copy()
@@ -744,6 +777,7 @@ def test_drop_keeps_canvas_with_persist():
     assert loop.generation_events["drop"] >= 1
     assert loop.clean_mask is not None
     np.testing.assert_array_equal(loop.clean_mask, canvas)
+    assert ink.baseline_invalidations >= 1
 
 
 def test_drop_arms_identity_recovery_for_the_reopen():
@@ -1123,6 +1157,7 @@ def test_reset_source_restarts_the_ink_as_a_new_page():
     opened = len(ink.new_generation_calls)
 
     loop.reset_source(since=1000.0)
+    assert ink.baseline_invalidations == 1
     assert loop.ink_session_open is False
     assert loop.clean_recovery_pending is False
     assert loop.clean_mask is None and loop.accumulated_canvas is None

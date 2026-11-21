@@ -1137,6 +1137,20 @@ def test_main_ink_vote_e_interval_ajustam_o_preset(monkeypatch):
     assert ink == app_module.InkConfig.production(vote_level=0.9, pass_interval_s=0.4)
 
 
+def test_main_ink_baseline_entra_no_preset_de_producao(monkeypatch):
+    pipeline = _run_main(monkeypatch, "--ink-baseline")["pipeline_config"]
+    assert pipeline.ink == app_module.InkConfig.production(baseline=True)
+
+
+def test_main_ink_baseline_coexiste_com_legacy_e_preset(monkeypatch):
+    legacy = _run_main(monkeypatch, "--legacy-ink", "--ink-baseline")["pipeline_config"]
+    ruled = _run_main(monkeypatch, "--preset", "ruled", "--ink-baseline")[
+        "pipeline_config"
+    ]
+    assert legacy.ink == app_module.InkConfig(baseline=True)
+    assert ruled.ink == app_module.InkConfig.production(baseline=True)
+
+
 def test_main_spread_mode_entra_na_pipeline_config(monkeypatch):
     pipeline = _run_main(monkeypatch, "--spread-mode", "always")["pipeline_config"]
     assert pipeline.spread_mode == "always"
@@ -1211,6 +1225,7 @@ def test_main_markers_sem_flags_usa_o_preset_legado(monkeypatch):
         ["--markers", "--ink-interval", "0.15"],
         ["--markers", "--no-ink-ruling"],
         ["--markers", "--legacy-ink"],
+        ["--markers", "--ink-baseline"],
         ["--legacy-ink", "--no-ink-ruling"],
         ["--ink-interval", "0"],
         ["--ink-vote", "1.5"],

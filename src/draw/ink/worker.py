@@ -287,6 +287,9 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         )
         self._pending = None
         self._generation = 0
+        self._baseline_session_active = False
+        self._baseline_reset_requested = False
+        self._baseline_rezero_requested = False
         self._published = None
         self._version = 0
         # Historico de deltas confirmados para poll_delta: um registro por
@@ -450,6 +453,9 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 self._identity_reference = None
                 self._identity_reference_corners = None
             self._generation += 1
+            self._baseline_session_active = self._config.baseline
+            self._baseline_reset_requested = self._config.baseline
+            self._baseline_rezero_requested = False
             self._anchor_samples = []
             self._reg_frozen_corners = None
             self._reg_deadband_over = 0
@@ -479,6 +485,61 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._delta_prev = None
             self._condition.notify_all()
             return self._generation
+
+    def invalidate_baseline(self):
+        """Invalida a referencia ao perder a folha ou trocar a fonte."""
+        if not self._config.baseline:
+            return
+        with self._condition:
+            self._baseline_session_active = False
+            self._baseline_reset_requested = True
+            self._baseline_rezero_requested = False
+            self._condition.notify_all()
+
+    def rezero_baseline(self):
+        """Agenda re-zero manual no proximo mapa page-clean estavel."""
+        if not self._config.baseline:
+            return False
+        with self._condition:
+            if not self._baseline_session_active or self._stopped:
+                return False
+            self._baseline_reset_requested = True
+            self._baseline_rezero_requested = True
+            self._quiet_passes = 0
+            self._still_passes = 0
+            self._activity_quiet_passes = 0
+            self._condition.notify_all()
+            return True
+
+    def baseline_state(self):
+        """Prontidao e cobertura observada da referencia atual."""
+        with self._condition:
+            state = self._accumulator.baseline_state()
+            if state["enabled"] and not self._baseline_session_active:
+                state.update(
+                    ready=False,
+                    complete=False,
+                    captured_px=0,
+                    fraction=0.0,
+                    phase="waiting_page",
+                )
+            elif self._baseline_rezero_requested:
+                state.update(
+                    ready=False,
+                    complete=False,
+                    captured_px=0,
+                    fraction=0.0,
+                    phase="recapturing",
+                )
+            elif self._baseline_reset_requested:
+                state.update(
+                    ready=False,
+                    complete=False,
+                    captured_px=0,
+                    fraction=0.0,
+                    phase="stabilizing",
+                )
+            return state
 
     def submit(self, page):
         """Entrega a página retificada mais recente (latest-wins).
@@ -606,6 +667,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 visible,
                 coverage,
                 page.captured_at,
+                page.baseline_stable,
             )
             self._condition.notify_all()
 
@@ -701,6 +763,11 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         propria mao, reportado pela assinatura da mascara.
         Ver _REST_MIN_GENERATION_PASSES/_REST_QUIET_PASSES.
         """
+        if self._baseline_reset_requested or self._baseline_rezero_requested:
+            return False
+        if self._config.baseline and self._baseline_session_active:
+            if not self._accumulator.baseline_state()["started"]:
+                return False
         if (
             self._config.removal
             and self._accumulator._removal_streak is not None
@@ -1027,6 +1094,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             visible,
             coverage,
             captured_at,
+            baseline_stable,
         ) = self._pending
         self._pending = None
         # Intervalo que governou a espera desta passada (o regime
@@ -1073,6 +1141,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             scheduled_interval,
             scheduled_hand_state,
             captured_at,
+            baseline_stable,
         )
 
     def pump(self):
@@ -1111,6 +1180,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             scheduled_interval,
             scheduled_hand_state,
             captured_at,
+            baseline_stable,
         ) = job
         # Geracao trocou (ou a trabalhadora parou) entre a retirada
         # e a execucao: a passada esta morta antes de nascer — o
@@ -1124,6 +1194,16 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             if generation != self._generation:
                 self._telemetry_skipped_stale += 1
                 return True
+            baseline_reset = self._baseline_reset_requested
+            baseline_rezero = self._baseline_rezero_requested
+            self._baseline_reset_requested = False
+            self._baseline_rezero_requested = False
+            if baseline_reset:
+                if baseline_rezero:
+                    self._accumulator.reset()
+                    self._canvas_epoch += 1
+                else:
+                    self._accumulator.reset_baseline()
         # Uma excecao do modelo (shape errado, sessao morta, ONNX
         # sem memoria) matava esta thread em silencio: o canvas
         # congelava no ultimo quadro e nada era impresso. O erro
@@ -1144,8 +1224,9 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         reg_deadband = self._config.reg_deadband
         anchor_arbitration = self._config.anchor_arbitration
         anchor_follow = self._config.anchor_follow
-        force_publish = False
+        force_publish = baseline_rezero
         reg_info = {}
+        baseline_coverage = None
         try:
             # As mascaras do WarpedPage sao de CAMERA quando a
             # passada tem cantos (issue #100): visivel na grade da
@@ -1514,6 +1595,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         )
                         > 0
                     )
+                baseline_coverage = reg_coverage
                 registered_prob = _gate(registered_prob, reg_coverage)
                 if camera_untouched:
                     camera_prob = registered_prob
@@ -1927,6 +2009,13 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 # None para o avaliador nao projetar GT por uma
                 # geometria que nunca chegou ao canvas.
                 self._last_registration = None
+            baseline_capture = (
+                baseline_stable
+                and self._baseline_session_active
+                and not identity_deferred
+                and not identity_switch_pending
+                and pass_voted
+            )
             result = self._accumulator.add(
                 prob,
                 visible,
@@ -1940,6 +2029,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     and reg_info.get("registration_displacement_px", float("inf"))
                     <= anchor_mod._ANCHOR_MIGRATION_DISPLACEMENT_PX
                 ),
+                baseline_capture=baseline_capture,
+                baseline_coverage=baseline_coverage,
             )
             # A provisoria que a tela ve: so componentes grandes
             # (issue #134). A diff pixel a pixel republicava o

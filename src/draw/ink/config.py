@@ -109,6 +109,10 @@ class InkConfig:
     # vez com a mao presente; um traco revelado so depois da saida fica
     # aquem do voto e o descanso total o congela (Devin Review PR #122).
     post_exit_full_window: bool = False
+    # Referencia page-clean opcional: a mascara inicial da pagina e ignorada
+    # como tinta nova e capturada apenas em regioes visiveis.
+    baseline: bool = False
+    baseline_margin_px: int = 1
 
     def __post_init__(self):
         if not 0.0 < self.t_low < self.t_high <= 1.0:
@@ -124,6 +128,11 @@ class InkConfig:
             raise ValueError(
                 f"pass_interval_s fora de (0, 5] s: {self.pass_interval_s!r}"
             )
+        if (
+            not isinstance(self.baseline_margin_px, int)
+            or not 0 <= self.baseline_margin_px <= 4
+        ):
+            raise ValueError("baseline_margin_px deve ser um inteiro entre 0 e 4")
 
     @classmethod
     def strict_vote(cls, level, **overrides):
@@ -177,6 +186,7 @@ class InkConfig:
         vote_level=PRODUCTION_VOTE_LEVEL,
         pass_interval_s=PRODUCTION_PASS_INTERVAL_S,
         ruling_removal=True,
+        baseline=False,
     ):
         """Preset de producao do motor de tinta: voto estrito (0,85), remocao
         de pauta, histerese, veto por movimento e passadas a 0,15 s.
@@ -194,6 +204,7 @@ class InkConfig:
             hysteresis=True,
             motion_veto=True,
             pass_interval_s=pass_interval_s,
+            baseline=baseline,
         )
 
     @classmethod

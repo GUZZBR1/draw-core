@@ -402,7 +402,27 @@ class Pipeline:
             return None
         return _coverage_iou(warp_corners, self._coverage_mask, self._hand_mask_det)
 
-    def _warp_and_submit_ink(self, frame, warp_corners, captured_at=None):
+    def _baseline_quad_is_stable(self, median_corners):
+        """Only start/reference-capture after the page geometry has settled."""
+        if (
+            len(self.corner_history) < _INK_CORNER_HISTORY
+            or self.tracker.missed
+            or self.tracker.has_pending
+        ):
+            return False
+        if self._detect_wake is not None and not self._detect_wake.settled:
+            return False
+        stable_px = (
+            self._detect_wake.stable_corner_px if self._detect_wake is not None else 4.0
+        )
+        return all(
+            tracker.corner_distance(median_corners, corners) <= stable_px
+            for corners in self.corner_history
+        )
+
+    def _warp_and_submit_ink(
+        self, frame, warp_corners, captured_at=None, baseline_stable=False
+    ):
         """Warp + visibilidade + submissao a trabalhadora de tinta.
 
         Os cantos sao o quad que retifica ESTE warp, e a
@@ -579,6 +599,7 @@ class Pipeline:
                 visible,
                 coverage,
                 captured_at=captured_at,
+                baseline_stable=baseline_stable,
             )
         )
 
@@ -629,6 +650,9 @@ class Pipeline:
         """
         self.ink_session_open = False
         self.clean_recovery_pending = False
+        invalidate_baseline = getattr(self.ink_worker, "invalidate_baseline", None)
+        if invalidate_baseline is not None:
+            invalidate_baseline()
         self.clean_mask = None
         self.clean_provisional_mask = None
         self.accumulated_canvas = None
@@ -858,6 +882,9 @@ class Pipeline:
         if tracker_event == "drop":
             self.generation_events["drop"] += 1
             self.ink_session_open = False
+            invalidate_baseline = getattr(self.ink_worker, "invalidate_baseline", None)
+            if invalidate_baseline is not None:
+                invalidate_baseline()
             # canvas_persist: a queda do tracker nao prova que a
             # pagina mudou — o canvas do usuario fica congelado na
             # tela ate a folha voltar (re-registro via
@@ -1022,8 +1049,12 @@ class Pipeline:
                 np.float32
             )
             self._last_ink_submit_at = packet.captured_at
+            baseline_stable = self._baseline_quad_is_stable(ink_corners)
             self._warp_and_submit_ink(
-                frame, ink_corners, captured_at=packet.captured_at
+                frame,
+                ink_corners,
+                captured_at=packet.captured_at,
+                baseline_stable=baseline_stable,
             )
         elif (
             self._detect_wake is not None
@@ -1062,11 +1093,39 @@ class Pipeline:
                     np.float32
                 )
                 self._last_ink_submit_at = packet.captured_at
+                baseline_stable = self._baseline_quad_is_stable(ink_corners)
                 self._warp_and_submit_ink(
-                    frame, ink_corners, captured_at=packet.captured_at
+                    frame,
+                    ink_corners,
+                    captured_at=packet.captured_at,
+                    baseline_stable=baseline_stable,
                 )
 
         return self.collect_ink()
+
+    def rezero_ink_baseline(self):
+        """Usa o conteudo visivel como referencia, se houver folha ativa."""
+        if (
+            not self._config.ink.baseline
+            or not self.sheet_present
+            or not self.ink_session_open
+        ):
+            return False
+        request = getattr(self.ink_worker, "rezero_baseline", None)
+        return bool(request is not None and request())
+
+    def ink_baseline_state(self):
+        """Prontidao da referencia para a interface."""
+        if not self._config.ink.baseline:
+            return {"enabled": False, "ready": False, "phase": "disabled"}
+        if not self.sheet_present or not self.ink_session_open:
+            return {"enabled": True, "ready": False, "phase": "waiting_page"}
+        state = getattr(self.ink_worker, "baseline_state", None)
+        return (
+            state()
+            if state is not None
+            else {"enabled": True, "ready": False, "phase": "stabilizing"}
+        )
 
     def collect_ink(self):
         """Colhe a tinta assincrona: painel e erro.
