@@ -552,12 +552,21 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     # Uma referencia pendente de uma queda anterior
                     # nao e sobrescrita pelo canvas vazio.
                     self._identity_reference = self._accumulator._confirmed
-                    self._accumulator.reset()
                     self._identity_reference_corners = (
                         None
                         if self._anchor_corners is None
                         else self._anchor_corners.copy()
                     )
+                # Toda geracao preservada zera o acumulador, com ou
+                # sem captura nova: a referencia pendente e a unica
+                # dona do desenho anterior — tinta confirmada numa
+                # geracao intermediaria e de outra folha e nao pode
+                # fundir no restore. Custo aceito (review): o
+                # confirmed restaurado e autoritativo e a janela de
+                # votos se reconstroi em poucas passadas; preservar
+                # _window/_removal_streak so para esse caso nao
+                # compensa a maquina de estados extra.
+                self._accumulator.reset()
             else:
                 self._identity_reference = None
                 self._identity_reference_corners = None
@@ -2011,6 +2020,27 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                             and identity_containment
                             >= identity._PAGE_IDENTITY_MIN_CONTAINMENT
                         )
+                        if keep_page and prior_eval_px < max(
+                            identity._IDENTITY_MIN_VISIBLE_PX,
+                            int(
+                                identity._PAGE_IDENTITY_MIN_REFERENCE_FRACTION
+                                * prior_px
+                            ),
+                        ):
+                            # Fragmento: o que casa avaliou so uma
+                            # fatia da referencia — restaurar o resto
+                            # seria aceitar como prova o que a
+                            # passada nunca comparou (uma substituta
+                            # cobrindo 60% do quad com so a marca
+                            # coincidente fecha recall 400/400).
+                            # Inconclusivo geometrico: adia sem votar;
+                            # o timeout resolve o caso persistente
+                            # pelo caminho seguro — endurecer para
+                            # new_page aqui puniria a folha real que
+                            # volta parcialmente ao quadro.
+                            identity_visible_reference_px = prior_eval_px
+                            identity_deferred = True
+                            quarantine_reason = "no_overlap"
                 if identity_deferred:
                     # O hold por interior oculto nao queima a
                     # quarentena: reter a referencia e separado de

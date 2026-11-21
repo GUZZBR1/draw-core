@@ -105,6 +105,78 @@ def test_occlusion_defers_and_preserves_canvas(worker):
     np.testing.assert_array_equal(worker.poll(generation, 0).confirmed, canvas)
 
 
+def test_second_drop_does_not_merge_intermediate_sheet(worker):
+    canvas_a = settle(worker)
+    # 1a queda: a referencia salva fica pendente; a folha B entra
+    # com a mao cobrindo o miolo das marcas de A — so um anel das
+    # marcas antigas segue visivel, entao a passada adia por
+    # oclusao e VOTA: a tinta intermediaria confirma no acumulador.
+    gen_b = worker.new_generation(preserve_identity=True)
+    visible_b = np.ones(SHAPE, bool)
+    visible_b[12:63, 12:58] = False
+    b_confirmed = 0
+    for _ in range(identity_mod._PAGE_IDENTITY_MAX_DEFERRALS):
+        drive(worker, gen_b, prob=page(other=True), visible=visible_b)
+        event = last_event(worker)
+        assert event["decision"] == "deferred_occlusion"
+        assert event["quarantine_reason"] == "occlusion"
+        confirmed = worker._accumulator._confirmed
+        if confirmed is not None:
+            b_confirmed = max(
+                b_confirmed, int(np.count_nonzero(confirmed[80:115, 65:95]))
+            )
+    assert b_confirmed > 0
+    # 2a queda com a referencia pendente: a geracao intermediaria
+    # zera junto — a referencia e a unica dona do desenho de A e a
+    # tinta de B nao pode fundir na restauracao.
+    gen_a = worker.new_generation(preserve_identity=True)
+    np.testing.assert_array_equal(worker._identity_reference, canvas_a)
+    confirmed = worker._accumulator._confirmed
+    assert confirmed is None or not np.any(confirmed)
+    # A retorna: o same_page restaura exatamente o desenho salvo —
+    # nada da folha intermediaria sobrevive na restauracao.
+    drive(worker, gen_a)
+    assert last_event(worker)["decision"] == "same_page"
+    np.testing.assert_array_equal(worker.poll(gen_a, 0).confirmed, canvas_a)
+
+
+def test_fragment_match_does_not_restore_unevaluated_reference(worker):
+    # Caminho legado (sem mascara de visibilidade): a substituta
+    # cobre so ~40% do quad e traz UMA marca que coincide com a
+    # faixa da referencia dentro da pegada — recall e containment
+    # fecham 1,0 sobre a fatia avaliada, mas 57% do desenho salvo
+    # nunca foi comparado. Restaurar o resto nao e honesto: adia
+    # sem votar ate o timeout resolver pelo caminho seguro.
+    ink_a = np.zeros(SHAPE, np.float32)
+    ink_a[10:65, 10:30] = 0.95  # fora da pegada da substituta
+    ink_a[10:65, 84:99] = 0.95  # faixa que a pegada parcial alcanca
+    for _ in range(4):
+        drive(worker, 0, prob=ink_a)
+    canvas_a = worker.poll(0, 0).confirmed
+    assert np.count_nonzero(canvas_a) > 0
+    gen_b = worker.new_generation(preserve_identity=True)
+    part_quad = np.float32([[60, 0], [100, 0], [100, 120], [60, 120]])
+    fragment = np.zeros(SHAPE, np.float32)
+    fragment[10:65, 60:96] = 0.95  # coincide com a faixa avaliavel
+    for _ in range(identity_mod._PAGE_IDENTITY_MAX_DEFERRALS):
+        drive(worker, gen_b, prob=fragment, corners=part_quad)
+        event = last_event(worker)
+        assert event["decision"] == "deferred_occlusion"
+        assert event["quarantine_reason"] == "no_overlap"
+        np.testing.assert_array_equal(worker._identity_reference, canvas_a)
+        assert not np.any(worker.poll(gen_b, 0).confirmed)
+    drive(worker, gen_b, prob=fragment, corners=part_quad)
+    assert last_event(worker)["decision"] == "quarantine_timeout"
+    assert worker._identity_reference is None
+    for _ in range(3):
+        drive(worker, gen_b, prob=fragment, corners=part_quad)
+    confirmed = worker.poll(gen_b, 0).confirmed
+    # So a marca do fragmento confirma; o trecho do desenho salvo
+    # que a pegada nunca avaliou nao e herdado.
+    assert np.count_nonzero(confirmed) > 0
+    assert not np.any(confirmed[:, :55])
+
+
 def test_deferral_fields_declared_in_all_states(worker):
     # Recuperacao sem referencia tambem declara os campos de quarentena.
     generation = worker.new_generation(preserve_identity=True)
