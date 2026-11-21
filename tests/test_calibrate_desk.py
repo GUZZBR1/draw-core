@@ -64,7 +64,7 @@ def test_sugere_piso_no_ponto_medio_da_regra_original(tmp_path):
 def test_sugere_veto_sobre_o_maior_logit_de_mesa_vazia(tmp_path):
     """Regra de referência: -6.98 na mesa vazia → veto -3.0.
     Aqui a mesa nova chega a -5.0 → veto -1.0, e nenhuma folha
-    observada cai sob ele."""
+    vetável observada cai sob ele."""
     path = _write_telemetry(
         tmp_path,
         [
@@ -77,7 +77,16 @@ def test_sugere_veto_sobre_o_maior_logit_de_mesa_vazia(tmp_path):
     )
     summary = cd.summarize([path])
     assert summary["presence_empty"] == [-5.0, -8.2]
-    assert summary["presence_sheet"] == [2.1, -0.4, 1.0]
+    # Detecção neural direta é imune ao veto (retorna antes do
+    # check do logit) — fica à parte do lado que o veto alcança.
+    assert summary["presence_sheet"] == [-0.4, 1.0]
+    assert summary["presence_neural"] == [2.1]
+    assert summary["source_counts"] == {
+        "veto": 2,
+        "neural": 1,
+        "classic": 1,
+        "presence_only": 1,
+    }
     sug = cd.suggest(summary)["presence_veto_logit"]
     assert sug["value"] == pytest.approx(-1.0)
     assert sug["sheets_vetoed"] == 0
@@ -103,6 +112,32 @@ def test_folha_sob_o_veto_sugerido_anula_a_sugestao(tmp_path):
     assert sug["value"] is None
     assert sug["sheets_vetoed"] == 1
     assert "não separa" in sug["evidence"]
+
+
+def test_deteccao_neural_sob_o_veto_nao_e_contada_como_vetada(tmp_path):
+    """A neural devolve cantos antes do check do veto: uma detecção
+    neural com logit sob o veto proposto NÃO morreria — não pode
+    anular a sugestão. Só classic/presence_only estão sob o veto."""
+    path = _write_telemetry(
+        tmp_path,
+        [
+            _acq("veto", -6.0),
+            _acq("neural", -2.5),  # neural achou cantos: imune ao veto
+            _acq("classic", 1.5),
+        ],
+    )
+    sug = cd.suggest(cd.summarize([path]))["presence_veto_logit"]
+    assert sug["value"] == pytest.approx(-2.0)
+    assert sug["sheets_vetoed"] == 0
+
+
+def test_veto_sem_lado_de_folha_nao_valida(tmp_path):
+    """Só mesa vazia na captura: o veto numérico não pode ser
+    validado contra folha real — a sugestão é None, não -6.0."""
+    path = _write_telemetry(tmp_path, [_acq("veto", -10.0), _acq("none", -7.0)])
+    sug = cd.suggest(cd.summarize([path]))["presence_veto_logit"]
+    assert sug["value"] is None
+    assert "com folha" in sug["evidence"]
 
 
 def test_sem_um_lado_nao_ha_sugestao(tmp_path):
@@ -136,10 +171,22 @@ def test_fit_reject_e_pixel_scale_entram_na_sumarizacao(tmp_path):
                 "tracker_after": {"pixel_scale": 1.5},
             },
             _acq("none", None, {"reason": "unsupported"}),
+            # low_presence carrega FRAÇÃO DE FOREGROUND da máscara —
+            # métrica diferente da razão de contorno; não entra na
+            # evidência do _MIN_CONTOUR_AREA_RATIO.
+            _acq(
+                "none",
+                None,
+                {"reason": "low_presence", "area_ratio": 0.31},
+            ),
         ],
     )
     summary = cd.summarize([path])
-    assert summary["fit_reject_reasons"] == {"min_area": 1, "unsupported": 1}
+    assert summary["fit_reject_reasons"] == {
+        "min_area": 1,
+        "unsupported": 1,
+        "low_presence": 1,
+    }
     assert summary["fit_reject_areas"] == [0.008]
     assert summary["pixel_scales"] == [1.5]
     assert "min_area" in cd.suggest(summary)["min_contour_area_ratio"]["evidence"]
@@ -148,12 +195,17 @@ def test_fit_reject_e_pixel_scale_entram_na_sumarizacao(tmp_path):
 def test_main_emite_relatorio_json(tmp_path, capsys):
     path = _write_telemetry(
         tmp_path,
-        [_acq("veto", -7.0), _snapshot(rejects=[0.05], accepts=[0.35])],
+        [
+            _acq("veto", -7.0),
+            _acq("classic", 2.0),
+            _snapshot(rejects=[0.05], accepts=[0.35]),
+        ],
     )
     assert cd.main([str(path)]) == 0
     report = json.loads(capsys.readouterr().out)
-    assert report["acquisitions"] == 1
+    assert report["acquisitions"] == 2
     assert report["snapshots"] == 1
+    assert report["source_counts"] == {"veto": 1, "classic": 1}
     sugs = report["suggestions"]
     assert sugs["presence_veto_logit"]["value"] == pytest.approx(-3.0)
     assert sugs["coverage_iou_floor"]["value"] == pytest.approx(0.2)
@@ -163,7 +215,8 @@ def test_main_aceita_diretorio_de_sessao(tmp_path, capsys):
     session = tmp_path / "sessao-nova"
     session.mkdir()
     (session / "telemetry.jsonl").write_text(
-        json.dumps(_acq("veto", -4.0)) + "\n", encoding="utf-8"
+        json.dumps(_acq("veto", -4.0)) + "\n" + json.dumps(_acq("classic", 1.2)) + "\n",
+        encoding="utf-8",
     )
     assert cd.main([str(session)]) == 0
     report = json.loads(capsys.readouterr().out)

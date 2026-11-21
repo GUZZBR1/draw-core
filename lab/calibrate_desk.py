@@ -12,9 +12,12 @@ valores observados:
 - PRESENCE_VETO_LOGIT: maior logit de presença medido em aquisição
   sem folha + 4.0 de margem. Referência: -6.98 + 4.0 -> -3.0.
 
-As saídas são SUGESTÕES com a evidência ao lado: cabe a quem opera
-confirmar que os rejeitados eram mesmo fantasmas e que a folha da
-mesa nova não cai na faixa do veto.
+As saídas são SUGESTÕES com a evidência ao lado. Limite epistêmico:
+a classificação folha/vazio é pelo DESFECHO da detecção, não por
+verdade de cena — uma folha real perdida pelo detector contamina o
+lado "vazio" e um fantasma aceito contamina o lado "folha". O
+relatório conta as fontes para a conferência visual da captura
+ficar a um passo (lab/desk_capture grava as pranchas de cena).
 
 Uso:
   python -m lab.calibrate_desk captures/telemetry.jsonl [mais.jsonl ...]
@@ -30,10 +33,16 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-# Fontes de aquisição que significam "a folha estava lá" —
-# neural/classic fecharam cantos, presence_only viu papel sem quad.
-_SHEET_SOURCES = {"neural", "classic", "presence_only"}
+# O veto de presença só se aplica quando a neural NÃO fecha cantos
+# (app.py: corners retornam antes do check do logit). Só os
+# desfechos classic/presence_only estão sob o veto — a detecção
+# neural direta é imune a ele por construção.
+_VETOABLE_SHEET_SOURCES = {"classic", "presence_only"}
 _EMPTY_SOURCES = {"veto", "none"}
+# Razões de rejeição cujo area_ratio é razão de contorno — a
+# métrica do _MIN_CONTOUR_AREA_RATIO. low_presence carrega fração
+# de foreground da máscara (métrica diferente) e ficaria misturada.
+_CONTOUR_AREA_REASONS = {"min_area", "unsupported", "fit_failed", "implausible"}
 
 
 def _iter_records(paths):
@@ -64,13 +73,17 @@ def summarize(paths):
     accepts ficam em anel de 32 por linha — juntados, repetem-se
     entre snapshots e por isso vão a conjuntos deduplicados por
     valor). Os logits vêm dos eventos de aquisição: `presence_logit`
-    classificado pelo desfecho da detecção.
+    classificado pelo desfecho da detecção — `presence_sheet` guarda
+    só os desfechos que o veto alcança (classic/presence_only); a
+    detecção neural direta fica à parte porque é imune ao veto.
     """
     summary = {
         "coverage_reject": [],
         "coverage_accept": [],
         "presence_empty": [],
         "presence_sheet": [],
+        "presence_neural": [],
+        "source_counts": {},
         "fit_reject_reasons": {},
         "fit_reject_areas": [],
         "pixel_scales": set(),
@@ -83,11 +96,17 @@ def summarize(paths):
             summary["acquisitions"] += 1
             logit = rec.get("presence_logit")
             source = rec.get("source")
+            if source:
+                summary["source_counts"][source] = (
+                    summary["source_counts"].get(source, 0) + 1
+                )
             if isinstance(logit, (int, float)):
-                if source in _SHEET_SOURCES:
+                if source in _VETOABLE_SHEET_SOURCES:
                     summary["presence_sheet"].append(float(logit))
                 elif source in _EMPTY_SOURCES:
                     summary["presence_empty"].append(float(logit))
+                elif source == "neural":
+                    summary["presence_neural"].append(float(logit))
             fit = rec.get("fit_reject")
             if isinstance(fit, dict):
                 reason = fit.get("reason")
@@ -96,7 +115,7 @@ def summarize(paths):
                         summary["fit_reject_reasons"].get(reason, 0) + 1
                     )
                 area = fit.get("area_ratio")
-                if isinstance(area, (int, float)):
+                if reason in _CONTOUR_AREA_REASONS and isinstance(area, (int, float)):
                     summary["fit_reject_areas"].append(float(area))
             for side in ("tracker_before", "tracker_after"):
                 diag = rec.get(side) or {}
@@ -153,20 +172,23 @@ def suggest(summary, margin=4.0):
         }
 
     empty = summary["presence_empty"]
-    if empty:
+    sheet = summary["presence_sheet"]
+    if empty and sheet:
         veto = round(max(empty) + margin, 4)
         # Folhas cuja presença cairia sob o veto sugerido: cada uma
         # é uma folha real que o veto mataria nesta mesa — logo a
-        # regra não separa aqui e a sugestão honesta é None.
-        sheets_below = sum(1 for logit in summary["presence_sheet"] if logit <= veto)
+        # regra não separa aqui e a sugestão honesta é None. Só
+        # classic/presence_only entram: a detecção neural devolve
+        # cantos antes do check do veto e é imune a ele.
+        sheets_below = sum(1 for logit in sheet if logit <= veto)
         if sheets_below:
             out["presence_veto_logit"] = {
                 "value": None,
                 "evidence": (
                     f"maior logit sem folha {max(empty)} + margem {margin} "
                     f"= {veto}, mas {sheets_below} aquisição(ões) com folha "
-                    f"(menor logit {min(summary['presence_sheet'])}) cairiam "
-                    f"sob ele — veto não separa nesta mesa"
+                    f"(menor logit {min(sheet)}) cairiam sob ele — "
+                    f"veto não separa nesta mesa"
                 ),
                 "sheets_vetoed": sheets_below,
             }
@@ -180,9 +202,13 @@ def suggest(summary, margin=4.0):
                 "sheets_vetoed": 0,
             }
     else:
+        missing = "mesa vazia" if not empty else "com folha"
         out["presence_veto_logit"] = {
             "value": None,
-            "evidence": "sem aquisições de mesa vazia na captura",
+            "evidence": (
+                f"sem aquisições de {missing} na captura — o veto "
+                f"precisa dos dois lados para ser validado"
+            ),
         }
 
     out["min_contour_area_ratio"] = {
@@ -225,8 +251,15 @@ def main(argv=None):
         "inputs": [str(p) for p in args.telemetry],
         "acquisitions": summary["acquisitions"],
         "snapshots": summary["snapshots"],
+        "source_counts": summary["source_counts"],
         "fit_reject_reasons": summary["fit_reject_reasons"],
         "suggestions": suggest(summary, margin=args.margin),
+        "caveats": [
+            "classes folha/vazio derivam do desfecho da detecção, "
+            "não de verdade de cena — folhas perdidas e fantasmas "
+            "aceitos contaminam os lados; confirme nas pranchas "
+            "da captura antes de aplicar um valor sugerido",
+        ],
     }
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0
