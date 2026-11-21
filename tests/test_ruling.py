@@ -651,6 +651,74 @@ def test_shadow_shoulders_with_a_gap_at_the_fold_edge_do_not_exempt_it():
     assert (out[:, 566:634] > 0.5).sum() == 0
 
 
+def test_two_equal_strokes_crossing_the_fold_are_both_kept():
+    """Caso do review: dois tracos de 6 px com a MESMA extensao (20 colunas
+    de cada lado) entre quatro ombros de 13. Antes, cada traco era o "ombro
+    mais longo" do outro e os dois perdiam o miolo; agrupando por gap, os
+    dois atravessam ALEM do grupo dos ombros (review #139)."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        y = 80 + 40 * k
+        prob[y : y + 2, :] = 0.95
+        prob[y : y + 6, 560:640] = 0.95
+        if k % 3 == 0:  # k in {0, 3, 6, 9}: quatro linhas com ombros
+            prob[y : y + 6, 547:560] = 0.95
+            prob[y : y + 6, 640:653] = 0.95
+    strokes = (80 + 40 * 1, 80 + 40 * 7)  # fora do grupo dos ombros
+    for y in strokes:
+        prob[y : y + 6, 540:660] = 0.95  # 20 colunas de cada lado
+    out = ruling.RulingFilter().apply(prob.copy())
+    for y in strokes:
+        assert (out[y : y + 6, 566:634] > 0.5).all()  # o miolo de cada traco
+    others = out[:, 566:634] > 0.5
+    for y in strokes:
+        others[y : y + 6, :] = False
+    assert others.sum() == 0  # e so eles
+
+
+def test_a_stroke_crossing_a_split_fold_gets_one_verdict_on_both_halves():
+    """Ombros assimetricos: 13 colunas a esquerda e 20 a direita do vinco
+    [560,700), que a divisa das metades parte em 600. Um traco com 18
+    colunas de continuacao de cada lado era medido por um ombro diferente
+    em cada trilha (passava na esquerda, nao na direita) e saia pela
+    metade; julgado pelo MESMO ombro comum (o maior dos dois lados), o
+    veredito e unico: nao passa em nenhuma (review #139)."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        y = 80 + 40 * k
+        prob[y : y + 2, :] = 0.95
+        prob[y : y + 6, 560:700] = 0.95  # a faixa cruza a divisa em 600
+        if k % 2 == 0:
+            prob[y : y + 6, 547:560] = 0.95  # ombros de 13 a esquerda
+            prob[y : y + 6, 700:720] = 0.95  # ombros de 20 a direita
+    y = 80 + 40 * 7
+    prob[y : y + 6, 542:718] = 0.95  # traco: 18 colunas de cada lado
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[:, 562:698] > 0.5).sum() == 0  # o vinco inteiro sai
+
+
+def test_a_clear_stroke_crossing_a_split_fold_is_kept_on_both_halves():
+    """Mesma geometria (ombros 13/20, vinco na divisa), mas o traco vai 30
+    colunas alem de cada ponta — claramente alem do ombro comum (20 + 3):
+    o miolo fica INTEIRO nas duas metades (review #139)."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        y = 80 + 40 * k
+        prob[y : y + 2, :] = 0.95
+        prob[y : y + 6, 560:700] = 0.95
+        if k % 2 == 0:
+            prob[y : y + 6, 547:560] = 0.95
+            prob[y : y + 6, 700:720] = 0.95
+    y = 80 + 40 * 7
+    prob[y : y + 6, 530:730] = 0.95  # traco: 30 colunas de cada lado
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[y : y + 6, 560:600] > 0.5).all()  # miolo a esquerda da divisa
+    assert (out[y : y + 6, 600:698] > 0.5).all()  # e a direita
+    others = out[:, 562:698] > 0.5
+    others[y : y + 6, :] = False
+    assert others.sum() == 0  # e so ele
+
+
 def test_a_long_continuation_on_a_single_line_is_still_a_stroke():
     """Ombros de 20 colunas dos dois lados, mas numa linha so: continuacao
     rara = traco de caneta. A faixa dessa linha fica; a das outras sai
@@ -720,6 +788,23 @@ def test_a_dash_thicker_than_a_shared_ripple_is_kept():
     out = ruling.RulingFilter().apply(prob.copy())
     assert ((out > 0.5) & dash).sum() >= 0.97 * dash.sum()
     assert ((out > 0.5) & ~dash)[:, 560:640].sum() == 0
+
+
+def test_a_fold_ending_a_vote_window_before_the_split_is_erased():
+    """A faixa termina a exatas 12 colunas da divisa das metades: a janela
+    de voto ainda existe, mas a cauda alem dela e vazia. A medida da
+    extensao nao pode quebrar nesse caso (argmax num eixo vazio) e o
+    interior da faixa sai (review #139)."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        y = 80 + 40 * k
+        prob[y : y + 2, :] = 0.95
+        prob[y : y + 6, 560:588] = 0.95  # a faixa: borda direita em 600 - 12
+        if k % 2 == 0:  # seis linhas seguem grossas nas janelas de voto
+            prob[y : y + 6, 547:560] = 0.95
+            prob[y : y + 6, 588:600] = 0.95
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[:, 566:582] > 0.5).sum() == 0
 
 
 def _two_line_segment(n, second):

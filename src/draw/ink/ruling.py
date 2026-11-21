@@ -618,10 +618,27 @@ def _extent(cols, need):
     """
     lead = _leading_run(cols)
     ok = cols[:, :need].mean(axis=1) >= 0.85
-    return np.where(ok, need + _leading_run(cols[:, need:]), lead)
+    # a faixa pode terminar a exatas `need` colunas da borda da trilha: sem
+    # cauda depois da janela de voto, a extensão além dela vale zero
+    tail = _leading_run(cols[:, need:]) if cols.shape[1] > need else 0
+    return np.where(ok, need + tail, lead)
 
 
-def _joined_through(raw, gutter):
+def _bulk_ext(vals):
+    """O comprimento comum dos ombros: o topo do maior grupo de extensões.
+
+    Ombros e traços viram grupos separados por um gap claro (> _GUTTER_EDGE_RUN
+    entre extensões vizinhas). O padrão comum é o MAIOR grupo; no empate, o de
+    extensões menores (argmax pega o primeiro = viés de preservar tinta). Dois
+    traços iguais formam o próprio grupo: nenhum é "ombro um do outro".
+    """
+    srt = np.sort(vals)
+    bounds = np.flatnonzero(np.diff(srt) > _GUTTER_EDGE_RUN) + 1
+    groups = np.split(srt, bounds)
+    return groups[int(np.argmax([g.size for g in groups]))][-1]
+
+
+def _joined_through(raw, gutter, edge_bulk=None):
     """(K, X): trecho da linha dentro da faixa que continua grosso fora dela.
 
     A sombra engrossa todas as linhas por igual, então por espessura um traço
@@ -629,10 +646,11 @@ def _joined_through(raw, gutter):
     a linha segue grossa (>= pauta + margem) por _PROB_MIN_RUN colunas logo
     antes E logo depois da faixa. O ombro da sombra, que afina de forma
     irregular, não dura isso — e quando dura, aparece escalonado em muitas
-    linhas: nesse padrão comum só isenta quem vai claramente ALÉM do ombro
-    mais longo das outras linhas (um traço atravessa mais longe). Na divisa
-    das metades a trilha só vê um lado, e a borda da trilha não conta como
-    ponta a conferir.
+    linhas: nesse padrão comum só isenta quem vai claramente ALÉM do maior
+    grupo de extensões (os ombros formam o grupo; um traço atravessa mais
+    longe). Na divisa das metades a trilha só vê um lado, mas julga pelo MESMO
+    ombro comum (`edge_bulk`, medido nas duas pontas da faixa) — um traço não
+    pode sair isento numa metade e apagado na outra.
     """
     k, x = raw.shape
     out = np.zeros_like(raw)
@@ -655,11 +673,12 @@ def _joined_through(raw, gutter):
                     exts.append(_extent(raw[:, b:], need))
                 ext = np.minimum.reduce(exts)
                 vals = ext[cont]
-                srt = np.sort(vals)
-                top, second = srt[-1], srt[-2]
-                n_top = int((vals == top).sum())
-                others = np.where((vals == top) & (n_top == 1), second, top)
-                keep = vals > others + _GUTTER_EDGE_RUN
+                bulk = None
+                if edge_bulk is not None and len(sides) == 1:
+                    bulk = edge_bulk.get("left" if a == 0 else "right")
+                if bulk is None:
+                    bulk = _bulk_ext(vals)
+                keep = vals > bulk + _GUTTER_EDGE_RUN
                 cont &= np.isin(np.arange(k), np.flatnonzero(cont)[keep])
             out[:, a:b] = cont[:, None]
     return out
@@ -766,13 +785,44 @@ def erase_tracks(prob, tracks, h_pauta):
         [(t.x0, t.x1, raw) for t, raw in zip(tracks, thick, strict=True)], w
     )
     cap = h_run + _THIN_MARGIN + _GUTTER_EXTRA
-    for track, (pattern, yi, run), raw in zip(tracks, passes, thick, strict=True):
+    # uma faixa que cruza a divisa é julgada em cada trilha, mas pela MESMA
+    # referência: o maior ombro comum medido nas pontas da faixa dos dois
+    # lados (um traço não pode sair isento numa metade e apagado na outra)
+    edge_bulks = [dict() for _ in tracks]
+    for i in range(len(tracks) - 1):
+        xc = tracks[i].x1
+        if tracks[i + 1].x0 != xc or not (gutter_full[xc - 1] and gutter_full[xc]):
+            continue
+        a = xc - 1
+        while a > 0 and gutter_full[a - 1]:
+            a -= 1
+        b = xc
+        while b < w and gutter_full[b]:
+            b += 1
+        bulk = 0
+        for t, raw in zip(tracks, thick, strict=True):
+            la, lb = a - t.x0, b - t.x0  # a faixa em coordenada local da trilha
+            if t.x1 == xc and la >= _PROB_MIN_RUN:
+                vote = raw[:, la - _PROB_MIN_RUN : la].mean(axis=1) >= 0.85
+                if vote.sum() > max(2, raw.shape[0] // 4):
+                    ext = _extent(raw[:, :la][:, ::-1], _PROB_MIN_RUN)
+                    bulk = max(bulk, _bulk_ext(ext[vote]))
+            if t.x0 == xc and lb + _PROB_MIN_RUN <= raw.shape[1]:
+                vote = raw[:, lb : lb + _PROB_MIN_RUN].mean(axis=1) >= 0.85
+                if vote.sum() > max(2, raw.shape[0] // 4):
+                    ext = _extent(raw[:, lb:], _PROB_MIN_RUN)
+                    bulk = max(bulk, _bulk_ext(ext[vote]))
+        edge_bulks[i]["right"] = bulk
+        edge_bulks[i + 1]["left"] = bulk
+    for i, (track, (pattern, yi, run), raw) in enumerate(
+        zip(tracks, passes, thick, strict=True)
+    ):
         jstar = jstar_t[pattern].astype(np.int64)
         thin = (run >= 1) & (run <= h_run + _THIN_MARGIN)
         gutter = gutter_full[track.x0 : track.x1]
         if gutter.any():
             shaded = (run >= 1) & (run <= cap) & gutter[None, :]
-            shaded &= ~_joined_through(raw, gutter)
+            shaded &= ~_joined_through(raw, gutter, edge_bulks[i])
             shaded &= ~_stroke_on_shade(run, gutter)
             thin |= shaded
             raw = raw & ~(gutter[None, :] & (run <= cap))
