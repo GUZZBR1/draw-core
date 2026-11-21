@@ -18,7 +18,7 @@ from .config import InkConfig, resolve_border_guard_px
 def _inset_quad(corners, inset_px):
     """Recua um quadrilatero convexo em `inset_px` para dentro no espaco da camera."""
     pts = np.asarray(corners, dtype=np.float64)
-    if pts.shape != (4, 2):
+    if pts.shape != (4, 2) or not np.isfinite(pts).all():
         return None
     center = pts.mean(axis=0)
     normals = []
@@ -43,6 +43,8 @@ def _inset_quad(corners, inset_px):
         if abs(det) < 1e-6:
             return None
         inset_pts[i] = np.linalg.solve(mat, np.array([offsets[prev], offsets[i]]))
+    if not np.isfinite(inset_pts).all():
+        return None
     return inset_pts
 
 
@@ -65,6 +67,12 @@ def _border_guard_mask(
     mask[:, :base] = False
     mask[:, -base:] = False
     if configured is None and corners is not None:
+        # Quad corrompido (NaN/degenerado): sem dominio para julgar
+        # a passada — devolver uma mascara todo-False apagaria o
+        # provisorio e contaria retracao falsa; None = a guarda se
+        # abstem nesta passada.
+        if not np.isfinite(corners).all():
+            return None
         inset_cam = _inset_quad(corners, camera_jitter_px)
         if inset_cam is not None:
             # Mesma homografia camera->pagina do warp/registration
@@ -75,11 +83,12 @@ def _border_guard_mask(
                 inset_cam.reshape(1, 4, 2).astype(np.float32),
                 homography,
             )[0]
-            # Rasteriza o inset no centro de cada pixel (coordenadas
-            # inteiras), testando os quatro semi-planos. Arredondar
-            # o vertice projetado para o pixel mais proximo admitia
-            # a amostra de fronteira, mais perto da borda do que o
-            # inset de camera previsto.
+            # Rasteriza o inset testando os QUATRO cantos de cada
+            # pixel contra os quatro semi-planos: o pixel so entra
+            # na area util inteiro. Testar so o centro admitia a
+            # amostra de fronteira ~0,5 px de pagina mais perto da
+            # borda do que o inset de camera previsto — dentro da
+            # faixa de jitter que a guarda existe para excluir.
             xs = np.arange(w, dtype=np.float64)[None, :]
             ys = np.arange(h, dtype=np.float64)[:, None]
             cx, cy = inset_page.mean(axis=0)
@@ -88,9 +97,15 @@ def _border_guard_mask(
                 p1 = inset_page[i].astype(np.float64)
                 p2 = inset_page[(i + 1) % 4].astype(np.float64)
                 ex, ey = p2[0] - p1[0], p2[1] - p1[1]
-                cross = ex * (ys - p1[1]) - ey * (xs - p1[0])
-                inside &= cross * (ex * (cy - p1[1]) - ey * (cx - p1[0])) >= 0
+                ref = ex * (cy - p1[1]) - ey * (cx - p1[0])
+                for dx, dy in ((-0.5, -0.5), (0.5, -0.5), (-0.5, 0.5), (0.5, 0.5)):
+                    cross = ex * (ys + dy - p1[1]) - ey * (xs + dx - p1[0])
+                    inside &= cross * ref >= 0
             mask &= inside
+    if not mask.any():
+        # Dominio inspecionado vazio nao e "tudo falhou": a guarda
+        # nao pode julgar esta passada, entao se abstem.
+        return None
     return mask
 
 
@@ -600,6 +615,34 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         if self._config.border_guard_px == 0:
             return None
         return registration._sampled_footprint(anchor, corners, shape)
+
+    def _register_into(
+        self, anchor, reg_corners, prob, visible, visible_cam, pass_corners=None
+    ):
+        """Re-registra a passada numa ancora nova e atualiza _last_registration.
+
+        Devolve (prob, visible, sampled) registrados. `pass_corners` e o
+        quad ao vivo que produziu a prob: sob banda morta `reg_corners`
+        e o congelado, e sem ele a mascara de visibilidade desalinha do
+        traco em ~tau px (review do PR #118) — os sitios de
+        re-ancoragem o passam sempre.
+        """
+        sampled = self._pass_sampled(anchor, reg_corners, prob.shape)
+        registered_prob, registered_visible = registration._register_ink_probability(
+            prob,
+            anchor,
+            reg_corners,
+            visible,
+            visible_cam=visible_cam,
+            pass_corners=pass_corners,
+            sampled=sampled,
+        )
+        self._last_registration = (
+            None if anchor is None else anchor.copy(),
+            None if reg_corners is None else reg_corners.copy(),
+            None if pass_corners is None else pass_corners.copy(),
+        )
+        return registered_prob, registered_visible, sampled
 
     def submit(self, page):
         """Entrega a página retificada mais recente (latest-wins).
@@ -1522,9 +1565,9 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     # A passada vota na propria geometria: registro
                     # identidade, a mesma da 1a passada da ancora.
                     registration_corners = anchor.copy()
-                    sampled = self._pass_sampled(
-                        anchor, registration_corners, prob.shape
-                    )
+                    # Registro identidade (ancora contra ela
+                    # mesma): a pegada e a grade inteira.
+                    sampled = None
                     registered_prob, registered_visible = (
                         registration._register_ink_probability(
                             prob,
@@ -1760,21 +1803,11 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     # so quando ha mascara para confrontar.
                     identity_sampled = sampled
                     if identity_sampled is None and identity_visible is not None:
-                        footprint = registration._sampled_footprint(
+                        # Recovering implica portao de movimento
+                        # parado: nao ha correcao afim a desfazer,
+                        # so a pegada do registro.
+                        identity_sampled = registration._sampled_footprint(
                             anchor, registration_corners, prob.shape
-                        )
-                        identity_sampled = (
-                            footprint
-                            if motion_decision != "correct"
-                            else (
-                                motion_fix.warp_back(
-                                    np.ones(prob.shape, np.uint8)
-                                    if footprint is None
-                                    else footprint.astype(np.uint8),
-                                    nearest=True,
-                                )
-                                > 0
-                            )
                         )
                     # Sobreposicao quase nula da pegada com a regiao
                     # usavel da ancora nao e evidencia — distinta de
@@ -1787,7 +1820,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         if identity_guard is None
                         else int(np.count_nonzero(identity_guard))
                     )
-                    usable_px = usable_total_px
                     if identity_sampled is not None:
                         usable_domain = (
                             identity_sampled
@@ -2034,34 +2066,13 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     # estado INTOCADO (a v3 nao move o estado).
                     # A decisao do portao foi contra a ancora velha.
                     motion_decision = None
-                    sampled = self._pass_sampled(
+                    registered_prob, registered_visible, sampled = self._register_into(
                         self._anchor_corners,
-                        (self._reg_frozen_corners if reg_deadband else corners),
-                        prob.shape,
-                    )
-                    registered_prob, registered_visible = (
-                        registration._register_ink_probability(
-                            prob,
-                            self._anchor_corners,
-                            (self._reg_frozen_corners if reg_deadband else corners),
-                            visible,
-                            visible_cam=visible_cam,
-                            sampled=sampled,
-                        )
-                    )
-                    self._last_registration = (
-                        None
-                        if self._anchor_corners is None
-                        else self._anchor_corners.copy(),
-                        (
-                            None
-                            if (self._reg_frozen_corners if reg_deadband else corners)
-                            is None
-                            else (
-                                self._reg_frozen_corners if reg_deadband else corners
-                            ).copy()
-                        ),
-                        None if corners is None else corners.copy(),
+                        self._reg_frozen_corners if reg_deadband else corners,
+                        prob,
+                        visible,
+                        visible_cam,
+                        pass_corners=corners,
                     )
                     force_publish = True
             follow_abstain = False
@@ -2099,34 +2110,13 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     # re-ancoragem. A decisao do portao foi contra a
                     # ancora velha.
                     motion_decision = None
-                    sampled = self._pass_sampled(
+                    registered_prob, registered_visible, sampled = self._register_into(
                         self._anchor_corners,
-                        (self._reg_frozen_corners if reg_deadband else corners),
-                        prob.shape,
-                    )
-                    registered_prob, registered_visible = (
-                        registration._register_ink_probability(
-                            prob,
-                            self._anchor_corners,
-                            (self._reg_frozen_corners if reg_deadband else corners),
-                            visible,
-                            visible_cam=visible_cam,
-                            sampled=sampled,
-                        )
-                    )
-                    self._last_registration = (
-                        None
-                        if self._anchor_corners is None
-                        else self._anchor_corners.copy(),
-                        (
-                            None
-                            if (self._reg_frozen_corners if reg_deadband else corners)
-                            is None
-                            else (
-                                self._reg_frozen_corners if reg_deadband else corners
-                            ).copy()
-                        ),
-                        None if corners is None else corners.copy(),
+                        self._reg_frozen_corners if reg_deadband else corners,
+                        prob,
+                        visible,
+                        visible_cam,
+                        pass_corners=corners,
                     )
                     arbitration_abstain = False
                     force_publish = True

@@ -80,6 +80,25 @@ def test_confirmed_ink_is_never_retracted():
     assert result["retracted_px_total"] == 0
 
 
+def test_guard_excluded_provisional_is_not_retraction():
+    acc = accumulator_mod.LayeredInkAccumulator(threshold=0.7)
+    first = acc.add(_prob([(FLICKER, 0.85), (WEAK, 0.85)]))
+    assert _px(first["provisional"], FLICKER) == 300
+    assert _px(first["provisional"], WEAK) == 200
+    # A re-ancoragem alargou a guarda sobre a faixa do provisorio:
+    # a passada deixou de inspecionar ali — a tinta nao sumiu e
+    # nao pode contar como retracao. Dentro da guarda a retracao
+    # segue valendo.
+    guard = np.ones((H, W), dtype=bool)
+    guard[FLICKER] = False
+    result = None
+    for _ in range(3):
+        result = acc.add(_prob([]), valid_mask=guard)
+    assert _px(result["provisional"], FLICKER) == 0
+    assert _px(result["provisional"], WEAK) == 0
+    assert result["retracted_px_total"] == 200
+
+
 class _ScriptedProbInk:
     threshold = 0.7
 

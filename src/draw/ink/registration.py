@@ -155,6 +155,27 @@ def _deadband_step(frozen, corners, over):
     return frozen, frozen, over, False, shift
 
 
+def _sampled_warp(matrix, shape):
+    """Pegada amostrada de um warp de registro, na grade `shape`.
+
+    True onde o warp leu de fato a passada; False na faixa que o
+    registro preencheu de zeros. Unica fonte do raster — a pegada
+    de _sampled_footprint e o clipe de visibilidade do registro
+    nunca divergem.
+    """
+    size = (shape[1], shape[0])
+    return (
+        cv2.warpPerspective(
+            np.ones(shape, np.uint8),
+            matrix,
+            size,
+            flags=cv2.INTER_NEAREST,
+            borderValue=0,
+        )
+        > 0
+    )
+
+
 def _register_ink_probability(
     prob,
     anchor,
@@ -213,16 +234,7 @@ def _register_ink_probability(
             # ausencia — a folha re-posta noutra pose apagaria o
             # traco (review do PR #118).
             if sampled is None:
-                sampled = (
-                    cv2.warpPerspective(
-                        np.ones(prob.shape, np.uint8),
-                        matrix,
-                        size,
-                        flags=cv2.INTER_NEAREST,
-                        borderValue=0,
-                    )
-                    > 0
-                )
+                sampled = _sampled_warp(matrix, prob.shape)
             visible &= sampled
         elif visible is not None:
             visible = (
@@ -255,14 +267,4 @@ def _sampled_footprint(anchor, corners, shape):
     matrix = _registration_matrix(anchor, corners, shape)
     if _registration_is_identity(matrix):
         return None
-    size = (shape[1], shape[0])
-    return (
-        cv2.warpPerspective(
-            np.ones(shape, np.uint8),
-            matrix,
-            size,
-            flags=cv2.INTER_NEAREST,
-            borderValue=0,
-        )
-        > 0
-    )
+    return _sampled_warp(matrix, shape)

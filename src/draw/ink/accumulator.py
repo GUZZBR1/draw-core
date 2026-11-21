@@ -92,6 +92,13 @@ class LayeredInkAccumulator:
             valid_mask = np.asarray(valid_mask, dtype=bool)
             if valid_mask.shape != prob.shape:
                 valid_mask = None
+            elif not valid_mask.any():
+                # Dominio inspecionado vazio nao e "tudo falhou a
+                # inspecao": a passada nao pode julgar pixel algum
+                # (quad corrompido, pegada NaN), entao se abstem
+                # como uma passada sem mascara — nao apaga
+                # provisorio, nao conta retracao, nao vota contra.
+                valid_mask = None
         if self._confirmed is None or self._confirmed.shape != prob.shape:
             self._removal_streak = None
             self._confirmed = np.zeros(prob.shape, dtype=np.uint8)
@@ -271,12 +278,18 @@ class LayeredInkAccumulator:
             # apagador; sem este congelamento, toda oclusao virava
             # retracao na regua e a tinta piscava ao reaparecer.
             # Pixels fora de valid_mask (guarda de borda) nao congelam
-            # provisorio velho quando a guarda alarga.
-            occluded = ~visible if valid_mask is None else (~visible & valid_mask)
+            # provisorio velho quando a guarda alarga — o clipe de
+            # valid_mask abaixo os remove de qualquer forma.
+            occluded = ~visible
             provisional_now = provisional_now | (previous_provisional & occluded)
         if valid_mask is not None:
             provisional_now = provisional_now & valid_mask
         retracted = previous_provisional & ~provisional_now & ~confirmed_now
+        if valid_mask is not None:
+            # Pixel excluido so pela guarda (a re-ancoragem a alargou
+            # sobre a faixa) nao e retracao: a tinta nao sumiu — a
+            # passada deixou de inspecionar ali.
+            retracted &= valid_mask
         if np.any(retracted):
             self._retracted_ever |= retracted
         self._provisional_ever |= provisional_now

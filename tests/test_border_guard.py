@@ -1,9 +1,12 @@
 """Regressao da guarda de borda na grade retificada (issue #131)."""
 
+import cv2
 import numpy as np
 import pytest
 
 from draw import contracts
+from draw.ink import identity as _identity
+from draw.ink import registration
 from draw.ink.accumulator import LayeredInkAccumulator
 from draw.ink.config import InkConfig, resolve_border_guard_px
 from draw.ink.worker import PageCleanWorker, _border_guard_mask
@@ -101,6 +104,23 @@ def test_border_guard_config_derivation_and_validation():
     assert explicit is not None
     assert not explicit[:5, :].any()
     assert explicit[5:-5, 5:-5].all()
+
+    # O pixel so entra INTEIRO no inset: a primeira coluna admitida
+    # nunca amostra a menos do jitter de camera (3,5 px) da borda da
+    # folha. Rasterizar pelo centro do pixel admitia uma coluna a
+    # ~3,46 px — dentro da faixa que a guarda existe para excluir.
+    span_quad = np.array(
+        [[200, 100], [620, 100], [620, 600], [200, 600]], dtype=np.float32
+    )
+    mask = _border_guard_mask((1200, 850), None, span_quad)
+    cols = np.flatnonzero(mask.any(axis=0))
+    inv = np.linalg.inv(registration._corners_page_matrix(span_quad, 850, 1200))
+    for col in (cols[0], cols[-1]):
+        cam = cv2.perspectiveTransform(np.array([[[col, 600]]], dtype=np.float32), inv)[
+            0, 0
+        ]
+        assert cam[0] - 200 > 3.5
+        assert 620 - cam[0] > 3.5
 
     with pytest.raises(ValueError, match="border_guard_px"):
         InkConfig(border_guard_px=-1)
@@ -741,7 +761,9 @@ def test_deferred_partial_overlap_does_not_mix_ink():
     amostrada nao pode confirmar sobre o canvas velho enquanto a
     identidade esta pendente (a quarentena misturando tinta de duas
     folhas). Estourada a quarentena o canvas reseta e a tinta velha
-    nao carrega para a folha de substituicao."""
+    nao carrega para a folha de substituicao — E a tinta nova
+    confirma no canvas novo dentro da janela esperada (um canvas
+    que ficasse em branco depois do reset tambem reprovaria)."""
     quad_wide = np.array(
         [[200, 100], [560, 100], [560, 600], [200, 600]], dtype=np.float32
     )
@@ -773,7 +795,9 @@ def test_deferred_partial_overlap_does_not_mix_ink():
         gen = worker.new_generation(preserve_identity=True)
 
         snap = None
-        for _ in range(8):
+        first_new_ink_pass = None
+        canvas_went_blank = False
+        for pass_i in range(1, 11):
             clock.now += 1.1
             worker.submit(
                 contracts.WarpedPage(
@@ -787,12 +811,31 @@ def test_deferred_partial_overlap_does_not_mix_ink():
             # da folha nova nunca pode aparecer confirmada na faixa
             # amostrada do canvas velho enquanto a decisao adia.
             assert int(np.count_nonzero(snap.confirmed[:, 685:810])) == 0
-        # Timeout da quarentena resetou o canvas: a tinta velha
-        # nao carrega para a folha de substituicao.
-        return int(np.count_nonzero(snap.confirmed[100:1100, 9:13]))
+            # O timeout da quarentena zera o canvas (a tinta velha
+            # nao carrega para a folha de substituicao) — o traco
+            # novo cobre as colunas do traco velho na grade do
+            # quad_part, entao so o canvas em branco distingue o
+            # reset de uma carregada de tinta.
+            if not np.count_nonzero(snap.confirmed):
+                canvas_went_blank = True
+            # O traco novo registra nas proprias colunas (0:100)
+            # quando a ancora vira o quad_part apos o reset.
+            if first_new_ink_pass is None and np.count_nonzero(
+                snap.confirmed[100:1100, :100]
+            ):
+                first_new_ink_pass = pass_i
+        # O canvas passou por branco (reset de fato) e a folha nova
+        # nao ficou em branco: a quarentena drena em
+        # _PAGE_IDENTITY_MAX_DEFERRALS + 1 passadas (a do estouro
+        # abstem) e o traco a 0,95 confirma em 3 votos fortes —
+        # limite estrutural: MAX_DEFERRALS + 4.
+        assert canvas_went_blank
+        assert first_new_ink_pass is not None
+        assert first_new_ink_pass <= _identity._PAGE_IDENTITY_MAX_DEFERRALS + 4
+        return int(np.count_nonzero(snap.confirmed[100:1100, :100]))
 
-    assert run_case(None) == 0
-    assert run_case(0) == 0
+    assert run_case(None) > 50_000
+    assert run_case(0) > 50_000
 
 
 def test_cropped_provisional_clears_with_visibility_mask():
@@ -863,6 +906,45 @@ def test_stale_provisional_ink_clears_when_reanchor_widens_guard():
     snap_after = worker.poll_display(0, 0)
     assert snap_after is not None
     assert int(np.count_nonzero(snap_after.provisional[:, 11:16])) == 0
+
+
+def test_corrupt_quad_guard_abstains_instead_of_wiping_provisional():
+    """Quad corrompido (canto NaN): a guarda devolve None e a passada
+    se abstem — dominio inspecionado vazio nao e "tudo falhou a
+    inspecao". Antes: o inset NaN esvaziava a pegada/mascara valida,
+    provisional_now &= {} zerava a camada inteira e retracted contava
+    40k px de tinta "sumida" numa passada com deteccao quebrada."""
+    nan_quad = np.array(
+        [[200, 100], [560, 100], [np.nan, 600], [200, 600]], dtype=np.float32
+    )
+    assert _border_guard_mask((1200, 850), None, nan_quad) is None
+
+    # A mesma invariante na fronteira do acumulador: um valid_mask
+    # todo-False e dominio impossivel de julgar — a passada se
+    # abstem, nao apaga provisorio nem conta retracao.
+    quad = np.array([[200, 100], [560, 100], [560, 600], [200, 600]], dtype=np.float32)
+    img = np.full((1200, 850, 3), 215, np.uint8)
+    img[100:1100, 300:340] = 25
+
+    clock = _Clock()
+    cfg = InkConfig.strict_vote(0.85, border_guard_px=None)
+    worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
+    for _ in range(2):
+        clock.now += 1.1
+        worker.submit(contracts.WarpedPage(img, 0, quad, captured_at=clock.now))
+        worker.pump()
+    snap = worker.poll_display(0, 0)
+    assert snap is not None
+    before = int(np.count_nonzero(snap.provisional))
+    assert before > 0
+
+    clock.now += 1.1
+    worker.submit(contracts.WarpedPage(img, 0, nan_quad, captured_at=clock.now))
+    worker.pump()
+    snap = worker.poll_display(0, 0)
+    assert snap is not None
+    assert int(np.count_nonzero(snap.provisional)) == before
+    assert int(np.count_nonzero(worker._accumulator._retracted_ever)) == 0
 
 
 def test_sim_writer_rejects_none_for_non_nullable_flags():

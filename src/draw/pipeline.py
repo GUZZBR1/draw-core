@@ -489,7 +489,6 @@ class Pipeline:
             )
             visible = seg_clear if visible is None else (visible & seg_clear)
         coverage = self._sheet_coverage_camera()
-        fill_color = None
         if self._config.ink_divnorm:
             # Com ink_divnorm a imagem sobe crua: o par de
             # preenchimentos e a normalização rolam dentro da
