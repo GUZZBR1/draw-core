@@ -1061,6 +1061,11 @@ def _window_size():
     return rect if rect and rect[0] >= 320 and rect[1] >= 160 else default
 
 
+def _wslg_active():
+    """So o WSLg monta /mnt/wslg e expoe as janelas no desktop do Windows."""
+    return Path("/mnt/wslg").is_dir()
+
+
 def _raise_window_on_wsl():
     """Traz a janela para frente do desktop Windows (WSLg).
 
@@ -1070,10 +1075,13 @@ def _raise_window_on_wsl():
     e o TOPMOST do Qt sao engolidos), entao a subida vai pelo lado
     Windows: AttachThreadInput na thread da janela ativa +
     SetForegroundWindow, depois de achar a janela pelo titulo (ate
-    10 s). Fire-and-forget: falhar em qualquer passo so perde a
-    subida, nada mais.
+    10 s). O helper faz um snapshot das janelas "Draw (*)" existentes e
+    espera uma hwnd nova — com outra sessao aberta, ativar a antiga
+    seria pior do que nao fazer nada; no timeout cai para a "Draw" mais
+    fundo na ordem (a recem-criada nasce abaixo). Fire-and-forget:
+    falhar em qualquer passo so perde a subida, nada mais.
     """
-    if "WSL_DISTRO_NAME" not in os.environ:
+    if not _wslg_active():
         return
     ps = (
         "$s='using System;using System.Text;using System.Runtime.InteropServices;"
@@ -1090,13 +1098,20 @@ def _raise_window_on_wsl():
         '[DllImport("user32.dll")]public static extern bool ShowWindowAsync('
         'IntPtr h,int n);[DllImport("kernel32.dll")]public static extern uint '
         "GetCurrentThreadId();}';"
-        "Add-Type -TypeDefinition $s;$t=[IntPtr]::Zero;$n=0;"
-        "while($t -eq [IntPtr]::Zero -and $n -lt 40){$n++;"
+        "Add-Type -TypeDefinition $s;$known=@{};"
         "[W]::EnumWindows({param($h,$l)$b=New-Object Text.StringBuilder 512;"
         "[W]::GetWindowTextA($h,$b,512)|Out-Null;"
-        "if($b.ToString() -like 'Draw (*)'){$script:t=$h};return $true},"
+        "if($b.ToString() -like 'Draw (*)'){$script:known[$h]=$true};"
+        "return $true},[IntPtr]::Zero)|Out-Null;"
+        "$t=[IntPtr]::Zero;$last=[IntPtr]::Zero;$n=0;"
+        "while($t -eq [IntPtr]::Zero -and $n -lt 40){$n++;$last=[IntPtr]::Zero;"
+        "[W]::EnumWindows({param($h,$l)$b=New-Object Text.StringBuilder 512;"
+        "[W]::GetWindowTextA($h,$b,512)|Out-Null;"
+        "if($b.ToString() -like 'Draw (*)'){$script:last=$h;"
+        "if(!$script:known.ContainsKey($h)){$script:t=$h}};return $true},"
         "[IntPtr]::Zero)|Out-Null;"
         "if($t -eq [IntPtr]::Zero){Start-Sleep -Milliseconds 250}};"
+        "if($t -eq [IntPtr]::Zero -and $last -ne [IntPtr]::Zero){$t=$last};"
         "if($t -ne [IntPtr]::Zero){$fg=[W]::GetForegroundWindow();"
         "$ft=[W]::GetWindowThreadProcessId($fg,[ref]([uint32]$p=0));"
         "$me=[W]::GetCurrentThreadId();"

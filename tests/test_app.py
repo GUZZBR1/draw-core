@@ -844,22 +844,23 @@ def test_show_nao_reabre_posicionamento_ao_sair_do_fullscreen(monkeypatch):
     assert moves == []
 
 
-def test_raise_window_on_wsl_so_dispara_powershell_em_wsl(monkeypatch):
+def test_raise_window_on_wsl_so_dispara_powershell_em_wslg(monkeypatch):
     """A subida pelo lado Windows so sai onde ha WSLg.
 
-    Fora do WSL nao ha powershell.exe nem janela hospedada no Windows:
-    o helper nem e invocado. Em WSL, ele procura a janela pelo titulo
-    e a traz para frente com um pulso TOPMOST.
+    Sem /mnt/wslg nao ha janela hospedada no Windows: o helper nem e
+    invocado. Com WSLg, ele procura a janela pelo titulo e a traz para
+    frente via AttachThreadInput + SetForegroundWindow.
     """
     calls = []
-    monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+    monkeypatch.setattr(app_module, "_wslg_active", lambda: False)
     monkeypatch.setattr(app_module.subprocess, "Popen", lambda *a, **k: calls.append(a))
     app_module._raise_window_on_wsl()
     assert calls == []
-    monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
+    monkeypatch.setattr(app_module, "_wslg_active", lambda: True)
     app_module._raise_window_on_wsl()
     assert len(calls) == 1
     assert calls[0][0][0] == "powershell.exe"
+    assert "SetForegroundWindow" in calls[0][0][3]
 
 
 def test_camera_menu_with_many_cameras_scrolls_and_selects_absolute_rows(monkeypatch):
