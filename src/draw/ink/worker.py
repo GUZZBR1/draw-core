@@ -588,11 +588,14 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         """Pegada amostrada do registro, so quando ha consumidor.
 
         Sem guarda ativa o dominio valido nao a consome — o warp
-        da pagina inteira seria descartado. Com guarda, ela segue
-        necessaria mesmo havendo mascara de visibilidade: a fusao
-        provisoria distingue "fora do dominio" (limpa) de "coberto
-        pela mao" (preserva), e a visibilidade sozinha confunde os
-        dois casos.
+        da pagina inteira seria descartado (o registro so precisa
+        da dele quando recorta a visibilidade, e rasteriza a
+        propria nesse caso). Com guarda, ela segue necessaria
+        mesmo havendo mascara de visibilidade: a fusao provisoria
+        distingue "fora do dominio" (limpa) de "coberto pela mao"
+        (preserva), e a visibilidade sozinha confunde os dois
+        casos. Computada antes do registro para ser reaproveitada
+        no clipe de visibilidade em vez de warp'ada duas vezes.
         """
         if self._config.border_guard_px == 0:
             return None
@@ -1439,6 +1442,13 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     if confirmed is not None and confirmed.shape == prob.shape
                     else None
                 )
+            # Pegada amostrada pelo registro (zeros de preenchimento
+            # onde a passada nao alcancou a ancora): separa "nao
+            # observei" de "observei vazio" quando nao ha mascara de
+            # visibilidade — entra no dominio valido la no voto, e o
+            # registro a reusa no clipe de visibilidade em vez de
+            # rasterizar a dela de novo.
+            sampled = self._pass_sampled(anchor, registration_corners, prob.shape)
             registered_prob, registered_visible = (
                 registration._register_ink_probability(
                     prob,
@@ -1447,6 +1457,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     visible,
                     visible_cam=visible_cam,
                     pass_corners=corners,
+                    sampled=sampled,
                 )
             )
             self._last_registration = (
@@ -1454,11 +1465,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 (None if registration_corners is None else registration_corners.copy()),
                 None if corners is None else corners.copy(),
             )
-            # Pegada amostrada pelo registro (zeros de preenchimento
-            # onde a passada nao alcancou a ancora): separa "nao
-            # observei" de "observei vazio" quando nao ha mascara de
-            # visibilidade — entra no dominio valido la no voto.
-            sampled = self._pass_sampled(anchor, registration_corners, prob.shape)
             # Mapa registrado SO pela camera: e o que a arbitragem de
             # ancora compara com o mapa cru para julgar pouso x quad ruim.
             # A escolha/correcao do portao vale so para a evidencia que
@@ -1516,6 +1522,9 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     # A passada vota na propria geometria: registro
                     # identidade, a mesma da 1a passada da ancora.
                     registration_corners = anchor.copy()
+                    sampled = self._pass_sampled(
+                        anchor, registration_corners, prob.shape
+                    )
                     registered_prob, registered_visible = (
                         registration._register_ink_probability(
                             prob,
@@ -1524,15 +1533,13 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                             visible,
                             visible_cam=visible_cam,
                             pass_corners=corners,
+                            sampled=sampled,
                         )
                     )
                     self._last_registration = (
                         anchor.copy(),
                         registration_corners.copy(),
                         None if corners is None else corners.copy(),
-                    )
-                    sampled = self._pass_sampled(
-                        anchor, registration_corners, prob.shape
                     )
                 if motion_decision == "correct":
                     # A evidencia volta para a grade da ancora pelo
@@ -1742,21 +1749,54 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     prior_guard = (
                         prior if identity_guard is None else (prior & identity_guard)
                     )
-                    prior_guard_px = int(np.count_nonzero(prior_guard))
-                    prior_eval = (
+                    # So pixel realmente amostrado pode ser julgado:
+                    # a faixa que o registro (ou o warp_back da
+                    # correcao afim) preencheu de zeros entra em
+                    # ~visible como se fosse mao, mas nada nasce ali
+                    # — contar como escondido adiaria a decisao ate
+                    # o timeout da quarentena resetar a pagina com
+                    # a folha limpa a vista. Com a guarda ativa a
+                    # pegada ja vem do voto; sem ela, computa-se aqui
+                    # so quando ha mascara para confrontar.
+                    identity_sampled = sampled
+                    if identity_sampled is None and identity_visible is not None:
+                        footprint = registration._sampled_footprint(
+                            anchor, registration_corners, prob.shape
+                        )
+                        identity_sampled = (
+                            footprint
+                            if motion_decision != "correct"
+                            else (
+                                motion_fix.warp_back(
+                                    np.ones(prob.shape, np.uint8)
+                                    if footprint is None
+                                    else footprint.astype(np.uint8),
+                                    nearest=True,
+                                )
+                                > 0
+                            )
+                        )
+                    prior_domain = (
                         prior_guard
+                        if identity_sampled is None
+                        else (prior_guard & identity_sampled)
+                    )
+                    prior_domain_px = int(np.count_nonzero(prior_domain))
+                    prior_eval = (
+                        prior_domain
                         if identity_visible is None
-                        else (prior_guard & identity_visible)
+                        else (prior_domain & identity_visible)
                     )
                     prior_eval_px = int(np.count_nonzero(prior_eval))
                     if (
                         identity_visible is not None
-                        and prior_guard_px > 0
+                        and prior_domain_px > 0
                         and prior_eval_px
                         < max(
                             identity._IDENTITY_MIN_VISIBLE_PX,
                             int(
-                                identity._IDENTITY_MIN_VISIBLE_FRACTION * prior_guard_px
+                                identity._IDENTITY_MIN_VISIBLE_FRACTION
+                                * prior_domain_px
                             ),
                         )
                     ):
@@ -1777,15 +1817,16 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                             seen_any = seen_any & inspected
                         keep_page = not np.any(seen_any)
                         identity_recall = 1.0 if keep_page else 0.0
-                        hidden_domain = (
-                            None
-                            if identity_visible is None
-                            else (
-                                ~identity_visible
+                        hidden_domain = None
+                        if identity_visible is not None:
+                            hidden = ~identity_visible
+                            if identity_sampled is not None:
+                                hidden = hidden & identity_sampled
+                            hidden_domain = (
+                                hidden
                                 if identity_guard is None
-                                else (identity_guard & ~identity_visible)
+                                else (identity_guard & hidden)
                             )
-                        )
                         if (
                             keep_page
                             and hidden_domain is not None
@@ -1794,9 +1835,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                             # "Vazio" nao prova pagina igual enquanto
                             # a mao pode esconder tinta do candidato
                             # dentro da area inspecionavel — adia como
-                            # a oclusao comum. Pixel fora da guarda
-                            # nao conta: e exclusao geometrica,
-                            # nao algo que a proxima passada revele.
+                            # a oclusao comum. Pixel fora da guarda ou
+                            # da pegada nao conta: e exclusao
+                            # geometrica, nao algo que a proxima
+                            # passada revele.
                             identity_visible_reference_px = prior_eval_px
                             identity_deferred = True
                             quarantine_reason = "occlusion"
@@ -1958,6 +2000,11 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     # estado INTOCADO (a v3 nao move o estado).
                     # A decisao do portao foi contra a ancora velha.
                     motion_decision = None
+                    sampled = self._pass_sampled(
+                        self._anchor_corners,
+                        (self._reg_frozen_corners if reg_deadband else corners),
+                        prob.shape,
+                    )
                     registered_prob, registered_visible = (
                         registration._register_ink_probability(
                             prob,
@@ -1965,6 +2012,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                             (self._reg_frozen_corners if reg_deadband else corners),
                             visible,
                             visible_cam=visible_cam,
+                            sampled=sampled,
                         )
                     )
                     self._last_registration = (
@@ -1980,11 +2028,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                             ).copy()
                         ),
                         None if corners is None else corners.copy(),
-                    )
-                    sampled = self._pass_sampled(
-                        self._anchor_corners,
-                        (self._reg_frozen_corners if reg_deadband else corners),
-                        prob.shape,
                     )
                     force_publish = True
             follow_abstain = False
@@ -2022,6 +2065,11 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     # re-ancoragem. A decisao do portao foi contra a
                     # ancora velha.
                     motion_decision = None
+                    sampled = self._pass_sampled(
+                        self._anchor_corners,
+                        (self._reg_frozen_corners if reg_deadband else corners),
+                        prob.shape,
+                    )
                     registered_prob, registered_visible = (
                         registration._register_ink_probability(
                             prob,
@@ -2029,6 +2077,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                             (self._reg_frozen_corners if reg_deadband else corners),
                             visible,
                             visible_cam=visible_cam,
+                            sampled=sampled,
                         )
                     )
                     self._last_registration = (
@@ -2044,11 +2093,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                             ).copy()
                         ),
                         None if corners is None else corners.copy(),
-                    )
-                    sampled = self._pass_sampled(
-                        self._anchor_corners,
-                        (self._reg_frozen_corners if reg_deadband else corners),
-                        prob.shape,
                     )
                     arbitration_abstain = False
                     force_publish = True

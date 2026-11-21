@@ -156,7 +156,13 @@ def _deadband_step(frozen, corners, over):
 
 
 def _register_ink_probability(
-    prob, anchor, corners, visible=None, visible_cam=None, pass_corners=None
+    prob,
+    anchor,
+    corners,
+    visible=None,
+    visible_cam=None,
+    pass_corners=None,
+    sampled=None,
 ):
     """Registra a passada na geometria ancora; devolve (prob, visible).
 
@@ -206,16 +212,18 @@ def _register_ink_probability(
             # "visivel" ai contaria tinta velha fora do recorte como
             # ausencia — a folha re-posta noutra pose apagaria o
             # traco (review do PR #118).
-            visible &= (
-                cv2.warpPerspective(
-                    np.ones(prob.shape, np.uint8),
-                    matrix,
-                    size,
-                    flags=cv2.INTER_NEAREST,
-                    borderValue=0,
+            if sampled is None:
+                sampled = (
+                    cv2.warpPerspective(
+                        np.ones(prob.shape, np.uint8),
+                        matrix,
+                        size,
+                        flags=cv2.INTER_NEAREST,
+                        borderValue=0,
+                    )
+                    > 0
                 )
-                > 0
-            )
+            visible &= sampled
         elif visible is not None:
             visible = (
                 cv2.warpPerspective(
