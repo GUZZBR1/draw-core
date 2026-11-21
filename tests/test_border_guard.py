@@ -958,9 +958,12 @@ def test_occluded_blank_patch_hold_keeps_reference_recoverable():
             worker.pump()
         snap = worker.poll(gen, 0)
         assert snap is not None
-        # O canvas salvo sobrevive ao periodo todo de oclusao —
-        # reter a referencia e separado de apagar o canvas.
-        assert int(np.count_nonzero(snap.confirmed[100:1100, 9:13])) > 0
+        # Durante o hold o desenho salvo mora so na referencia —
+        # o canvas publicavel desta geracao segue vazio (a copia
+        # volta no same_page, abaixo). Reter a referencia e
+        # separado de apagar o desenho.
+        assert int(np.count_nonzero(snap.confirmed[100:1100, 9:13])) == 0
+        assert int(np.count_nonzero(worker._identity_reference)) > 0
 
         for _ in range(8):
             clock.now += 1.1
@@ -984,6 +987,200 @@ def test_occluded_blank_patch_hold_keeps_reference_recoverable():
     old_px, new_px = run_case(img_marked)
     assert old_px == 0
     assert new_px > 0
+
+
+@pytest.mark.parametrize("paper_guard", [False, True])
+def test_held_recovery_does_not_publish_saved_ink(paper_guard):
+    """Caso do review: durante o hold a tinta salva mora so na
+    referencia — nenhuma versao publicada (poll/collect_ink) pode
+    carrega-la para a folha substituta. Mesma folha revelada:
+    same_page devolve o desenho ao canvas e publica sob a geracao
+    nova. Cobre border guard e as duas mascaras juntas."""
+    quad_wide = np.array(
+        [[200, 100], [560, 100], [560, 600], [200, 600]], dtype=np.float32
+    )
+    quad_narrow = np.array(
+        [[270, 120], [500, 120], [500, 580], [270, 580]], dtype=np.float32
+    )
+    img = np.full((1200, 850, 3), 215, np.uint8)
+    img[100:1100, 9:13] = 25  # traco rente a borda, coberto pela guarda
+    img_marked = np.full((1200, 850, 3), 215, np.uint8)
+    img_marked[200:800, 200:600] = 25
+    hand = np.ones(img.shape[:2], bool)
+    hand[300:500, 300:400] = False
+    all_clear = np.ones(img.shape[:2], bool)
+    held = _identity._PAGE_IDENTITY_MAX_DEFERRALS + 3
+
+    def run_case(reveal_img):
+        clock = _Clock()
+        cfg = InkConfig.strict_vote(0.85, border_guard_px=None, paper_guard=paper_guard)
+        worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
+        for _ in range(5):
+            clock.now += 1.1
+            worker.submit(
+                contracts.WarpedPage(img, 0, quad_wide, captured_at=clock.now)
+            )
+            worker.pump()
+        assert int(np.count_nonzero(worker._accumulator._confirmed)) > 0
+        worker._anchor_corners = quad_narrow.copy()
+        gen = worker.new_generation(preserve_identity=True)
+        # O desenho saiu do acumulador e mora so na referencia.
+        assert worker._accumulator._confirmed is None
+        assert int(np.count_nonzero(worker._identity_reference)) > 0
+
+        display_version = 0
+        for _ in range(held):
+            clock.now += 1.1
+            worker.submit(
+                contracts.WarpedPage(img, gen, quad_narrow, hand, captured_at=clock.now)
+            )
+            worker.pump()
+            # Nenhuma versao publicada durante o hold pode conter
+            # o traco velho — e o que o Save consumiria.
+            snap = worker.poll(gen, 0)
+            if snap is not None:
+                assert int(np.count_nonzero(snap.confirmed[100:1100, 9:13])) == 0
+            disp = worker.poll_display(gen, display_version)
+            if disp is not None:
+                display_version = disp.version
+                assert int(np.count_nonzero(disp.confirmed[100:1100, 9:13])) == 0
+                assert int(np.count_nonzero(disp.provisional[100:1100, 9:13])) == 0
+        assert int(np.count_nonzero(worker._identity_reference)) > 0
+
+        for _ in range(8):
+            clock.now += 1.1
+            worker.submit(
+                contracts.WarpedPage(
+                    reveal_img, gen, quad_narrow, all_clear, captured_at=clock.now
+                )
+            )
+            worker.pump()
+        snap = worker.poll(gen, 0)
+        assert snap is not None
+        return int(np.count_nonzero(snap.confirmed[100:1100, 9:13])), int(
+            np.count_nonzero(snap.confirmed[200:800, 200:600])
+        )
+
+    # same_page: o desenho restaurado e publicado sob a geracao nova.
+    old_px, _ = run_case(img)
+    assert old_px > 0
+    old_px, new_px = run_case(img_marked)
+    assert old_px == 0
+    if paper_guard:
+        # A folha marcada nao parece papel exposto: a tinta nova
+        # congela sob a guarda fotometrica em vez de confirmar.
+        assert new_px == 0
+    else:
+        assert new_px > 0
+
+
+def test_second_tracking_drop_preserves_pending_reference():
+    """Segunda queda de tracking com a recuperacao ainda pendente:
+    new_generation nao sobrescreve a referencia pelo canvas vazio —
+    ela segue recuperavel ate uma passada resolver."""
+    quad_wide = np.array(
+        [[200, 100], [560, 100], [560, 600], [200, 600]], dtype=np.float32
+    )
+    quad_narrow = np.array(
+        [[270, 120], [500, 120], [500, 580], [270, 580]], dtype=np.float32
+    )
+    img = np.full((1200, 850, 3), 215, np.uint8)
+    img[100:1100, 9:13] = 25
+    hand = np.ones(img.shape[:2], bool)
+    hand[300:500, 300:400] = False
+    all_clear = np.ones(img.shape[:2], bool)
+
+    clock = _Clock()
+    cfg = InkConfig.strict_vote(0.85, border_guard_px=None, paper_guard=False)
+    worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
+    for _ in range(5):
+        clock.now += 1.1
+        worker.submit(contracts.WarpedPage(img, 0, quad_wide, captured_at=clock.now))
+        worker.pump()
+    worker._anchor_corners = quad_narrow.copy()
+    gen = worker.new_generation(preserve_identity=True)
+    for _ in range(3):
+        clock.now += 1.1
+        worker.submit(
+            contracts.WarpedPage(img, gen, quad_narrow, hand, captured_at=clock.now)
+        )
+        worker.pump()
+    reference_px = int(np.count_nonzero(worker._identity_reference))
+    assert reference_px > 0
+
+    # Segunda queda: a referencia pendente nao some — o canvas vazio
+    # desta geracao nao a sobrescreve.
+    gen = worker.new_generation(preserve_identity=True)
+    assert worker._identity_reference is not None
+    assert int(np.count_nonzero(worker._identity_reference)) == reference_px
+
+    for _ in range(3):
+        clock.now += 1.1
+        worker.submit(
+            contracts.WarpedPage(
+                img, gen, quad_narrow, all_clear, captured_at=clock.now
+            )
+        )
+        worker.pump()
+    snap = worker.poll(gen, 0)
+    assert snap is not None
+    assert int(np.count_nonzero(snap.confirmed[100:1100, 9:13])) > 0
+
+
+def test_blank_partial_overlap_without_masks_defers_recovery():
+    """Guarda desligada e sem mascara de visibilidade: folha em
+    branco cobrindo so uma faixa do quad salvo, com a tinta toda na
+    parte nao amostrada. O inconclusivo geometrico (no_overlap)
+    adia — e nao o recall vazio — ate o timeout descartar a
+    referencia. Antes do fix a pegada nao era medida nesse caminho
+    e o ramo era inalcancavel."""
+    quad_wide = np.array(
+        [[200, 100], [560, 100], [560, 600], [200, 600]], dtype=np.float32
+    )
+    # Cobre so ~60% a direita do quad salvo; o traco fica na faixa
+    # nao amostrada.
+    quad_shift = np.array(
+        [[344, 100], [560, 100], [560, 600], [344, 600]], dtype=np.float32
+    )
+    img_old = np.full((1200, 850, 3), 215, np.uint8)
+    img_old[100:1100, 9:13] = 25
+    img_blank = np.full((1200, 850, 3), 215, np.uint8)
+
+    clock = _Clock()
+    cfg = InkConfig.strict_vote(0.85, border_guard_px=0, paper_guard=False)
+    worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
+    for _ in range(5):
+        clock.now += 1.1
+        worker.submit(
+            contracts.WarpedPage(img_old, 0, quad_wide, captured_at=clock.now)
+        )
+        worker.pump()
+    gen = worker.new_generation(preserve_identity=True)
+    reference_px = int(np.count_nonzero(worker._identity_reference))
+    assert reference_px > 0
+
+    timed_out = False
+    for _ in range(_identity._PAGE_IDENTITY_MAX_DEFERRALS + 4):
+        clock.now += 1.1
+        worker.submit(
+            contracts.WarpedPage(img_blank, gen, quad_shift, captured_at=clock.now)
+        )
+        worker.pump()
+        snap = worker.poll(gen, 0)
+        # A tinta velha nunca circula pelo canvas publicavel.
+        if snap is not None:
+            assert int(np.count_nonzero(snap.confirmed)) == 0
+        if worker._identity_reference is None:
+            timed_out = True
+        else:
+            # Adiada, a referencia fica intacta — inconclusivo nao
+            # apaga evidencia.
+            assert int(np.count_nonzero(worker._identity_reference)) == reference_px
+    reasons = [e["quarantine_reason"] for e in worker._identity_events]
+    assert "no_overlap" in reasons
+    assert timed_out
+    confirmed = worker._accumulator._confirmed
+    assert confirmed is None or int(np.count_nonzero(confirmed)) == 0
 
 
 def test_cropped_provisional_clears_with_visibility_mask():

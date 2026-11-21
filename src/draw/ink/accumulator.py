@@ -49,6 +49,28 @@ class LayeredInkAccumulator:
         self._seen_buf = None
         self._hold = None
 
+    def restore_confirmed(self, confirmed):
+        """Devolve uma copia confirmada ao canvas, unida ao que o
+        acumulador ja confirmou nesta geracao.
+
+        Usada pela recuperacao de identidade no same_page: o desenho
+        foi movido para a referencia na new_generation (acumulador
+        resetado) e volta intacto aqui. Quando o estado esta vazio,
+        recria todas as camadas no formato da referencia — o add so
+        re-inicializa via _confirmed, entao devolver so ele deixaria
+        provisorio/retracao como None.
+        """
+        confirmed = np.asarray(confirmed, dtype=np.uint8)
+        if self._confirmed is None or self._confirmed.shape != confirmed.shape:
+            self._removal_streak = None
+            self._confirmed = np.zeros_like(confirmed)
+            self._provisional = np.zeros(confirmed.shape, np.uint8)
+            self._provisional_ever = np.zeros(confirmed.shape, dtype=bool)
+            self._retracted_ever = np.zeros(confirmed.shape, dtype=bool)
+            self._low_overlap_streak = 0
+            self._turn_fired = False
+        np.maximum(self._confirmed, confirmed, out=self._confirmed)
+
     def _window_stats(self):
         """(soma, hits, visto-como-tinta) da janela, sem empilhar.
 

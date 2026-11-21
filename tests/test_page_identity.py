@@ -87,8 +87,10 @@ def test_occlusion_defers_and_preserves_canvas(worker):
         assert worker._identity_recovery_requested
         np.testing.assert_array_equal(worker._anchor_corners, anchor)
         np.testing.assert_array_equal(worker._identity_reference_corners, anchor)
-        np.testing.assert_array_equal(worker._accumulator._confirmed, canvas)
-        np.testing.assert_array_equal(worker.poll(generation, 0).confirmed, canvas)
+        # O desenho mora na referencia, nao no canvas publicavel:
+        # a passada abstida so publica o que esta geracao viu.
+        np.testing.assert_array_equal(worker._identity_reference, canvas)
+        assert not np.any(worker.poll(generation, 0).confirmed)
 
     drive(worker, generation)
     event = last_event(worker)
@@ -144,7 +146,10 @@ def test_legitimate_page_turn_commits(worker):
         assert worker._identity_reference is reference
         np.testing.assert_array_equal(worker._identity_reference_corners, anchor)
         np.testing.assert_array_equal(worker._anchor_corners, anchor)
-        np.testing.assert_array_equal(worker.poll(generation, 0).confirmed, canvas)
+        # Abstido pelo consenso de troca, o desenho mora na
+        # referencia e o canvas publicado segue vazio.
+        np.testing.assert_array_equal(worker._identity_reference, canvas)
+        assert not np.any(worker.poll(generation, 0).confirmed)
     drive(worker, generation, page(other=True))
     event = last_event(worker)
     assert event["decision"] == "new_page"
@@ -178,8 +183,10 @@ def test_switch_consensus_preserves_state_and_abstains(worker):
         assert worker._identity_recovery_requested
         np.testing.assert_array_equal(worker._identity_reference_corners, anchor)
         np.testing.assert_array_equal(worker._anchor_corners, anchor)
-        np.testing.assert_array_equal(worker._accumulator._confirmed, canvas)
-        np.testing.assert_array_equal(worker.poll(generation, 0).confirmed, canvas)
+        # Abstido pelo consenso de troca, o desenho mora na
+        # referencia e o canvas publicado segue vazio.
+        np.testing.assert_array_equal(worker._identity_reference, canvas)
+        assert not np.any(worker.poll(generation, 0).confirmed)
         assert not np.any(worker._accumulator._window[-1])
         with worker._condition:
             worker._generation_passes = worker_mod._REST_MIN_GENERATION_PASSES
@@ -300,7 +307,10 @@ def test_switch_consensus_does_not_spend_or_reset_quarantine_budget(worker):
             drive(worker, generation, page(other=True))
             assert last_event(worker)["decision"] == "deferred_switch_consensus"
             assert worker._identity_defer_count == count - 1
-            np.testing.assert_array_equal(worker.poll(generation, 0).confirmed, canvas)
+            # Abstido, o desenho mora na referencia — o canvas
+            # publicado nao o carrega.
+            np.testing.assert_array_equal(worker._identity_reference, canvas)
+            assert not np.any(worker.poll(generation, 0).confirmed)
         drive(
             worker,
             generation,
@@ -342,9 +352,13 @@ def test_quarantine_timeout(worker, monkeypatch, limit):
         assert event["deferred"] is True
         if count <= maximum:
             assert worker._identity_reference is not None
+            # O desenho mora na referencia, nao no canvas
+            # publicavel — nada velho pode vazar para o consumidor
+            # enquanto a identidade esta pendente.
+            np.testing.assert_array_equal(worker._identity_reference, canvas)
             _snap = worker.poll(generation, 0)
             version, published = _snap.version, _snap.confirmed
-            np.testing.assert_array_equal(published, canvas)
+            assert not np.any(published)
     assert last_event(worker)["decision"] == "quarantine_timeout"
     assert worker._identity_reference is None
     assert worker._identity_reference_corners is None

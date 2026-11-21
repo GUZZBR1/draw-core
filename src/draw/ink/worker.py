@@ -543,15 +543,21 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._previous_corners = None
             self._paper_ref = None
             if preserve_identity:
-                reference = self._accumulator._confirmed
-                self._identity_reference = (
-                    None if reference is None else reference.copy()
-                )
-                self._identity_reference_corners = (
-                    None
-                    if self._anchor_corners is None
-                    else self._anchor_corners.copy()
-                )
+                if self._identity_reference is None:
+                    # MOVER (nao copiar) o desenho confirmado para a
+                    # referencia de identidade: enquanto ela estiver
+                    # pendente, o acumulador publica so o que esta
+                    # geracao confirmar — o desenho anterior nao pode
+                    # vazar para o Save/display da folha substituta.
+                    # Uma referencia pendente de uma queda anterior
+                    # nao e sobrescrita pelo canvas vazio.
+                    self._identity_reference = self._accumulator._confirmed
+                    self._accumulator.reset()
+                    self._identity_reference_corners = (
+                        None
+                        if self._anchor_corners is None
+                        else self._anchor_corners.copy()
+                    )
             else:
                 self._identity_reference = None
                 self._identity_reference_corners = None
@@ -1827,10 +1833,17 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     # pegada ja vem do voto; sem ela, computa-se aqui
                     # so quando ha mascara para confrontar.
                     identity_sampled = sampled
-                    if identity_sampled is None and identity_visible is not None:
+                    if identity_sampled is None:
                         # Recovering implica portao de movimento
                         # parado: nao ha correcao afim a desfazer,
-                        # so a pegada do registro.
+                        # so a pegada do registro. Computada aqui
+                        # mesmo sem mascara de visibilidade: o
+                        # inconclusivo geometrico mede o nao
+                        # observado contra o dominio util total, nao
+                        # so contra o que a guarda recorta — sem
+                        # ela, o caminho "guarda desligada e sem
+                        # mascara" nunca via o que a pegada deixou
+                        # de fora.
                         identity_sampled = registration._sampled_footprint(
                             anchor, registration_corners, prob.shape
                         )
@@ -2084,6 +2097,13 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                             if reg_anchor_median and corners is not None
                             else []
                         )
+                    elif identity_reference is not None:
+                        # same_page: a copia volta para o acumulador
+                        # antes do add desta passada — unida ao que a
+                        # geracao ja confirmou nas passadas deferidas
+                        # que votaram — e sai no publish desta
+                        # resolucao.
+                        self._accumulator.restore_confirmed(identity_reference)
                     # Keep the old anchor when identity matched: all future
                     # observations remain registered into the same canvas.
                     self._identity_reference = None
@@ -2384,6 +2404,11 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 first_pass
                 or identity_timed_out
                 or identity_decision == "new_page"
+                # Resolucao same_page: o desenho restaurado volta a
+                # circular — o bump de versao garante que o
+                # downstream o veja sob a geracao certa mesmo quando
+                # nenhum pixel mudou.
+                or identity_decision == "same_page"
                 or result["confirmed_changed"]
                 # Migracao: o canvas migrado nao "muda" para o
                 # voto, mas a tela mostraria a grade velha.

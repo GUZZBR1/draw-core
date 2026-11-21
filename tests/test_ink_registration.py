@@ -285,9 +285,10 @@ def test_changed_page_content_starts_a_clean_canvas(monkeypatch):
             assert (
                 worker._identity_events[-1]["decision"] == "deferred_switch_consensus"
             )
-            np.testing.assert_array_equal(
-                worker.poll(generation, 0).confirmed, original.confirmed
-            )
+            # Abstido pelo consenso de troca, o desenho mora na
+            # referencia — o canvas publicado nao o carrega.
+            assert np.count_nonzero(worker.poll(generation, 0).confirmed[BLOCK_A]) == 0
+            assert np.count_nonzero(worker._identity_reference[BLOCK_A]) == 100
         _drive(worker, generation, ink, [(0, 0)])
         shown = worker.poll_display(generation, 0)
         assert shown is not None
