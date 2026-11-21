@@ -20,7 +20,7 @@ import pytest
 
 from draw import hand as hand_module
 from draw import hand_presence
-from draw.contracts import HandSample
+from draw.contracts import HandPresenceResult, HandSample
 
 
 def _landmarks_result():
@@ -109,8 +109,8 @@ class _ScriptedPresence:
     def __init__(self):
         self.calls = []
 
-    def sample(self, frame, timestamp_ms=None):
-        self.calls.append((frame.shape, timestamp_ms))
+    def sample(self, frame, timestamp_ms=None, *, source_id=0):
+        self.calls.append((frame.shape, timestamp_ms, source_id))
         return HandSample(True, len(self.calls) > 1)
 
 
@@ -121,7 +121,7 @@ def test_hand_presence_worker_delivers_latest_result():
     try:
         frame = np.zeros((10, 10, 3), dtype=np.uint8)
         assert worker.poll(0) is None
-        worker.submit(frame, 1234)
+        worker.submit(frame, 1.234, source_id=7)
         deadline = time.monotonic() + 2.0
         result = None
         while time.monotonic() < deadline:
@@ -130,10 +130,9 @@ def test_hand_presence_worker_delivers_latest_result():
                 break
             time.sleep(0.005)
         assert result is not None
-        seq, present, moved = result
-        assert seq == 1 and present is True and moved is False
-        assert presence.calls == [((10, 10, 3), 1234)]
-        assert worker.poll(seq) is None
+        assert result == HandPresenceResult(1, 1.234, 7, HandSample(True, False))
+        assert presence.calls == [((10, 10, 3), 1234.0, 7)]
+        assert worker.poll(result.sequence) is None
         assert worker.error is None
     finally:
         worker.stop()
@@ -170,7 +169,7 @@ class _ClosablePresence(_ScriptedPresence):
 def test_worker_stop_closes_the_presence_masker():
     presence = _ClosablePresence()
     worker = hand_presence.HandPresenceWorker(presence).start()
-    worker.submit(np.zeros((10, 10, 3), dtype=np.uint8), 1)
+    worker.submit(np.zeros((10, 10, 3), dtype=np.uint8), 1.0, source_id=0)
     deadline = time.monotonic() + 2.0
     while worker.poll(0) is None and time.monotonic() < deadline:
         time.sleep(0.005)
@@ -195,3 +194,11 @@ def test_adapter_close_delegates_to_the_masker():
     adapter.close()
     adapter.close()
     assert masker.closed == 2  # a idempotencia mora no masker
+
+
+def test_source_change_resets_motion_signature():
+    adapter = hand_presence.MediaPipeHandPresence(_TimestampedMasker())
+    frame = np.zeros((10, 10, 3), dtype=np.uint8)
+    assert adapter.sample(frame, 1000, source_id=0) == HandSample(True, True)
+    assert adapter.sample(frame, 1100, source_id=0) == HandSample(True, False)
+    assert adapter.sample(frame, 1200, source_id=1) == HandSample(True, True)

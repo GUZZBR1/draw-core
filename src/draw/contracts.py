@@ -511,3 +511,17 @@ class HandSample:
             )
         if not isinstance(self.moved, bool):
             raise ValueError(f"moved precisa ser bool: {self.moved!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class HandPresenceResult:
+    """Amostra publicada com o timestamp de captura em segundos.
+
+    sequence ordena publicações da trabalhadora; source_id é a geração
+    da fonte de câmera e muda também quando a orientação muda.
+    """
+
+    sequence: int
+    captured_at: float
+    source_id: int
+    sample: HandSample

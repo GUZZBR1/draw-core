@@ -15,6 +15,8 @@ from draw import pipeline as pipeline_module
 from draw.contracts import (
     DetectionResult,
     FramePacket,
+    HandPresenceResult,
+    HandSample,
     InkDisplaySnapshot,
 )
 from draw.ink.config import InkConfig
@@ -114,14 +116,13 @@ class _FakeHandPresenceWorker:
         self.error = error
         self.submitted = []
 
-    def submit(self, frame, timestamp_ms):
-        self.submitted.append(timestamp_ms)
+    def submit(self, frame, captured_at, *, source_id):
+        self.submitted.append((captured_at, source_id))
 
     def poll(self, after_seq):
         if not self._results:
             return None
-        seq, present, moved = self._results[0]
-        if seq <= after_seq:
+        if self._results[0].sequence <= after_seq:
             return None
         return self._results.pop(0)
 
@@ -810,7 +811,12 @@ def test_on_acquisition_fires_per_consumed_result():
 def test_hand_presence_result_feeds_the_ink_gate():
     """A amostra da trabalhadora de presença alimenta a porta da
     tinta e o estado clean_hand_present."""
-    hp = _FakeHandPresenceWorker(results=[(1, True, True), (2, False, False)])
+    hp = _FakeHandPresenceWorker(
+        results=[
+            HandPresenceResult(1, 0.0, 0, HandSample(True, True)),
+            HandPresenceResult(2, 0.1, 0, HandSample(False, False)),
+        ]
+    )
     loop, _det, ink = _make_loop(
         lambda _i: (QUAD.copy(), "paper", None), hand_presence=hp
     )
@@ -818,11 +824,7 @@ def test_hand_presence_result_feeds_the_ink_gate():
     assert loop.clean_hand_present is False
     assert (True, True) in ink.presence_calls
     assert ink.presence_calls[-1] == (False, False)
-    # O submit do quadro leva o carimbo de captura em ms
-    # (packet.captured_at * 1000): a última detecção consumida foi
-    # no quadro 6, captured_at = 0.6.
-    assert hp.submitted
-    assert hp.submitted[-1] == pytest.approx(600.0)
+    assert hp.submitted[-1] == (pytest.approx(0.6), 0)
 
 
 def test_hand_presence_error_degrades_to_no_signal():
@@ -982,3 +984,67 @@ def test_ink_page_carries_the_capture_timestamp_of_its_frame():
     assert stamps == sorted(stamps) and len(set(stamps)) == len(stamps)
     # carimbos de _packet: frame_number * 0.1
     assert all(abs(s * 10 - round(s * 10)) < 1e-6 for s in stamps)
+
+
+def test_reset_source_clears_presence_and_rejects_in_flight_sample():
+    hp = _FakeHandPresenceWorker(
+        results=[
+            HandPresenceResult(1, 0.0, 0, HandSample(True, True)),
+            HandPresenceResult(2, 1.0, 0, HandSample(False, False)),
+            HandPresenceResult(3, 0.9, 1, HandSample(False, False)),
+            HandPresenceResult(4, 1.0, 1, HandSample(False, False)),
+        ]
+    )
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None), hand_presence=hp
+    )
+    _drive(loop, 1)
+    assert loop.clean_hand_present is True
+
+    loop.reset_source(since=1.0)
+    assert loop.clean_hand_present is None
+    frame = _frame()
+    for sequence in (1, 2):
+        loop.step(FramePacket(frame, 1.0 + sequence * 0.1, sequence))
+        assert loop.clean_hand_present is None
+        assert ink.presence_calls == [(True, True), (None, False)]
+
+    loop.step(FramePacket(frame, 1.3, 3))
+    assert loop.clean_hand_present is False
+    assert loop._hand_exit_at == 1.0
+    assert ink.presence_calls[-1] == (False, False)
+    assert hp.submitted[-1][1] == 1
+
+
+@pytest.mark.parametrize("late_heartbeat", [False, True])
+def test_settled_hand_mask_expires_if_heartbeat_stalls(monkeypatch, late_heartbeat):
+    frame = _frame()
+    hand = np.zeros(frame.shape[:2], np.uint8)
+    hand[150:250, 200:300] = 255
+    loop, det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", {"hand_mask": hand}),
+        config=PipelineConfig(detect_wake=True, detect_wake_interval_s=1.0),
+    )
+    while not loop._detect_wake.settled and loop.frame_number < 30:
+        loop.step(_packet(loop, frame))
+    assert loop._detect_wake.settled
+    assert loop.last_hand_mask is not None
+    captured_at = det._result.captured_at
+    monkeypatch.setattr(det, "submit", lambda *_args: None)
+
+    loop.step(FramePacket(frame, captured_at + 0.9, loop.frame_number))
+    assert loop.last_hand_mask is not None
+    assert ink.submitted[-1][2] is not None
+    if late_heartbeat:
+        det._result = DetectionResult(
+            sequence=det._result.sequence + 1,
+            corners=QUAD,
+            verdict="paper",
+            captured_at=captured_at + 0.01,
+            detect_ms=1.0,
+            hand_mask=hand,
+        )
+    loop.step(FramePacket(frame, captured_at + 1.1, loop.frame_number))
+    assert loop._detect_wake.settled
+    assert loop.last_hand_mask is None
+    assert ink.submitted[-1][2] is None

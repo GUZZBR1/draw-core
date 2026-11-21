@@ -15,7 +15,7 @@ import threading
 import numpy as np
 
 from . import hand as hand_module
-from .contracts import HandSample, HandSignature
+from .contracts import HandPresenceResult, HandSample, HandSignature
 
 # Limiares de movimento da assinatura, calibrados nas mascaras
 # reais da sessao de desenho de 2026-10-29 (hand_cam_series03,
@@ -66,6 +66,7 @@ class MediaPipeHandPresence:
     def __init__(self, masker):
         self._masker = masker
         self._signature = None
+        self._source_id = None
 
     def close(self):
         close = getattr(self._masker, "close", None)
@@ -82,7 +83,10 @@ class MediaPipeHandPresence:
     def present(self, frame):
         return self.sample(frame).present
 
-    def sample(self, frame, timestamp_ms=None):
+    def sample(self, frame, timestamp_ms=None, *, source_id=0):
+        if source_id != self._source_id:
+            self._source_id = source_id
+            self._signature = None
         # Caminho preferido: a assinatura direto dos marcos
         # (HandMasker.presence_signature), sem construir nem
         # dilatar a mascara 720p que so servia para contar pixels
@@ -188,17 +192,18 @@ class HandPresenceWorker:
         self._thread.start()
         return self
 
-    def submit(self, frame, timestamp_ms):
+    def submit(self, frame, captured_at, *, source_id):
+        """Agenda o quadro com carimbo monotônico em segundos e geração da fonte."""
         with self._condition:
             if self._stopped:
                 return
-            self._pending = (frame, timestamp_ms)
+            self._pending = (frame, captured_at, source_id)
             self._condition.notify_all()
 
     def poll(self, after_seq):
-        """(seq, presenca, moveu) mais novo que after_seq, ou None."""
+        """HandPresenceResult mais novo que after_seq, ou None."""
         with self._condition:
-            if self._result is None or self._result[0] <= after_seq:
+            if self._result is None or self._result.sequence <= after_seq:
                 return None
             return self._result
 
@@ -210,10 +215,12 @@ class HandPresenceWorker:
                 )
                 if self._stopped:
                     return
-                frame, timestamp_ms = self._pending
+                frame, captured_at, source_id = self._pending
                 self._pending = None
             try:
-                sample = self._presence.sample(frame, timestamp_ms)
+                sample = self._presence.sample(
+                    frame, captured_at * 1000.0, source_id=source_id
+                )
             except Exception as error:  # noqa: BLE001 - vai para o laco
                 with self._condition:
                     self._error = error
@@ -224,10 +231,8 @@ class HandPresenceWorker:
                 if self._stopped:
                     return
                 self._result_seq += 1
-                self._result = (
-                    self._result_seq,
-                    sample.present,
-                    sample.moved,
+                self._result = HandPresenceResult(
+                    self._result_seq, captured_at, source_id, sample
                 )
                 self._condition.notify_all()
 
