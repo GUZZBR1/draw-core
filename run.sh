@@ -98,17 +98,26 @@ _prepare_pip() {
 }
 
 _repair_opencv() {
-    # Keep every OpenCV dist installed and just rewrite the contrib files
-    # on top — a stable state `uv sync` won't undo. Offline first (warm
-    # uv cache), network only as fallback.
+    # Exactly one cv2 provider per env: drop every OpenCV dist, then let
+    # the project sync reinstall the locked contrib wheel. --locked
+    # --offline resolves from uv.lock alone, so it works on a warm cache
+    # without network; fall back online only for a missing wheel.
     if [ "$USE_UV" = 1 ]; then
-        uv pip install --python "$VENV_PYTHON" --offline --no-deps \
-            --reinstall-package opencv-contrib-python \
-            "opencv-contrib-python>=4.8,<5.1" ||
-            uv pip install --python "$VENV_PYTHON" --no-deps \
-                --reinstall-package opencv-contrib-python \
-                "opencv-contrib-python>=4.8,<5.1"
+        uv pip uninstall --python "$VENV_PYTHON" \
+            opencv-python opencv-python-headless \
+            opencv-contrib-python opencv-contrib-python-headless \
+            >/dev/null 2>&1 || true
+        UV_PROJECT_ENVIRONMENT="$VENV_DIR" uv sync --locked --offline \
+            --inexact --extra gui \
+            --no-install-package opencv-contrib-python-headless ||
+            UV_PROJECT_ENVIRONMENT="$VENV_DIR" uv sync --inexact \
+                --extra gui \
+                --no-install-package opencv-contrib-python-headless
     else
+        "$VENV_PYTHON" -m pip uninstall -y \
+            opencv-python opencv-python-headless \
+            opencv-contrib-python opencv-contrib-python-headless \
+            >/dev/null 2>&1 || true
         "$VENV_PYTHON" -m pip install --no-deps --force-reinstall \
             "opencv-contrib-python>=4.8,<5.1"
     fi

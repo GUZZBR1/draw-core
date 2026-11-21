@@ -36,6 +36,10 @@ The same `-hand` suffix applies to the other base directories (`.venv` and
 `.venv-win`). If MediaPipe is already installed in the base environment, use
 that directory directly.
 
+On Linux the locked wheels need glibc 2.28 or newer (onnxruntime ships
+manylinux_2_28 binaries): Ubuntu 20.04+, Debian 11+, Fedora 34+ or WSL2 —
+older glibc releases cannot run the runtime.
+
 No flags selects the production preset (`InkConfig.production()` plus
 `PipelineConfig()` defaults): digital gain, strict vote `0.85`, ruling
 removal, hysteresis, motion veto, `0.15 s` ink interval and Detect-Wake.
