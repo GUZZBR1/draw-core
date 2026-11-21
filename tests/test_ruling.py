@@ -575,6 +575,58 @@ def test_uneven_shadow_shoulders_do_not_exempt_the_whole_fold():
     assert (out[:, 566:634] > 0.5).sum() == 0
 
 
+def test_staggered_shadow_shoulders_longer_than_a_stroke_do_not_exempt_the_fold():
+    """Ombros de 13 colunas (acima do minimo de continuacao) em linhas
+    alternadas: a sombra que afina de forma escalonada nao e um traco.
+    Continuacao em muitas linhas nao isenta a faixa (review #139)."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        y = 80 + 40 * k
+        prob[y : y + 2, :] = 0.95
+        prob[y : y + 6, 560:640] = 0.95
+        if k % 2 == 0:
+            prob[y : y + 6, 547:560] = 0.95  # ombros de 13 colunas
+            prob[y : y + 6, 640:653] = 0.95
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[:, 566:634] > 0.5).sum() == 0
+
+
+def test_a_long_continuation_on_a_single_line_is_still_a_stroke():
+    """Ombros de 20 colunas dos dois lados, mas numa linha so: continuacao
+    rara = traco de caneta. A faixa dessa linha fica; a das outras sai
+    (review #139)."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        y = 80 + 40 * k
+        prob[y : y + 2, :] = 0.95
+        prob[y : y + 6, 560:640] = 0.95
+    y = 80 + 40 * 5
+    prob[y : y + 6, 540:560] = 0.95
+    prob[y : y + 6, 640:660] = 0.95
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[y : y + 6, 566:634] > 0.5).all()  # a linha do traco
+    others = out[:, 566:634] > 0.5
+    others[y : y + 6, :] = False
+    assert others.sum() == 0  # e so ela
+
+
+def test_an_8_column_dash_inside_the_fold_is_kept():
+    """Traco mais curto que 12 colunas inteiro dentro do vinco: na sombra
+    uniforme, o desvio de uma so linha ja o separa das vizinhas (review
+    #139)."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        y = 80 + 40 * k
+        prob[y : y + 2, :] = 0.95
+        prob[y : y + 6, 560:640] = 0.8
+    dash = np.zeros(prob.shape, bool)
+    dash[80 + 40 * 5 - 1 : 80 + 40 * 5 + 6, 580:588] = True  # 7 px x 8 colunas
+    prob[dash] = 0.97
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert ((out > 0.5) & dash).sum() >= 0.97 * dash.sum()
+    assert ((out > 0.5) & ~dash)[:, 560:640].sum() == 0
+
+
 def _two_line_segment(n, second):
     paths = np.stack([np.full(n, 100.0), second]).astype(np.float32)
     return ruling.Segment(0, n, paths, 40.0, np.array([False, True]))

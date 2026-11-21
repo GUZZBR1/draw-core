@@ -72,6 +72,7 @@ _GUTTER_FRAC = 0.6  # fração das linhas grossas na coluna
 _GUTTER_MIN_W = 16  # colunas contínuas (mais largo que qualquer traço de caneta)
 _GUTTER_EDGE_RUN = 3  # colunas bastam num trecho que encosta na divisa
 _GUTTER_EXTRA = 4  # px a mais de espessura apagável dentro da faixa
+_STROKE_RUN = 4  # colunas de desvio numa so linha = traco dentro da sombra
 
 
 @dataclass(frozen=True)
@@ -608,8 +609,10 @@ def _joined_through(raw, gutter):
     de caneta deitado sobre ela some na sombra. O que o separa é a continuidade:
     a linha segue grossa (>= pauta + margem) por _PROB_MIN_RUN colunas logo
     antes E logo depois da faixa. O ombro da sombra, que afina de forma
-    irregular, não dura isso. Na divisa das metades a trilha só vê um lado, e a
-    borda da trilha não conta como ponta a conferir.
+    irregular, não dura isso — e quando dura, aparece escalonado em muitas
+    linhas; um traço de caneta continua só nas linhas que ele toca (poucas).
+    Na divisa das metades a trilha só vê um lado, e a borda da trilha não
+    conta como ponta a conferir.
     """
     k, x = raw.shape
     out = np.zeros_like(raw)
@@ -623,7 +626,10 @@ def _joined_through(raw, gutter):
             right = raw[:, b : b + need].mean(axis=1) >= 0.85
         sides = [s for s in (left, right) if s is not None]
         if len(sides) == 2 or (len(sides) == 1 and (a == 0 or b == x)):
-            out[:, a:b] = np.logical_and.reduce(sides)[:, None]
+            cont = np.logical_and.reduce(sides)
+            # continuação em muitas linhas é a sombra afinando, não um traço
+            if cont.sum() <= max(2, k // 4):
+                out[:, a:b] = cont[:, None]
     return out
 
 
@@ -657,7 +663,7 @@ def _stroke_on_shade(run, gutter):
     """
     med = np.median(run, axis=0)
     above = (run > med[None, :]) & gutter[None, :]
-    return _long_runs(above, _PROB_MIN_RUN, _GUTTER_EDGE_RUN)
+    return _long_runs(above, _STROKE_RUN, _GUTTER_EDGE_RUN)
 
 
 def _opening_cols(mask, length):
