@@ -94,8 +94,9 @@ class PaperGainSmoother:
     maiores são seguidas em escala logarítmica, com constante de tempo
     curta para não prender a exposição quando a iluminação realmente muda.
     Quando mediana e p90 acompanham a mesma mudança global nos pixels
-    visíveis nos dois quadros, usa o alvo atual para compensar a
-    exposição do quadro sem criar atraso.
+    visíveis nos dois quadros, o ganho é corrigido na hora pela razão
+    de brilho medida ali — sem atraso e sem depender do alvo, que uma
+    máscara nova enviesa.
     Alvo 1,0 é bypass, não amortecimento: papel já bem exposto não pode
     esperar a banda morta liberar o resíduo — cada passada ganhada clipa
     o traço claro junto do papel. Pela mesma razão, um decréscimo dentro
@@ -119,8 +120,9 @@ class PaperGainSmoother:
         com eles um decréscimo dentro da banda morta sai da banda quando
         o ganho retido saturaria pixels do papel que o alvo preserva. Uma
         mudança proporcional da mediana e do p90 dos pixels visíveis nos
-        dois quadros sinaliza exposição global e aplica o alvo do quadro
-        imediatamente.
+        dois quadros sinaliza exposição global e corrige o ganho na hora
+        pela razão medida (o alvo segue valendo pelo caminho normal de
+        suavização).
         """
         target = float(np.clip(target_gain, 1.0, _MAX_GAIN))
         now = float(timestamp)
@@ -141,7 +143,7 @@ class PaperGainSmoother:
             return self._gain
         self._updated_at = now
 
-        global_shift = self._is_global_exposure_shift(sample, sample_mask)
+        shift = self._shared_exposure_shift(sample, sample_mask)
         self._prev_sample = sample
         self._prev_mask = sample_mask
 
@@ -149,8 +151,12 @@ class PaperGainSmoother:
             self._gain = target
             return self._gain
 
-        if global_shift:
-            self._gain = target
+        if shift is not None:
+            # A compensação sai da razão medida nos pixels compartilhados,
+            # não do alvo: uma mão cobrindo a margem clara neste quadro
+            # mudaria o p90 da máscara nova e o alvo iria na direção
+            # contrária à exposição (Devin Review PR #140).
+            self._gain = float(np.clip(self._gain / shift, 1.0, _MAX_GAIN))
             return self._gain
 
         current_log = math.log(self._gain)
@@ -167,9 +173,11 @@ class PaperGainSmoother:
         self._gain = math.exp(current_log + alpha * error)
         return self._gain
 
-    def _is_global_exposure_shift(self, sample, sample_mask):
-        """Mediana e p90 medidos só nos pixels visíveis nos dois quadros.
+    def _shared_exposure_shift(self, sample, sample_mask):
+        """Razão de exposição dos pixels visíveis nos dois quadros.
 
+        Retorna p90_atual/p90_anterior quando mediana e p90 se movem
+        juntos na interseção das máscaras — mudança global — ou None.
         Uma mão cobrindo a margem muda a máscara, não os pixels que
         seguem visíveis: comparar a interseção evita ler oclusão como
         mudança de exposição. O p90 sai direto da amostra, não do alvo
@@ -184,10 +192,10 @@ class PaperGainSmoother:
             or sample_mask is None
             or sample.shape != self._prev_sample.shape
         ):
-            return False
+            return None
         shared = sample_mask & self._prev_mask
         if shared.sum() < _MIN_SHARED_SAMPLES or shared.sum() * 2 < sample_mask.sum():
-            return False
+            return None
         prev = self._prev_sample[shared]
         cur = sample[shared]
         median_prev = float(np.median(prev))
@@ -195,14 +203,16 @@ class PaperGainSmoother:
         p90_prev = float(np.percentile(prev, 90))
         p90_cur = float(np.percentile(cur, 90))
         if min(median_prev, median_cur, p90_prev, p90_cur) <= 0.0:
-            return False
+            return None
         median_delta = math.log(median_cur / median_prev)
         p90_delta = math.log(p90_cur / p90_prev)
-        return (
+        if (
             abs(median_delta) >= _GLOBAL_EXPOSURE_LOG_TOLERANCE
             and abs(p90_delta) >= _GLOBAL_EXPOSURE_LOG_TOLERANCE
             and abs(p90_delta - median_delta) <= _GLOBAL_EXPOSURE_LOG_TOLERANCE
-        )
+        ):
+            return p90_cur / p90_prev
+        return None
 
     def _newly_saturates(self, image, mask, target):
         """Fração do papel que o ganho retido satura e o alvo preserva.

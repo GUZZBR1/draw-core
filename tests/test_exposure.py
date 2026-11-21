@@ -120,7 +120,7 @@ def test_masked_clip_release_counts_pixels_not_channels():
 def test_global_exposure_shift_detected_at_gain_ceiling():
     """Devin Review PR #140: o p90 sai da amostra, não do alvo clipado.
     Saindo do teto _MAX_GAIN (p90 64 -> 68), mediana e p90 acompanham
-    a mudança real de ~6% e o bypass continua disparando."""
+    a mudança real de ~6% e a correção pela razão sai do teto na hora."""
     visible = np.ones((120, 90), dtype=bool)
     dark = np.full((120, 90, 3), 64, np.uint8)
     brighter = np.full((120, 90, 3), 68, np.uint8)
@@ -133,7 +133,33 @@ def test_global_exposure_shift_detected_at_gain_ceiling():
 
     target = exposure.paper_gain(brighter, visible)
     gain = smoother.update(target, 0.1, image=brighter, mask=visible)
-    assert gain == target  # shift global visto mesmo com o alvo descendo do teto
+    assert gain == pytest.approx(first * 64 / 68)  # razão medida, ~2,82
+    assert gain < target < first  # corrige sem saltar direto ao alvo
+
+
+def test_exposure_shift_correction_uses_shared_ratio_over_new_mask_target():
+    """Devin Review PR #140: papel clareando e mão cobrindo a margem
+    clara no mesmo quadro. O alvo da máscara nova SOBE (o p90 perdeu os
+    pixels claros), mas a exposição subiu — a correção usa a razão dos
+    pixels compartilhados e o ganho desce."""
+    margin = np.full((120, 120, 3), 80, np.uint8)
+    margin[:, 100:] = 90  # margem clara: p90 = 90, alvo ~2,222
+    full = np.ones((120, 120), dtype=bool)
+    hand = full.copy()
+    hand[:, 100:] = False
+
+    smoother = exposure.PaperGainSmoother()
+    first = smoother.update(
+        exposure.paper_gain(margin, full), 0.0, image=margin, mask=full
+    )
+    assert first == pytest.approx(200 / 90)
+
+    occluded = np.full((120, 120, 3), 88, np.uint8)  # papel clareou 10%
+    target = exposure.paper_gain(occluded, hand)  # ~2,273: subiu
+    gain = smoother.update(target, 0.1, image=occluded, mask=hand)
+
+    assert gain == pytest.approx(first * 80 / 88)  # ~2,02: compensação
+    assert gain < first < target
 
 
 def _dark_paper_with_bright_desk(desk_fraction=0.14, shape=(1200, 850)):
