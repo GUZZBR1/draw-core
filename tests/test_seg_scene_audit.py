@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lab import seg_scene_audit as sa  # noqa: E402
 
 from draw.perception import NeuralSheetDetector  # noqa: E402
+from draw.protocol import HEADER_SIZE, pack_record  # noqa: E402
 from test_neural_onnx_contract import _logits_for_classes, _Session  # noqa: E402
 
 
@@ -48,6 +49,7 @@ class _FakeDet:
         self._script = list(script)
         self.calls = 0
         self.last_coverage_mask = None
+        self.last_coverage_raw = None
         self.last_hand_mask = None
         self.last_presence_logit = None
 
@@ -55,6 +57,9 @@ class _FakeDet:
         item = self._script[min(self.calls, len(self._script) - 1)]
         self.calls += 1
         self.last_coverage_mask = item.get("coverage")
+        # Sem "raw_coverage" no roteiro, None: a auditoria cai na
+        # máscara preenchida, como nos dublês antigos.
+        self.last_coverage_raw = item.get("raw_coverage")
         self.last_hand_mask = item.get("hand")
         self.last_presence_logit = item.get("presence")
         mask = item.get("coverage") if return_mask else None
@@ -233,6 +238,60 @@ def test_max_frames_para_no_limite():
     assert len(records) == 2 and det.calls == 2
 
 
+def test_max_frames_nao_puxa_quadro_extra():
+    """O limite fecha o iterável ANTES: a fonte nunca avança além.
+
+    Reproduz o achado da revisão: o laço for pedia o item N+1 antes
+    de checar o limite — uma fonte que quebra ao avançar (imread
+    falho, registro truncado) derrubava a corrida já gravada.
+    """
+    det = _FakeDet([_exploded_item()])
+    frame = np.zeros((8, 8, 3), np.uint8)
+
+    def _guarded():
+        for i in range(2):
+            yield f"f{i}.png", frame
+        raise AssertionError("a fonte avançou além do --max-frames")
+
+    records = sa.audit_frames(_guarded(), det, max_frames=2, log=lambda *_a: None)
+    assert len(records) == 2 and det.calls == 2
+
+
+def test_buraco_de_fundo_conta_no_fill_e_nas_falhas():
+    """A cobertura crua mede o buraco que a máscara de voto remenda.
+
+    O detector preenche buracos internos para o voto de tinta; a
+    auditoria mede o mapa cru — um fundo cercado de papel é falha de
+    segmentação, não pixel preenchido (achado da revisão): o fill
+    cai abaixo do piso e o contador registra.
+    """
+    raw = np.zeros((40, 50), np.uint8)
+    raw[10:30, 10:30] = 255  # anel de papel na grade da cobertura
+    raw[14:28, 14:28] = 0  # buraco de fundo cercado (~44% do quad)
+    filled = raw.copy()
+    filled[14:28, 14:28] = 255  # o que o voto de tinta enxerga
+    det = _FakeDet(
+        [
+            {
+                "corners": np.array(
+                    [[20, 20], [60, 20], [60, 60], [20, 60]], np.float32
+                ),
+                "verdict": "paper",
+                "coverage": filled,
+                "raw_coverage": raw,
+                "presence": 4.0,
+            }
+        ]
+    )
+    frame = np.zeros((80, 100, 3), np.uint8)
+
+    (record,) = sa.audit_frames(iter([("hole.png", frame)]), det, log=lambda *_a: None)
+
+    assert record["quad_fill"] < sa.FILL_BELOW
+    summary = sa.summarize([record])
+    assert summary["failures"]["fill_below"] == 1
+
+
 def test_run_sobre_diretorio_de_pngs_grava_jsonl_e_resumo(tmp_path):
     """Fonte = diretório: imread por arquivo, file = nome do PNG."""
     src = tmp_path / "frames"
@@ -257,6 +316,65 @@ def test_run_sobre_diretorio_de_pngs_grava_jsonl_e_resumo(tmp_path):
     assert audit["model"] == "fake.onnx"
     assert audit["frames"] == 3 and audit["frames_with_quad"] == 2
     assert audit["failures"] == {"fill_below": 2, "quad_area_ge": 2, "oob_ge_px": 2}
+    assert audit["interrupted"] is False and audit["source_error"] is None
+
+
+def test_run_drawcap_truncado_marca_source_error(tmp_path):
+    """Registro cortado no payload: o resumo sai marcando incompleto.
+
+    Reproduz o achado da revisão: HelperCapture.read() devolve
+    (False, None) no registro truncado igual ao EOF limpo — sem o
+    last_error o prefixo legível passava por captura completa.
+    """
+    from test_protocol import _jpeg
+
+    src = tmp_path / "sessao.drawcap"
+    payload = _jpeg()
+    full = pack_record(0, 0, payload)
+    truncated = pack_record(1, 33_333, payload)[: HEADER_SIZE + 10]
+    src.write_bytes(full + truncated)
+    det = _FakeDet([_exploded_item()])
+    out = tmp_path / "audit"
+
+    summary = sa.run(src, det, out_dir=out, model="m.onnx", log=lambda *_a: None)
+
+    assert summary["frames"] == 1  # só o registro íntegro entra
+    assert summary["interrupted"] is False
+    assert "truncado" in summary["source_error"]
+    audit = json.loads((out / "audit.json").read_text(encoding="utf-8"))
+    assert audit["source_error"] == summary["source_error"]
+
+
+def test_run_interrompida_grava_resumo_marcado(tmp_path):
+    """Ctrl+C no meio: as linhas medidas viram resumo interrupted.
+
+    A política do desk_capture aplicada à auditoria (achado da
+    revisão): a corrida morta no meio não some com o resumo — as
+    linhas já medidas entram na conta e o JSON diz que parou.
+    """
+    src = tmp_path / "frames"
+    src.mkdir()
+    frame = np.zeros((80, 100, 3), np.uint8)
+    for i in range(3):
+        assert cv2.imwrite(str(src / f"f_{i:05d}.png"), frame)
+
+    class _InterruptDet(_FakeDet):
+        def __call__(self, frame, *, return_mask=True):
+            if self.calls == 1:
+                raise KeyboardInterrupt
+            return super().__call__(frame, return_mask=return_mask)
+
+    det = _InterruptDet([_exploded_item()])
+    out = tmp_path / "audit"
+
+    summary = sa.run(src, det, out_dir=out, log=lambda *_a: None)
+
+    assert summary["interrupted"] is True
+    assert summary["frames"] == 1  # a linha medida antes do Ctrl+C
+    assert summary["source_error"] is None
+    audit = json.loads((out / "audit.json").read_text(encoding="utf-8"))
+    assert audit["interrupted"] is True
+    assert len((out / "frames.jsonl").read_text(encoding="utf-8").splitlines()) == 1
 
 
 def test_run_com_dump_overlays_grava_overlay(tmp_path):

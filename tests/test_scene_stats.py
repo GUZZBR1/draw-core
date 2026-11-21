@@ -148,6 +148,34 @@ def test_empty_frame_clears_scene_stats():
 
     assert detector(np.zeros((0, 0, 3), np.uint8)) == (None, None, None)
     assert detector.last_scene_stats is None
+    assert detector.last_coverage_raw is None
+
+
+def test_last_coverage_raw_keeps_the_enclosed_background_hole():
+    """O mapa cru conserva o buraco que a máscara de voto preenche.
+
+    predict publica duas coberturas: last_coverage_mask remenda o
+    fundo cercado para o voto de tinta; last_coverage_raw é o argmax
+    como saiu — o que _scene_stats mede e a auditoria de cena
+    reporta (achado da revisão: o fill do quad precisa enxergar o
+    buraco).
+    """
+    classes = np.zeros((8, 8), np.uint8)
+    classes[1:7, 1:7] = 1  # anel de papel
+    classes[3:5, 3:5] = 0  # buraco de fundo cercado
+    detector = _detector({"logits": _logits_for_classes(classes)})
+    detector.predict(_frame())
+
+    assert detector.last_coverage_raw is not None
+    assert detector.last_coverage_mask is not None
+    # O buraco segue fundo no mapa cru e virou não-fundo na máscara
+    # de voto:
+    assert detector.last_coverage_raw[3:5, 3:5].max() == 0
+    assert detector.last_coverage_mask[3:5, 3:5].min() == 255
+    # Fora do buraco os dois mapas concordam:
+    assert (
+        detector.last_coverage_raw[1:3, 1:7] == detector.last_coverage_mask[1:3, 1:7]
+    ).all()
 
 
 # ---------------------------- o rastro do combinado leva o dict à telemetria

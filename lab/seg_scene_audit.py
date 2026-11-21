@@ -18,9 +18,12 @@ medida na grade nativa da máscara) e extrapolação dos cantos em pixels.
 Ao fim, audit.json resume a corrida com os contadores das três famílias
 de falha da issue: fill abaixo de FILL_BELOW (o piso 0.82 das guardas
 geométricas do PR #107), área do quad >= QUAD_AREA_GE do frame e canto
->= OOB_GE_PX além da borda. --dump-overlays grava overlay_NNNNN.png com
-a cobertura em tinta translúcida e o quad desenhado, para conferir olho
-a olho os frames que dispararam os contadores.
+>= OOB_GE_PX além da borda. "interrupted" marca Ctrl+C no meio da
+corrida e "source_error" registra a fonte que terminou por erro (um
+.drawcap truncado não passa por completo). --dump-overlays grava
+overlay_NNNNN.png com a cobertura crua em tinta translúcida e o quad
+desenhado, para conferir olho a olho os frames que dispararam os
+contadores.
 
 A fonte é um diretório de frames (*.png, *.jpg em ordem de nome) ou
 qualquer fonte que draw.camera.parse_source/open_capture aceitem
@@ -39,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import itertools
 import json
 import re
 import sys
@@ -129,18 +133,34 @@ def _quad_fill(quad, cov_bin, frame_shape):
     return float(np.count_nonzero(cov_bin & inside) / quad_px)
 
 
+def _coverage_of(det):
+    """A cobertura CRUA que o último predict mediu.
+
+    NeuralSheetDetector publica duas: last_coverage_raw é o argmax do
+    modelo como saiu — o mapa que _scene_stats mede e que esta
+    auditoria reporta; last_coverage_mask é o mesmo mapa já com os
+    buracos internos preenchidos para o voto de tinta — uma falha de
+    segmentação cercada de papel some nele. Detectores e dublês
+    antigos sem o atributo cru caem na máscara preenchida.
+    """
+    raw = getattr(det, "last_coverage_raw", None)
+    if raw is not None:
+        return raw
+    return getattr(det, "last_coverage_mask", None)
+
+
 def measure_frame(det, frame, corners, verdict, *, index, name):
     """As medidas da issue sobre um quadro já detectado.
 
     Lê as máscaras auxiliares que a chamada deixou no detector
-    (last_coverage_mask/last_hand_mask, na resolução nativa do
+    (last_coverage_raw/last_hand_mask, na resolução nativa do
     modelo): cobertura é "tudo que não é fundo" — a mesma região que
     a mancha de falso-papel inflava na captura da issue. Devolve o
     dict pronto para a linha JSONL; os campos de quad só existem
     quando o ajuste fechou.
     """
     height, width = frame.shape[:2]
-    coverage = getattr(det, "last_coverage_mask", None)
+    coverage = _coverage_of(det)
     hand = getattr(det, "last_hand_mask", None)
     record = {
         "frame": index,
@@ -227,28 +247,40 @@ def _overlay_image(frame, coverage, corners):
 
 
 def audit_frames(
-    frames, det, *, max_frames=None, out_dir=None, dump_overlays=False, log=print
+    frames,
+    det,
+    *,
+    max_frames=None,
+    out_dir=None,
+    dump_overlays=False,
+    log=print,
+    records=None,
 ):
     """Mede cada (nome, quadro) do iterável com o detector dado.
 
     O detector chega construído (sessão real ou dublê de teste): um
     callable quadro -> (cantos, veredito, máscara) com os atributos
-    last_coverage_mask/last_hand_mask/last_presence_logit. Com
+    last_coverage_raw/last_hand_mask/last_presence_logit. Com
     out_dir, frames.jsonl é gravado linha a linha — uma corrida que
     morre no meio deixa a evidência parcial no disco. dump_overlays
     exige out_dir e grava overlay_NNNNN.png por quadro. Devolve a
-    lista de registros (a mesma das linhas do JSONL).
+    lista de registros (a mesma das linhas do JSONL); records, quando
+    dada, é essa lista — uma interrupção no meio do laço deixa nela
+    as linhas já medidas.
+
+    max_frames limita o iterável ANTES do laço (islice): pedir N
+    quadros nunca puxa o N+1 — uma fonte que quebra ao avançar além
+    do pedido não derruba a corrida já gravada.
     """
     if dump_overlays and out_dir is None:
         raise ValueError("--dump-overlays precisa de out_dir")
-    records = []
+    if records is None:
+        records = []
     jsonl = None
     try:
         if out_dir is not None:
             jsonl = (Path(out_dir) / "frames.jsonl").open("w", encoding="utf-8")
-        for index, (name, frame) in enumerate(frames):
-            if max_frames is not None and index >= max_frames:
-                break
+        for index, (name, frame) in enumerate(itertools.islice(frames, max_frames)):
             corners, verdict, _mask = det(frame, return_mask=True)
             record = measure_frame(det, frame, corners, verdict, index=index, name=name)
             records.append(record)
@@ -258,9 +290,7 @@ def audit_frames(
             if dump_overlays:
                 _write_png(
                     Path(out_dir) / f"overlay_{index:05d}.png",
-                    _overlay_image(
-                        frame, getattr(det, "last_coverage_mask", None), corners
-                    ),
+                    _overlay_image(frame, _coverage_of(det), corners),
                 )
             log(_log_line(record))
     finally:
@@ -315,12 +345,19 @@ def summarize(
 def _open_frames(source, *, helper_token_file=None):
     """Iterável de (nome, quadro) sobre o --source, fechando a fonte.
 
+    Produz (iterável, info): info["source_error"] registra COMO a
+    fonte terminou quando o iterável foi consumido até o fim — o
+    last_error da captura separa o registro truncado do EOF limpo
+    (os dois chegam como o mesmo read()==False); None é fim limpo
+    ou fonte sem a informação.
+
     Diretório: os *.png/*.jpg em ordem de nome, decodificados por
     cv2.imread — um arquivo indecodificável aborta a corrida com o
     nome dele, nunca vira quadro mudo. Qualquer outra fonte passa por
     parse_source/open_capture (.drawcap, vídeo, tcp://, hvcam://) e
     entrega quadros seq_NNNNN até o read() fechar.
     """
+    info = {"source_error": None}
     path = Path(str(source))
     if path.is_dir():
         names = sorted(
@@ -338,7 +375,7 @@ def _open_frames(source, *, helper_token_file=None):
                     raise ValueError(f"nao foi possivel decodificar {item}")
                 yield item.name, image
 
-        yield _iter_dir()
+        yield _iter_dir(), info
         return
 
     from draw.camera import open_capture, parse_source
@@ -351,11 +388,12 @@ def _open_frames(source, *, helper_token_file=None):
             while True:
                 ok, frame = capture.read()
                 if not ok:
+                    info["source_error"] = getattr(capture, "last_error", None)
                     break
                 yield f"seq_{index:05d}", frame
                 index += 1
 
-        yield _iter_capture()
+        yield _iter_capture(), info
     finally:
         capture.release()
 
@@ -395,6 +433,12 @@ def run(
     a carga acontece aqui dentro, depois da recusa de --out sujo —
     relatorio antigo se recusa sem tocar em modelo nem fonte. Devolve
     o resumo escrito em audit.json.
+
+    Dois desfechos escrevem resumo incompleto em vez de nenhum:
+    Ctrl+C no meio da corrida ("interrupted": true, as linhas já
+    medidas entram na conta — mesma política do desk_capture) e a
+    fonte que termina por erro ("source_error": o last_error da
+    captura — um .drawcap truncado não passa por captura completa).
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -408,15 +452,26 @@ def run(
         load()
     if model is None:
         model = getattr(det, "model_path", None)
-    with _open_frames(source, helper_token_file=helper_token_file) as frames:
-        records = audit_frames(
+    records = []
+    interrupted = False
+    source_error = None
+    try:
+        with _open_frames(source, helper_token_file=helper_token_file) as (
             frames,
-            det,
-            max_frames=max_frames,
-            out_dir=out_dir,
-            dump_overlays=dump_overlays,
-            log=log,
-        )
+            info,
+        ):
+            audit_frames(
+                frames,
+                det,
+                max_frames=max_frames,
+                out_dir=out_dir,
+                dump_overlays=dump_overlays,
+                log=log,
+                records=records,
+            )
+            source_error = info["source_error"]
+    except KeyboardInterrupt:
+        interrupted = True
     summary = summarize(
         records,
         model=model,
@@ -424,6 +479,8 @@ def run(
         quad_area_ge=quad_area_ge,
         oob_ge_px=oob_ge_px,
     )
+    summary["interrupted"] = interrupted
+    summary["source_error"] = None if source_error is None else str(source_error)
     serialized = json.dumps(summary, ensure_ascii=False, indent=2) + "\n"
     (out_dir / "audit.json").write_text(serialized, encoding="utf-8")
     return summary

@@ -356,7 +356,10 @@ class NeuralSheetDetector:
     (None nos mesmos casos): a presença não separa "papel detectado"
     de "cena estranha detectada" — o falso papel de piso claro da
     issue #106 — e o rastro da aquisição leva essas medidas à
-    telemetria.
+    telemetria. last_coverage_raw guarda a cobertura crua dessa
+    chamada (None nos mesmos casos): last_coverage_mask vai ao voto
+    de tinta já com os buracos internos preenchidos, e o mapa cru é o
+    que _scene_stats mede e a auditoria de cena reporta.
     """
 
     def __init__(
@@ -401,6 +404,12 @@ class NeuralSheetDetector:
         # o complemento do logit de presença para a telemetria dizer
         # "papel detectado" de "cena estranha detectada" (issue #106).
         self.last_scene_stats = None
+        # A cobertura crua (argmax sem o preenchimento de buracos do
+        # voto de tinta): é o mapa que _scene_stats mede e que a
+        # auditoria de cena (lab/seg_scene_audit.py) reporta — um
+        # buraco de fundo cercado de papel conta como falha nela,
+        # não como pixel preenchido.
+        self.last_coverage_raw = None
         self._timing_stats = {
             phase: {"count": 0, "sum_ms": 0.0, "max_ms": 0.0}
             for phase in _TIMING_PHASES
@@ -651,6 +660,11 @@ class NeuralSheetDetector:
         # quem consome (draw/app.py) faz o upsample no mesmo ponto
         # em que a máscara de chamada ganha a resolução do frame.
         self.last_coverage_mask = _geometry.fill_interior_holes(coverage_small) * 255
+        # A mesma cobertura antes do preenchimento — mapa de
+        # diagnóstico (auditoria de cena, overlays): lá dentro, o
+        # fundo que o modelo cercou de papel precisa aparecer como
+        # falha, não como pixel já remendado para o voto de tinta.
+        self.last_coverage_raw = coverage_small * 255
         # Oclusão semântica: a classe mão vira segundo sinal do
         # canal visible do voto de tinta.
         # Resolução nativa da máscara — quem consome faz o upsample
@@ -680,6 +694,7 @@ class NeuralSheetDetector:
         if frame is None or frame.size == 0:
             self.last_presence_logit = None
             self.last_scene_stats = None
+            self.last_coverage_raw = None
             return None, None, None
         presence, mask = self.predict(frame, native=True)
         frame_h, frame_w = frame.shape[:2]

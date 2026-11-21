@@ -114,7 +114,7 @@ def _ignore(*_args, **_kwargs):
     return None
 
 
-def _coverage_iou(corners, coverage_mask):
+def _coverage_iou(corners, coverage_mask, hand_mask=None):
     """IoU do quad com a cobertura, so com os blobs que tocam o quad.
 
     corners sao os 4 cantos do quad em pixels na grade da mascara;
@@ -127,6 +127,14 @@ def _coverage_iou(corners, coverage_mask):
     validas. O blob colado no quad segue na uniao porque a mascara
     nao o distingue da folha: o quad dentro de um blob gigante
     continua medindo |quad|/|blob|, a unica guarda desse modo.
+
+    hand_mask (classe mao da mesma deteccao, mesma grade) entra
+    INTEIRA na uniao, tocando o quad ou nao: o piso 0,2 foi calibrado
+    sobre a uniao total e a mesa fantasma so afunda por causa dos
+    pixels de mao fora do quad (settings.py, coverage_iou_floor) —
+    exclui-la por desconexao devolvia o fantasma a passada de tinta.
+    A exclusao por componente vale apenas para o nao-fundo sem classe
+    propria: o falso papel disjunto.
     """
     quad = np.zeros(coverage_mask.shape, np.uint8)
     cv2.fillConvexPoly(quad, np.round(corners).astype(np.int32), 1)
@@ -141,7 +149,10 @@ def _coverage_iou(corners, coverage_mask):
     keep[np.unique(labels[quad_reach])] = True
     keep[0] = False  # o rotulo 0 e o fundo
     touching = keep[labels]
-    union = np.count_nonzero((quad > 0) | touching)
+    union_mask = (quad > 0) | touching
+    if hand_mask is not None and hand_mask.shape == coverage_mask.shape:
+        union_mask |= np.asarray(hand_mask) > 0
+    union = np.count_nonzero(union_mask)
     if not union:
         return 0.0
     # A intersecao usa a mascara inteira: todo pixel nao-fundo dentro
@@ -328,13 +339,15 @@ class Pipeline:
         (_coverage_iou): a mancha falsa disjunta — o piso claro lido
         como papel da issue #106 — nao infla mais a medida, enquanto
         o blob colado no candidato a folha continua contando por ser
-        indistinguivel dela sem um modelo melhor. O custo e um
-        connectedComponents por passada de tinta — cadencia de
-        passada, nao de quadro.
+        indistinguivel dela sem um modelo melhor. A mao prevista pela
+        mesma deteccao (_hand_mask_det) entra inteira na uniao: e o
+        termo que o piso 0,2 usa para afundar o quad fantasma da mesa
+        vazia. O custo e um connectedComponents por passada de tinta
+        — cadencia de passada, nao de quadro.
         """
         if self._coverage_mask is None:
             return None
-        return _coverage_iou(warp_corners, self._coverage_mask)
+        return _coverage_iou(warp_corners, self._coverage_mask, self._hand_mask_det)
 
     def _warp_and_submit_ink(self, frame, warp_corners, captured_at=None):
         """Warp + visibilidade + submissao a trabalhadora de tinta.

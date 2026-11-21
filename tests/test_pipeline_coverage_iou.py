@@ -101,6 +101,49 @@ def test_method_returns_none_without_mask_and_delegates_with_it():
     assert loop._quad_coverage_iou(QUAD) == _coverage_iou(QUAD, mask)
 
 
+def test_detached_hand_still_counts_against_the_quad():
+    """A mão desconectada segue na união: o piso 0,2 depende dela.
+
+    Reproduz o caso da revisão: quad falso com sobreposição local
+    alta + mão gigante desconectada além do anel. O piso foi
+    calibrado sobre a união total (papel+mão) — a mesa fantasma só
+    afunda por causa dos pixels de mão fora do quad. Excluir a mão
+    por desconexão devolve o fantasma à passada de tinta; a exclusão
+    por componente vale só para o não-fundo sem classe própria.
+    """
+    blob = _mask_block(150, 400, 150, 500)  # ~88k px de falso papel sob o quad
+    hand = _mask_block(0, 720, 640, 1280)  # mão grande do outro lado
+    coverage = ((blob | hand) > 0).astype(np.uint8) * 255
+    # Sem o termo mão, o fantasma cruza o piso — o falso positivo
+    # que a união total sempre vetou:
+    assert _coverage_iou(QUAD, coverage) > 0.2
+    assert _coverage_iou(QUAD, coverage, hand) < 0.2
+
+
+def test_ink_pass_vetoed_when_distant_hand_fills_the_scene():
+    """Ponta a ponta: o fantasma com mão desconectada não sobe.
+
+    Mesma montagem do teste acima no laço real — coverage_mask
+    carrega o blob local e a mão (não-fundo), hand_mask carrega a
+    classe mão, como o detector combinado publica. A mão está fora
+    do quad, então a oclusão semântica passa limpa: o veto vem do
+    piso de IoU, não da oclusão.
+    """
+    blob = _mask_block(150, 400, 150, 500)
+    hand = _mask_block(0, 720, 640, 1280)
+    coverage = ((blob | hand) > 0).astype(np.uint8) * 255
+    loop, _det, ink = _make_loop(
+        lambda _i: (
+            QUAD.copy(),
+            "paper",
+            {"coverage_mask": coverage, "hand_mask": hand},
+        )
+    )
+    _drive(loop, 40)
+    assert loop.tracker.corners is not None
+    assert ink.submitted == []
+
+
 def test_ink_pass_submits_with_disjoint_false_blob():
     """Ponta a ponta no laço: a mancha disjunta não derruba a passada.
 
