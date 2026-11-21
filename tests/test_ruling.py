@@ -434,7 +434,6 @@ def _shaded_notebook(tilt, house=None):
     for x in range(30, w, 53):  # lacunas na pauta, longe do vinco
         if abs(x - mid) > 60:
             prob[page.ruling_only[:, x : x + 7].any(axis=1), x : x + 7] *= 0.4
-    strokes = np.zeros(prob.shape, bool)
     if house is not None:
         import cv2
 
@@ -450,9 +449,8 @@ def _shaded_notebook(tilt, house=None):
         roof = [(x0, y0), (x0 + size // 2, y0 - size // 2), (x0 + size, y0)]
         for line in (pts, roof):
             cv2.polylines(mask, [np.array(line, np.int32)], False, 255, 5)
-        strokes = mask > 0
-        prob[strokes] = 0.97
-    return page, prob, strokes
+        prob[mask > 0] = 0.97
+    return page, prob
 
 
 def _leftover_in_fold(page, prob, out):
@@ -469,7 +467,7 @@ def _leftover_in_fold(page, prob, out):
 
 @pytest.mark.parametrize("tilt", [0.0, 0.35])
 def test_shaded_gutter_does_not_leave_a_staircase_of_ruling(tilt):
-    page, prob, _ = _shaded_notebook(tilt)
+    page, prob = _shaded_notebook(tilt)
     out = ruling.RulingFilter().apply(prob.copy())
     left, total = _leftover_in_fold(page, prob, out)
     assert left < 0.01 * total  # inclui a franja de sombra, nao so a pauta
@@ -495,7 +493,7 @@ def _house_parts(x0, y0=300, size=150):
 
 @pytest.mark.parametrize("x0", [150, 520])  # 520: o topo cruza o vinco
 def test_a_house_drawn_over_the_ruling_keeps_each_stroke(x0):
-    page, prob, house = _shaded_notebook(0.35, house=(x0, 300, 150))
+    page, prob = _shaded_notebook(0.35, house=(x0, 300, 150))
     out = ruling.RulingFilter().apply(prob.copy())
     for name, part in _house_parts(x0).items():
         kept = ((out > 0.5) & part).sum() / part.sum()
@@ -505,7 +503,7 @@ def test_a_house_drawn_over_the_ruling_keeps_each_stroke(x0):
 def test_a_short_pen_dash_entirely_inside_the_fold_is_kept():
     """Traco curto sobre uma linha sombreada, sem continuacao fora do vinco.
     Aqui a sombra tem ~7 px, entao o traco de marcador tem 9."""
-    page, prob, _ = _shaded_notebook(0.0)
+    page, prob = _shaded_notebook(0.0)
     mid = prob.shape[1] // 2
     rows = np.flatnonzero(page.ruling[:, mid])
     y = int(rows[len(rows) // 2])
@@ -516,14 +514,57 @@ def test_a_short_pen_dash_entirely_inside_the_fold_is_kept():
     assert ((out > 0.5) & dash).sum() >= 0.97 * dash.sum()
 
 
+def _fold_page(
+    fa=560,
+    fb=640,
+    shade_p=0.95,
+    left_sh=0,
+    right_sh=0,
+    split_x=None,
+    offset_r=0,
+    x_end=1200,
+):
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        yl = 80 + 40 * k
+        yr = yl + offset_r
+        if split_x is None:
+            prob[yl : yl + 2, :x_end] = 0.95
+            prob[yl : yl + 6, fa:fb] = shade_p
+            if left_sh and k % 2 == 0:
+                prob[yl : yl + 6, fa - left_sh : fa] = 0.95
+            if right_sh and k % 2 == 0:
+                prob[yl : yl + 6, fb : fb + right_sh] = 0.95
+        else:
+            prob[yl : yl + 2, :split_x] = 0.95
+            if fa < split_x:
+                prob[yl : yl + 6, fa : min(fb, split_x)] = shade_p
+            if x_end > split_x:
+                prob[yr : yr + 2, split_x:x_end] = 0.95
+                if fb > split_x:
+                    prob[yr : yr + 6, max(fa, split_x) : fb] = shade_p
+            if left_sh and k % 2 == 0:
+                prob[yl : yl + 6, fa - left_sh : fa] = 0.95
+            if right_sh and k % 2 == 0:
+                y_rsh = yr if fb >= split_x else yl
+                prob[y_rsh : y_rsh + 6, fb : fb + right_sh] = 0.95
+    return prob
+
+
+def _assert_only_stroke_kept(out, stroke_rows, fa, fb):
+    rows = [stroke_rows] if isinstance(stroke_rows, slice) else stroke_rows
+    for r in rows:
+        assert (out[r, fa:fb] > 0.5).all()
+    others = out[:, fa:fb] > 0.5
+    for r in rows:
+        others[r, :] = False
+    assert others.sum() == 0
+
+
 def test_a_7px_dash_on_a_6px_shaded_rule_is_kept_and_the_rest_is_erased():
     """Caso do review: pauta de 2 px engrossa para 6 no vinco; um traco de 7 px
     e 14 colunas numa so linha (prob 0,97) fica, a sombra das outras sai."""
-    prob = np.zeros((600, 1200), np.float32)
-    for k in range(12):
-        y = 80 + 40 * k
-        prob[y : y + 2, :] = 0.95
-        prob[y : y + 6, 560:640] = 0.8
+    prob = _fold_page(shade_p=0.8)
     dash = np.zeros(prob.shape, bool)
     dash[80 + 40 * 5 - 1 : 80 + 40 * 5 + 6, 590:604] = True
     prob[dash] = 0.97
@@ -579,14 +620,7 @@ def test_staggered_shadow_shoulders_longer_than_a_stroke_do_not_exempt_the_fold(
     """Ombros de 13 colunas (acima do minimo de continuacao) em linhas
     alternadas: a sombra que afina de forma escalonada nao e um traco.
     Continuacao em muitas linhas nao isenta a faixa (review #139)."""
-    prob = np.zeros((600, 1200), np.float32)
-    for k in range(12):
-        y = 80 + 40 * k
-        prob[y : y + 2, :] = 0.95
-        prob[y : y + 6, 560:640] = 0.95
-        if k % 2 == 0:
-            prob[y : y + 6, 547:560] = 0.95  # ombros de 13 colunas
-            prob[y : y + 6, 640:653] = 0.95
+    prob = _fold_page(left_sh=13, right_sh=13)
     out = ruling.RulingFilter().apply(prob.copy())
     assert (out[:, 566:634] > 0.5).sum() == 0
     # Nos ombros (< 60% das linhas), as linhas finas (impares) saem e as
@@ -621,32 +655,18 @@ def test_a_stroke_crossing_the_fold_through_staggered_shoulders_is_kept():
     """Caso do review: ombros de 13 colunas em linhas alternadas E um traco
     de 6 px na linha 7, de 540 a 660. O padrao comum e sombra (sai), mas o
     traco continua ALEM do comprimento comum e o miolo dele fica."""
-    prob = np.zeros((600, 1200), np.float32)
-    for k in range(12):
-        y = 80 + 40 * k
-        prob[y : y + 2, :] = 0.95
-        prob[y : y + 6, 560:640] = 0.95
-        if k % 2 == 0:
-            prob[y : y + 6, 547:560] = 0.95
-            prob[y : y + 6, 640:653] = 0.95
+    prob = _fold_page(left_sh=13, right_sh=13)
     y = 80 + 40 * 7
     prob[y : y + 6, 540:660] = 0.95  # mesma espessura da sombra
     out = ruling.RulingFilter().apply(prob.copy())
-    assert (out[y : y + 6, 566:634] > 0.5).all()  # o miolo do traco
-    others = out[:, 566:634] > 0.5
-    others[y : y + 6, :] = False
-    assert others.sum() == 0  # e so ele
+    _assert_only_stroke_kept(out, slice(y, y + 6), 566, 634)
 
 
 def test_shadow_shoulders_that_grow_down_the_page_do_not_exempt_the_fold():
     """Ombros de largura crescente (12 a 22 colunas) em linhas alternadas:
     o corte nao pode ser so uma margem sobre a mediana — exige um gap claro
     ate o ombro mais longo das outras linhas (review #139)."""
-    prob = np.zeros((600, 1200), np.float32)
-    for k in range(12):
-        y = 80 + 40 * k
-        prob[y : y + 2, :] = 0.95
-        prob[y : y + 6, 560:640] = 0.95
+    prob = _fold_page()
     for i, k in enumerate(range(0, 12, 2)):
         y = 80 + 40 * k
         sh = 12 + 2 * i  # 12, 14, 16, 18, 20, 22
@@ -660,15 +680,7 @@ def test_shadow_shoulders_with_a_gap_at_the_fold_edge_do_not_exempt_it():
     """Ombros de 13 colunas em linhas alternadas, 4 delas finas so na coluna
     vizinha da faixa (o voto tolera 11/12). A medida da extensao honra a
     mesma tolerancia: nenhuma isenta (review #139)."""
-    prob = np.zeros((600, 1200), np.float32)
-    for k in range(12):
-        y = 80 + 40 * k
-        prob[y : y + 2, :] = 0.95
-        prob[y : y + 6, 560:640] = 0.95
-    for k in range(0, 12, 2):
-        y = 80 + 40 * k
-        prob[y : y + 6, 547:560] = 0.95
-        prob[y : y + 6, 640:653] = 0.95
+    prob = _fold_page(left_sh=13, right_sh=13)
     for k in (0, 4, 6, 8):  # gap na coluna vizinha da faixa
         y = 80 + 40 * k
         prob[y : y + 6, 559] = 0.0
@@ -821,14 +833,7 @@ def test_a_fold_ending_a_vote_window_before_the_split_is_erased():
     de voto ainda existe, mas a cauda alem dela e vazia. A medida da
     extensao nao pode quebrar nesse caso (argmax num eixo vazio) e o
     interior da faixa sai (review #139)."""
-    prob = np.zeros((600, 1200), np.float32)
-    for k in range(12):
-        y = 80 + 40 * k
-        prob[y : y + 2, :] = 0.95
-        prob[y : y + 6, 560:588] = 0.95  # a faixa: borda direita em 600 - 12
-        if k % 2 == 0:  # seis linhas seguem grossas nas janelas de voto
-            prob[y : y + 6, 547:560] = 0.95
-            prob[y : y + 6, 588:600] = 0.95
+    prob = _fold_page(fa=560, fb=588, left_sh=13, right_sh=12)
     out = ruling.RulingFilter().apply(prob.copy())
     assert (out[:, 566:582] > 0.5).sum() == 0
 
@@ -905,35 +910,18 @@ def test_the_inked_partial_tail_is_what_keeps_a_tilted_extrapolated_line():
 def test_a_stroke_with_unequal_valid_extensions_across_a_split_fold_is_kept_on_both_halves():
     """Ombros 13/20 e vinco [560,700) na divisa 600; traco com 18 col a esquerda
     e 30 a direita vence os dois ombros locais e fica inteiro nos dois lados."""
-    prob = np.zeros((600, 1200), np.float32)
-    for k in range(12):
-        y = 80 + 40 * k
-        prob[y : y + 2, :] = 0.95
-        prob[y : y + 6, 560:700] = 0.95
-        if k % 2 == 0:
-            prob[y : y + 6, 547:560] = 0.95  # 13 a esquerda
-            prob[y : y + 6, 700:720] = 0.95  # 20 a direita
+    prob = _fold_page(fa=560, fb=700, left_sh=13, right_sh=20)
     y = 80 + 40 * 7
     prob[y : y + 6, 542:730] = 0.95  # 18 a esquerda, 30 a direita
     out = ruling.RulingFilter().apply(prob.copy())
     assert (out[y : y + 6, 560:600] > 0.5).all()
-    assert (out[y : y + 6, 600:698] > 0.5).all()
-    others = out[:, 562:698] > 0.5
-    others[y : y + 6, :] = False
-    assert others.sum() == 0
+    _assert_only_stroke_kept(out, slice(y, y + 6), 562, 698)
 
 
 def test_a_fold_ending_8_columns_before_the_split_uses_adjacent_track_for_vote():
     """Faixa [560, 592) termina 8 colunas antes da divisa em 600: a janela de
     voto (12 col) cruza a divisa e usa amostras da trilha direita."""
-    prob = np.zeros((600, 1200), np.float32)
-    for k in range(12):
-        y = 80 + 40 * k
-        prob[y : y + 2, :] = 0.95
-        prob[y : y + 6, 560:592] = 0.95
-        if k % 2 == 0:
-            prob[y : y + 6, 547:560] = 0.95
-            prob[y : y + 6, 592:605] = 0.95  # cruza a divisa em 600
+    prob = _fold_page(fa=560, fb=592, left_sh=13, right_sh=13)
     out_plain = ruling.RulingFilter().apply(prob.copy())
     assert (out_plain[:, 566:586] > 0.5).sum() == 0
 
@@ -941,19 +929,13 @@ def test_a_fold_ending_8_columns_before_the_split_uses_adjacent_track_for_vote()
     prob[y : y + 6, 540:612] = 0.95  # 20 col a esquerda, 20 a direita
     out_stroke = ruling.RulingFilter().apply(prob.copy())
     assert (out_stroke[y : y + 6, 562:590] > 0.5).all()
-    others = out_stroke[:, 566:586] > 0.5
-    others[y : y + 6, :] = False
-    assert others.sum() == 0
+    _assert_only_stroke_kept(out_stroke, slice(y, y + 6), 566, 586)
 
 
 def test_a_narrow_vertical_crossing_inside_the_fold_is_kept():
     """Cruzamento vertical estreito (8 px x 3 col) no meio da sombra (6 px)
     fica protegido mesmo abaixo do teto elevado da faixa."""
-    prob = np.zeros((600, 1200), np.float32)
-    for k in range(12):
-        y = 80 + 40 * k
-        prob[y : y + 2, :] = 0.95
-        prob[y : y + 6, 560:640] = 0.8
+    prob = _fold_page(shade_p=0.8)
     dash = np.zeros(prob.shape, bool)
     y = 80 + 40 * 5
     dash[y - 1 : y + 7, 575:578] = True  # 8 px x 3 col = 24 px
@@ -1005,42 +987,27 @@ def test_staggered_shoulders_on_different_rows_do_not_drop_crossing_strokes():
         y = 80 + 40 * k
         prob[y : y + 6, 540:720] = 0.95
     out = ruling.RulingFilter().apply(prob.copy())
-    for k in range(8, 11):
-        y = 80 + 40 * k
-        assert (out[y : y + 6, 562:698] > 0.5).all()
-    others = out[:, 562:698] > 0.5
-    for k in range(8, 11):
-        y = 80 + 40 * k
-        others[y : y + 6, :] = False
-    assert others.sum() == 0
+    _assert_only_stroke_kept(
+        out, [slice(80 + 40 * k, 80 + 40 * k + 6) for k in range(8, 11)], 562, 698
+    )
 
 
 def test_a_stroke_at_the_split_with_only_one_ruled_half_is_kept():
     """Pauta apenas na metade esquerda [0, 600), vinco em [560, 600) e traco
     de 6 px correndo de 540 a 630: sem trilha na direita, o voto da esquerda
     basta para preservar o traco dentro do vinco."""
-    prob = np.zeros((600, 1200), np.float32)
-    for k in range(12):
-        y = 80 + 40 * k
-        prob[y : y + 2, :600] = 0.95
-        prob[y : y + 6, 560:600] = 0.95
+    prob = _fold_page(fa=560, fb=600, x_end=600)
     y = 80 + 40 * 5
     prob[y : y + 6, 540:630] = 0.95
     out = ruling.RulingFilter().apply(prob.copy())
     assert (out[y : y + 6, 562:600] > 0.5).all()
-    others = out[:, 562:598] > 0.5
-    others[y : y + 6, :] = False
-    assert others.sum() == 0
+    _assert_only_stroke_kept(out, slice(y, y + 6), 562, 598)
 
 
 def test_a_1px_two_column_shadow_bump_inside_the_fold_is_erased():
     """Flutuacao de +1 px por apenas 2 colunas na sombra de 6 px nao pode
     sobreviver como se fosse cruzamento de caneta."""
-    prob = np.zeros((600, 1200), np.float32)
-    for k in range(12):
-        y = 80 + 40 * k
-        prob[y : y + 2, :] = 0.95
-        prob[y : y + 6, 560:640] = 0.8
+    prob = _fold_page(shade_p=0.8)
     y = 80 + 40 * 5
     prob[y : y + 7, 575:577] = 0.8  # +1 px por 2 colunas = 14 px de ruido
     out = ruling.RulingFilter().apply(prob.copy())
@@ -1062,21 +1029,14 @@ def test_one_sided_shoulders_do_not_erase_a_crossing_stroke():
     y = 80 + 40 * 7
     prob[y : y + 6, 545:730] = 0.95  # 15 a esquerda, 30 a direita
     out = ruling.RulingFilter().apply(prob.copy())
-    assert (out[y : y + 6, 562:698] > 0.5).all()
-    others = out[:, 562:698] > 0.5
-    others[y : y + 6, :] = False
-    assert others.sum() == 0
+    _assert_only_stroke_kept(out, slice(y, y + 6), 562, 698)
 
 
 def test_a_4_column_1px_dash_straddling_the_split_is_kept():
     """Traco de 7 px (+1 px sobre a sombra de 6 px) por 4 colunas (598..601)
     cruzando a divisa das metades em 600: somando os dois lados atinge 4 col
     e sobrevive inteiro."""
-    prob = np.zeros((600, 1200), np.float32)
-    for k in range(12):
-        y = 80 + 40 * k
-        prob[y : y + 2, :] = 0.95
-        prob[y : y + 6, 560:640] = 0.8
+    prob = _fold_page(shade_p=0.8)
     dash = np.zeros(prob.shape, bool)
     y = 80 + 40 * 5
     dash[y - 1 : y + 6, 598:602] = True  # 7 px x 4 col (2 de cada lado)
@@ -1108,14 +1068,7 @@ def test_staggered_shoulders_on_both_sides_without_stroke_are_erased():
 def test_disconnected_2px_bumps_across_a_stepped_split_are_erased():
     """Degrau vertical na divisa (10 px) com calombos de +1 px por 2 colunas
     em cada lado: desconexos verticalmente, nenhum pode somar 4 colunas."""
-    prob = np.zeros((600, 1200), np.float32)
-    for k in range(12):
-        yl = 80 + 40 * k
-        yr = yl + 10
-        prob[yl : yl + 2, :600] = 0.95
-        prob[yr : yr + 2, 600:] = 0.95
-        prob[yl : yl + 6, 560:600] = 0.8
-        prob[yr : yr + 6, 600:640] = 0.8
+    prob = _fold_page(shade_p=0.8, split_x=600, offset_r=10)
     yl = 80 + 40 * 5
     yr = yl + 10
     prob[yl : yl + 7, 598:600] = 0.8  # +1 px x 2 col na esquerda
@@ -1127,11 +1080,7 @@ def test_disconnected_2px_bumps_across_a_stepped_split_are_erased():
 def test_empty_fold_without_any_pen_strokes_is_completely_erased():
     """Invariante: faixa inteira sem tinta de caneta (com sombra na divisa)
     nao pode deixar nenhuma linha isenta."""
-    prob = np.zeros((600, 1200), np.float32)
-    for k in range(12):
-        y = 80 + 40 * k
-        prob[y : y + 2, :] = 0.95
-        prob[y : y + 6, 560:640] = 0.9
+    prob = _fold_page(shade_p=0.9)
     out = ruling.RulingFilter().apply(prob.copy())
     assert (out[:, 560:640] > 0.5).sum() == 0
 
@@ -1140,33 +1089,18 @@ def test_offset_halves_preserve_a_stroke_crossing_the_fold():
     """Pautas defasadas de meio periodo entre as metades (80/120/... a esquerda
     e 100/140/... a direita): nenhum par casa na divisa, mas o traco de 6 px
     sobre a pauta esquerda atravessa a sombra e sobrevive inteiro."""
-    prob = np.zeros((600, 1200), np.float32)
-    for k in range(12):
-        yl = 80 + 40 * k
-        yr = 100 + 40 * k
-        prob[yl : yl + 2, :600] = 0.95
-        prob[yl : yl + 6, 560:600] = 0.95
-        prob[yr : yr + 2, 600:] = 0.95
-        prob[yr : yr + 6, 600:640] = 0.95
+    prob = _fold_page(split_x=600, offset_r=20)
     y = 80 + 40 * 5  # 280: cai no espaco em branco da metade direita (260 vs 300)
     prob[y : y + 6, 540:660] = 0.95
     out = ruling.RulingFilter().apply(prob.copy())
     assert (out[y : y + 6, 540:660] > 0.5).all()
-    others = out[:, 562:638] > 0.5
-    others[y : y + 6, :] = False
-    assert others.sum() == 0
+    _assert_only_stroke_kept(out, slice(y, y + 6), 562, 638)
 
 
 def test_single_ruled_half_fold_at_edge_with_shoulders_and_no_stroke_is_erased():
     """Pagina unica pautada [0, 600), sombra na borda [560, 600) com ombros
     de 13 col em metade das linhas e sem tinta: nada sobrevive na faixa."""
-    prob = np.zeros((600, 1200), np.float32)
-    for k in range(12):
-        y = 80 + 40 * k
-        prob[y : y + 2, :600] = 0.95
-        prob[y : y + 6, 560:600] = 0.95
-        if k % 2 == 0:
-            prob[y : y + 6, 547:560] = 0.95
+    prob = _fold_page(fa=560, fb=600, left_sh=13, x_end=600)
     out = ruling.RulingFilter().apply(prob.copy())
     assert (out[:, 562:600] > 0.5).sum() == 0
 
@@ -1272,33 +1206,19 @@ def test_fold_junction_matrix(layout, content):
 def test_single_ruled_half_keeps_short_left_stroke_continuing_into_blank_half():
     """Metade esquerda pautada com ombros de 13 col, metade direita em branco;
     traço de 6 px com 16 col a esquerda (<= 13+3) e 60 col no branco sobrevive."""
-    prob = np.zeros((600, 1200), np.float32)
-    for k in range(12):
-        y = 80 + 40 * k
-        prob[y : y + 2, :600] = 0.95
-        prob[y : y + 6, 560:600] = 0.95
-        if k % 2 == 0:
-            prob[y : y + 6, 547:560] = 0.95
+    prob = _fold_page(fa=560, fb=600, left_sh=13, x_end=600)
     y = 80 + 40 * 5
     prob[y : y + 6, 544:660] = 0.95  # 16 col a esquerda, 60 col no branco
     out = ruling.RulingFilter().apply(prob.copy())
     assert (out[y : y + 6, 560:660] > 0.5).all()
-    others = out[:, 562:600] > 0.5
-    others[y : y + 6, :] = False
-    assert others.sum() == 0
+    _assert_only_stroke_kept(out, slice(y, y + 6), 562, 600)
 
 
 def test_offset_halves_preserve_a_stroke_that_bends_onto_a_destination_rule():
     """Pautas defasadas (80/120/... e 100/140/...); traço na pauta esquerda
     cruza a costura em 600 e dobra 20 px para pousar sobre a pauta direita em
     620..640: o segmento de chegada sobrevive."""
-    prob = np.zeros((600, 1200), np.float32)
-    for k in range(12):
-        yl, yr = 80 + 40 * k, 100 + 40 * k
-        prob[yl : yl + 2, :600] = 0.95
-        prob[yl : yl + 6, 560:600] = 0.95
-        prob[yr : yr + 2, 600:] = 0.95
-        prob[yr : yr + 6, 600:640] = 0.95
+    prob = _fold_page(split_x=600, offset_r=20)
     y = 80 + 40 * 5  # 280 -> dobra para 300 (pauta direita k=5)
     stroke = np.zeros(prob.shape, bool)
     stroke[y : y + 6, 540:600] = True
@@ -1317,13 +1237,7 @@ def test_disconnected_shadow_fragment_before_gap_is_erased_while_stroke_survives
     """Faixa [560, 640) em pautas defasadas com fragmento de sombra [547, 570)
     antes de um gap [570, 575) e traço depois [575, 660): o fragmento dentro
     da faixa [560, 570) sai, o traço fica."""
-    prob = np.zeros((600, 1200), np.float32)
-    for k in range(12):
-        yl, yr = 80 + 40 * k, 100 + 40 * k
-        prob[yl : yl + 2, :600] = 0.95
-        prob[yl : yl + 6, 560:600] = 0.95
-        prob[yr : yr + 2, 600:] = 0.95
-        prob[yr : yr + 6, 600:640] = 0.95
+    prob = _fold_page(split_x=600, offset_r=20)
     y = 80 + 40 * 5
     prob[y : y + 6, 547:570] = 0.95  # fragmento/ombro desconectado
     prob[y : y + 6, 570:575] = 0.0  # gap desconectando [560, 570)
@@ -1337,15 +1251,7 @@ def test_dark_seam_linking_to_destination_shoulder_is_erased_while_blank_crossin
     """Costura escura ligando pauta fonte (sem ombros) a pauta destino com
     ombros de 13 col e apagada; traço real cruzando para espaço em branco
     sobrevive."""
-    prob = np.zeros((600, 1200), np.float32)
-    for k in range(12):
-        yl, yr = 80 + 40 * k, 100 + 40 * k
-        prob[yl : yl + 2, :600] = 0.95
-        prob[yl : yl + 6, 560:600] = 0.95
-        prob[yr : yr + 2, 600:] = 0.95
-        prob[yr : yr + 6, 600:640] = 0.95
-        if k % 2 == 0:
-            prob[yr : yr + 6, 640:653] = 0.95  # ombros só no destino
+    prob = _fold_page(right_sh=13, split_x=600, offset_r=20)
     # costura de 1 col ligando pauta esquerda k=2 (160) a direita k=2 (180, com ombro)
     y_seam = 80 + 40 * 2
     prob[y_seam : y_seam + 26, 599:601] = 0.95
@@ -1355,3 +1261,72 @@ def test_dark_seam_linking_to_destination_shoulder_is_erased_while_blank_crossin
     out = ruling.RulingFilter().apply(prob.copy())
     assert (out[y_stroke : y_stroke + 6, 540:660] > 0.5).all()
     assert (out[y_seam : y_seam + 6, 562:598] > 0.5).sum() == 0
+
+
+def test_right_only_shoulders_with_offset_halves_erase_left_fold_ruling():
+    """M1: ombros de 13 col só na direita + pautas defasadas (80/120 vs 100/140)
+    sem traço: a pauta esquerda dentro do vinco é apagada."""
+    prob = _fold_page(right_sh=13, split_x=600, offset_r=20)
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[:, 562:638] > 0.5).sum() == 0
+
+
+def test_single_half_fold_ending_6_cols_before_track_end_preserves_stroke():
+    """M2: vinco [560, 594) terminando 6 colunas antes do fim da trilha [0, 600)
+    com traço de 6 px em [540, 620): o traço dentro de [562, 594) sobrevive."""
+    prob = _fold_page(fa=560, fb=594, x_end=600)
+    y = 80 + 40 * 5
+    prob[y : y + 6, 540:620] = 0.95
+    out = ruling.RulingFilter().apply(prob.copy())
+    _assert_only_stroke_kept(out, slice(y, y + 6), 562, 594)
+
+
+def test_8px_stepped_halves_preserve_straight_stroke_crossing_fold():
+    """M3: degrau de 8 px entre metades [0, 600) e [600, 1200) com traço reto
+    de 6 px cruzando o vinco em y=280: o traço sobrevive dentro do vinco."""
+    prob = _fold_page(split_x=600, offset_r=8)
+    y = 280
+    prob[y : y + 6, 540:660] = 0.95
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[y : y + 6, 562:638] > 0.5).all()
+
+
+@pytest.mark.parametrize("step", [0, 8, 20])
+@pytest.mark.parametrize("tail", [0, 6, 20])
+@pytest.mark.parametrize(
+    "content",
+    ["empty", "straight_stroke", "bending_stroke", "one_sided_shoulder"],
+)
+def test_step_tail_matrix(step, tail, content):
+    """Matriz {degrau 0, 8, 20} x {cauda 0, 6, 20 antes de 600} x {vazio,
+    traço reto, traço dobrado, ombro unilateral}."""
+    fa = 560
+    fb = 600 - tail
+    left_sh = 13 if content == "one_sided_shoulder" else 0
+    if step == 0:
+        prob = _fold_page(fa=fa, fb=fb, left_sh=left_sh, x_end=600)
+    else:
+        prob = _fold_page(
+            fa=fa, fb=fb, left_sh=left_sh, split_x=600, offset_r=step, x_end=1200
+        )
+
+    y_stroke = 80 + 40 * 5
+    stroke_mask = np.zeros(prob.shape, bool)
+    if content == "straight_stroke":
+        stroke_mask[y_stroke : y_stroke + 6, fa - 20 : fb + 40] = True
+    elif content == "bending_stroke":
+        bend = step if step else 20
+        stroke_mask[y_stroke : y_stroke + 6, fa - 20 : 600] = True
+        for x in range(600, 600 + bend):
+            dy = x - 600
+            stroke_mask[y_stroke + dy : y_stroke + dy + 6, x] = True
+        stroke_mask[y_stroke + bend : y_stroke + bend + 6, 600 + bend : 640] = True
+
+    prob[stroke_mask] = 0.95
+    out = ruling.RulingFilter().apply(prob.copy())
+    if content in ("empty", "one_sided_shoulder"):
+        assert (out[:, fa + 2 : fb - 2] > 0.5).sum() == 0
+    else:
+        inside = np.zeros(prob.shape, bool)
+        inside[:, fa + 2 : fb - 2] = True
+        assert (out[stroke_mask & inside] > 0.5).all()
