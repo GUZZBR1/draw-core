@@ -24,6 +24,12 @@ Um diretório por clipe, nome em kebab-case que diz a condição
     regions.json              # opcional: caixas no canvas final
 ```
 
+A numeração contínua `f0000…` não é enfeite: os índices dos rótulos
+(`frames` de `expected`) são **posições** no inventário ordenado pelo
+sufixo numérico dos `f*.png` — só coincidem com o número do arquivo
+quando não há lacuna. `corpus check` acusa inventário não contíguo
+justamente porque lá as duas leituras divergem.
+
 `regions.json` é `{"writing": [[x0,y0,x1,y1], ...], "ruling_only":
 [[x0,y0,x1,y1], ...]}` em coordenadas do canvas retificado final; o
 `bench_ink.run_clip` conta pixels de escrita × pauta pura dentro
@@ -66,8 +72,10 @@ a mesma régua que o replay usa antes de contar.
   `no_ink` (canvas ~vazio), `ink_present` (canvas ≥ `min_px`),
   `canvas_stable` (canvas não colapsa nem zera no meio). `min_px` é
   opcional onde fizer sentido. Escopo opcional por regra:
-  `frames: [a, b]` restringe a janela de quadros (índice do arquivo
-  `fNNNN`, inclusivo) e `region: [x0,y0,x1,y1]` restringe ao
+  `frames: [a, b]` restringe a janela de quadros (posição no
+  inventário ordenado pelo sufixo numérico dos `f*.png`, inclusivo —
+  na captura contígua `f0000…` coincide com o número do arquivo) e
+  `region: [x0,y0,x1,y1]` restringe ao
   retângulo do canvas — tinta fora da janela ou do retângulo não
   satisfaz a regra. Sem `frames`, `no_ink`/`ink_present` leem o
   estado final do canvas; com `frames`, o pico de px confirmado

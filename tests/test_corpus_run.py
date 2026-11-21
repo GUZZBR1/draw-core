@@ -258,6 +258,69 @@ def test_expected_window_incomplete_fails_distinctly():
     )
 
 
+def test_expected_reversed_window_fails_as_invalid_scope():
+    """[a, b] com a > b falha como escopo invalido nas tres regras —
+    antes o range vazio nao tinha quadro faltante e no_ink passava sem
+    medir nada."""
+    res = SimpleNamespace(canvas_px=500, retracted_px_total=0)
+    run = {"_trace": _trace([(0, 1), (500, 1), (500, 1), (500, 1)])}
+    clip = SimpleNamespace(
+        expected=[
+            {"rule": "no_ink", "frames": [3, 2]},
+            {"rule": "ink_present", "frames": [3, 2]},
+            {"rule": "canvas_stable", "frames": [3, 2]},
+        ]
+    )
+    verdicts = evaluate_expected(clip, res, run)
+    assert [v["ok"] for v in verdicts] == [False, False, False]
+    assert {v["detail"] for v in verdicts} == {"escopo invalido"}
+
+    # Mesma regua sem _trace (canvas sintetico): o span e rejeitado
+    # antes de medir o ponto final.
+    verdicts = evaluate_expected(clip, res)
+    assert [v["ok"] for v in verdicts] == [False, False, False]
+
+
+def test_clip_labels_index_positions_not_file_numbers(tmp_path, capsys):
+    """Rotulos apontam POSICOES no inventario ordenado, nao numeros de
+    arquivo: com lacuna nos sufixos (f0000, f0005) a janela [1, 1] e o
+    arquivo f0005.png — e o check acusa a ambiguidade."""
+    from lab.corpus.__main__ import main
+    from lab.corpus.clip import clip_frames, validate_clip
+
+    clip_dir = tmp_path / "gap"
+    clip_dir.mkdir()
+    img = np.zeros((8, 8, 3), np.uint8)
+    cv2.imwrite(str(clip_dir / "f0000.png"), img)
+    cv2.imwrite(str(clip_dir / "f0005.png"), img)
+    meta = {
+        "version": 2,
+        "scene_fps": 8.0,
+        "frames": 2,
+        "desc": "lacuna nos sufixos",
+        "expected": [{"rule": "no_ink", "frames": [1, 1]}],
+    }
+    (clip_dir / "clip.json").write_text(json.dumps(meta), encoding="utf-8")
+
+    # Posicao 1 e o arquivo f0005.png: a janela [1,1] existe; o unico
+    # problema apontado e a lacuna que torna posicao != numero.
+    assert [p.name for p in clip_frames(clip_dir)] == ["f0000.png", "f0005.png"]
+    problems = validate_clip(clip_dir)
+    assert len(problems) == 1
+    assert "posicoes no inventario" in problems[0]
+
+    # Janela "pelo nome" ([5,5] mirando o arquivo f0005) e apontada
+    # como posicao fora do clipe — a posicao 5 nao existe.
+    meta["expected"] = [{"rule": "no_ink", "frames": [5, 5]}]
+    (clip_dir / "clip.json").write_text(json.dumps(meta), encoding="utf-8")
+    joined = "\n".join(validate_clip(clip_dir))
+    assert "[5, 5] fora do clipe" in joined
+
+    # E o corpus check na raiz devolve a ambiguidade no stderr.
+    assert main(["check", str(tmp_path)]) == 2
+    assert "posicoes no inventario" in capsys.readouterr().err
+
+
 def _write_fake_clip_json(clip_dir, expected=None, conditions=None):
     clip_dir.mkdir(parents=True, exist_ok=True)
     img = np.full((8, 8, 3), 200, np.uint8)

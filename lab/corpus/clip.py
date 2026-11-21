@@ -68,8 +68,10 @@ def clip_frames(clip_dir) -> list[Path]:
     Inventario unico do clipe: a contagem de ``count_frames``, o hash
     do manifesto e o replay do corpus compartilham esta lista — o que
     o sha256 cobre e o que entra no replay sao os mesmos arquivos. O
-    indice i dos rotulos (``frames`` de ``expected``, ``issues``) e a
-    posicao nesta ordem.
+    indice i dos rotulos (``frames`` de ``expected``) e a posicao
+    nesta ordem — so coincide com o numero do arquivo quando os
+    sufixos sao 0..n-1 continuos; ``validate_clip`` aponta a lacuna
+    que faria as duas leituras divergir.
 
     O manifesto NAO muda com a ordem numerica: ``hash_clip`` reordena
     por nome antes de hashear, entao o sha256 de clipes ja registrados
@@ -88,6 +90,23 @@ def count_frames(clip_dir) -> int:
     return len(clip_frames(clip_dir))
 
 
+def span_problem(span) -> str | None:
+    """``None`` se ``span`` é um ``[a, b]`` utilizável como janela inclusiva.
+
+    Dois inteiros com ``0 <= a <= b`` — posições no inventário de
+    ``clip_frames``. Mesma disciplina de ``rect_problem``: o texto é
+    devolvido para ``_validate_expected`` compor a mensagem, e
+    ``window_missing`` o converte em ``ValueError``.
+    """
+    if not isinstance(span, list) or len(span) != 2:
+        return f"deve ser [a, b]: {span!r}"
+    if not all(_is_int(v) for v in span):
+        return f"indices nao inteiros: {span!r}"
+    if span[0] < 0 or span[0] > span[1]:
+        return f"limites invalidos {span!r} (precisa 0 <= a <= b)"
+    return None
+
+
 def window_missing(span, observed) -> list[int]:
     """Indices pedidos pela janela ``[a, b]`` ausentes de ``observed``.
 
@@ -95,9 +114,13 @@ def window_missing(span, observed) -> list[int]:
     ``validate_clip`` (``observed`` = o inventario do clipe) e a
     avaliacao de ``expected`` (``observed`` = os quadros que o replay
     registrou no trace — quadro pulado por imread ilegivel deixa lacuna).
-    Janela malformada levanta TypeError/ValueError — o schema e checado
-    antes por quem chama.
+    Janela malformada levanta ValueError pela regua de ``span_problem``
+    — a mesma do schema, para o replay nao medir a janela vazia de um
+    span invertido como "sem quadro faltante".
     """
+    problem = span_problem(span)
+    if problem is not None:
+        raise ValueError(problem)
     a, b = span
     seen = set(observed)
     return [i for i in range(a, b + 1) if i not in seen]
@@ -248,16 +271,9 @@ def _validate_expected(expected, frames=None, size=None, observed=None) -> list[
             problems.append(f"expected[{idx}].rule desconhecida: {rule!r}")
         if "frames" in entry:
             span = entry["frames"]
-            if (
-                not isinstance(span, list)
-                or len(span) != 2
-                or not all(_is_int(v) for v in span)
-                or span[0] < 0
-                or span[0] > span[1]
-            ):
-                problems.append(
-                    f"expected[{idx}].frames deve ser [a, b] com ints 0 <= a <= b"
-                )
+            problem = span_problem(span)
+            if problem is not None:
+                problems.append(f"expected[{idx}].frames {problem}")
             elif frames is not None and span[1] >= frames:
                 problems.append(
                     f"expected[{idx}].frames {span!r} fora do clipe ({frames} quadros)"
@@ -294,7 +310,13 @@ def _canvas_size(raw):
 
 
 def validate_clip(clip_dir) -> list[str]:
-    """Valida ``clip.json``, contagem de quadros e ``regions.json``."""
+    """Valida ``clip.json``, contagem de quadros e ``regions.json``.
+
+    Sufixos fora de ``0..n-1`` contíguos (``f0000``, ``f0005``) viram
+    problema: índice de rótulo é posição na ordem de ``clip_frames`` —
+    número de arquivo só coincide sem lacuna, e uma janela rotulada
+    "pelo nome" mediria outro quadro em silêncio.
+    """
     clip_dir = Path(clip_dir)
     try:
         raw = _read_json_dict(clip_dir / "clip.json", "clip.json")
@@ -312,7 +334,15 @@ def validate_clip(clip_dir) -> list[str]:
     elif not _is_number(raw["scene_fps"]) or raw["scene_fps"] <= 0:
         problems.append(f"scene_fps deve ser > 0: {raw['scene_fps']!r}")
 
-    actual = count_frames(clip_dir)
+    inventory = clip_frames(clip_dir)
+    actual = len(inventory)
+    if [int(p.stem[1:]) for p in inventory if p.stem[1:].isdecimal()] != list(
+        range(actual)
+    ):
+        problems.append(
+            "sufixos de f*.png sem 0..n-1 contiguo: indices de rotulo "
+            "sao posicoes no inventario ordenado, nao numeros de arquivo"
+        )
     if "frames" not in raw:
         problems.append("frames ausente")
     elif not _is_int(raw["frames"]) or raw["frames"] < 0:
