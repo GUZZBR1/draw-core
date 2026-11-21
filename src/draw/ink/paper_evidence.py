@@ -94,10 +94,9 @@ def paper_exposed(image, reference, *, min_ratio=_MIN_RATIO, block=_BLOCK_PX):
         bounds = (blue_f >= (ratio - spread) * red_f) & (
             blue_f <= (ratio + spread) * red_f
         )
-        # Vermelho <= 1: a razao nao existe e os dois limites colapsam em 0
-        # (verde puro passaria). Cai na razao neutra 1, como na referencia.
-        neutral_ok = abs(1.0 - ratio) <= spread
-        ok &= np.where(red > 1, bounds, neutral_ok)
+        # Sem vermelho suficiente para medir a razao nao ha evidencia de
+        # papel: os limites colapsariam em 0 (verde/ciano brilhante passaria).
+        ok &= (red > 1) & bounds
     else:
         ok = peak >= min_ratio * level
     # Meia janela + 1 amostra: a borda de um ocluso pode cair entre duas

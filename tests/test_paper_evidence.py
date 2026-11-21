@@ -243,3 +243,28 @@ def test_whole_covered_slice_is_frozen_at_every_sampling_offset(offset):
     image[y0 : y0 + 40, 100 : 100 + 160] = (60, 62, 64)
     ok = paper_evidence.paper_exposed(image, ref)
     assert not ok[y0 : y0 + 40, 100 : 100 + 160].any()
+
+
+def test_bright_cyan_patch_with_no_red_is_not_paper():
+    image = np.empty((256, 384, 3), np.uint8)
+    image[:] = (210, 210, 210)
+    ref = paper_evidence.paper_reference(image)
+    image[64:192, 96:288] = (255, 255, 1)
+    ok = paper_evidence.paper_exposed(image, ref)
+    assert not ok[80:176, 112:272].any()
+
+
+def test_frozen_border_without_pending_ink_is_not_pending():
+    acc = accumulator_mod.LayeredInkAccumulator()
+    prob = _ink_prob()
+    _confirm(acc, prob)
+    ok_all = np.ones((H, W), bool)
+    border = ok_all.copy()
+    border[:, :20] = False  # borda de pagina permanente, sem tinta
+    result = acc.add(prob, np.ones((H, W), bool), paper_ok=border)
+    assert result["frozen_px"] > 0 and result["frozen_pending_px"] == 0
+    # Traco novo sob regiao congelada: isso sim e pendente.
+    new = prob.copy()
+    new[140:150, 5:15] = 0.95
+    result = acc.add(new, np.ones((H, W), bool), paper_ok=border)
+    assert result["frozen_pending_px"] > 0

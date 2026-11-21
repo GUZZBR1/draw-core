@@ -65,6 +65,12 @@ def _run(monkeypatch, config):
     return worker, ink, generation
 
 
+def _no_idle_probe(monkeypatch):
+    """Sem sonda ociosa: so as passadas submetidas votam (sem corrida)."""
+    monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 3600.0)
+    time.sleep(0.1)
+
+
 def _hand_image():
     image = _paper()
     image[HAND] = (60, 62, 64)  # mao/sombra escura que o MediaPipe nao viu
@@ -132,8 +138,11 @@ def test_black_frame_after_a_reference_freezes_instead_of_erasing(monkeypatch):
 def test_post_exit_confirm_window_is_refunded_while_the_guard_freezes(monkeypatch):
     worker, ink, generation = _run(monkeypatch, InkConfig(post_exit_full_window=True))
     try:
+        _no_idle_probe(monkeypatch)
         worker.set_hand_presence(True)
-        ink.content = _prob(covered_ink=False)
+        # Traco novo sob a sombra: o que a espera pos-saida precisa.
+        pending = (slice(130, 142), slice(212, 348))
+        ink.content = _prob(covered_ink=False, extra=pending)
         worker.set_hand_presence(False)
         window = worker._post_exit_confirm_passes()
         assert window > 1
@@ -169,5 +178,19 @@ def test_stroke_finished_under_a_shadow_confirms_after_hand_exit_at_production(
         for _ in range(config.occlusion_hold_passes + 5):
             _pass(worker, generation, _paper())
         assert worker.poll(generation, 0).confirmed[late].all()
+    finally:
+        worker.stop()
+
+
+def test_permanent_border_without_pending_ink_does_not_spend_refunds(monkeypatch):
+    worker, ink, generation = _run(monkeypatch, InkConfig(post_exit_full_window=True))
+    try:
+        worker.set_hand_presence(True)
+        worker.set_hand_presence(False)
+        image = _paper()
+        image[:, :64] = (60, 62, 64)  # borda escura permanente, sem tinta nela
+        for _ in range(2):
+            _pass(worker, generation, image)
+        assert worker._confirm_masked_skips == 0
     finally:
         worker.stop()

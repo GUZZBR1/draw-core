@@ -2020,7 +2020,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # warp e nao pode segurar a trabalhadora acordada).
             if (
                 self._spent_confirm_pass
-                and result["frozen_px"]
+                and result["frozen_pending_px"]
                 and self._confirm_passes < self._post_exit_confirm_passes()
                 and self._confirm_masked_skips
                 < votes._INK_VOTE_WINDOW + self._config.occlusion_hold_passes + 1

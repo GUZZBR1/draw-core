@@ -295,6 +295,18 @@ class LayeredInkAccumulator:
             "retracted_px_total": int(np.count_nonzero(self._retracted_ever)),
             "turn": turn,
             "frozen_px": 0 if frozen is None else int(np.count_nonzero(frozen)),
+            # Congelado E com tinta vista pelo modelo e ainda nao confirmada:
+            # o que a espera pos-saida precisa de fato (borda de pagina ou
+            # sombra permanente nao entram).
+            "frozen_pending_px": (
+                0
+                if frozen is None
+                else int(
+                    np.count_nonzero(
+                        frozen & (prob > self.threshold) & (self._confirmed == 0)
+                    )
+                )
+            ),
         }
         if self._config.removal:
             result["removed_confirmed_px"] = removed_px
