@@ -729,6 +729,58 @@ def test_window_size_uses_the_real_rect_down_to_a_small_floor(monkeypatch):
     assert app_module._window_size() == (1600, 640)
 
 
+def _stub_show_gui(monkeypatch, moves):
+    """Stub do backend de janela para exercitar _show sem display."""
+    monkeypatch.setattr(app_module.cv2, "resizeWindow", lambda *a, **k: None)
+    monkeypatch.setattr(app_module.cv2, "imshow", lambda *a, **k: None)
+    monkeypatch.setattr(app_module.cv2, "setWindowProperty", lambda *a, **k: None)
+    monkeypatch.setattr(app_module.cv2, "moveWindow", lambda *a, **k: moves.append(a))
+    monkeypatch.setattr(app_module, "_window_rect", lambda: (1600, 640))
+    monkeypatch.setattr(app_module, "_window_sized", set())
+    monkeypatch.setattr(app_module, "_window_place_until", [0.0])
+    monkeypatch.setattr(app_module, "_fullscreen_applied", [True])
+
+
+def test_show_posiciona_a_janela_ate_o_prazo(monkeypatch):
+    """Posicao de abertura so sai apos a janela existir e para no prazo.
+
+    O Qt so honra moveWindow com a janela realizada: a primeira
+    exibicao dimensiona e abre o prazo; as seguintes posicionam.
+    Vencido o prazo, o usuario manda na posicao.
+    """
+    moves = []
+    _stub_show_gui(monkeypatch, moves)
+    monkeypatch.setitem(app_module._settings["on"], "fullscreen", False)
+    frame = np.zeros((640, 1600, 3), np.uint8)
+    app_module._show(frame)
+    assert moves == []
+    app_module._show(frame)
+    assert moves == [
+        (app_module._WINDOW, app_module._WINDOW_PLACE_X, app_module._WINDOW_PLACE_Y)
+    ]
+    app_module._window_place_until[0] = 0.0
+    app_module._show(frame)
+    assert len(moves) == 1
+
+
+def test_show_nao_move_a_janela_em_fullscreen(monkeypatch):
+    """Em fullscreen o pedido de posicao nao sai — e o prazo corre igual.
+
+    Com a janela sem borda cobrindo o monitor, moveWindow a
+    deslocaria da origem e deixaria o desktop a mostra. O prazo
+    segue correndo para que sair da tela cheia depois nao reabra
+    o posicionamento.
+    """
+    moves = []
+    _stub_show_gui(monkeypatch, moves)
+    monkeypatch.setitem(app_module._settings["on"], "fullscreen", True)
+    frame = np.zeros((640, 1600, 3), np.uint8)
+    for _ in range(5):
+        app_module._show(frame)
+    assert moves == []
+    assert app_module._window_place_until[0] > 0.0
+
+
 def test_camera_menu_with_many_cameras_scrolls_and_selects_absolute_rows(monkeypatch):
     state = _reset_camera_menu(monkeypatch)
     monkeypatch.setattr(app_module, "_window_size", lambda: (1600, 640))
