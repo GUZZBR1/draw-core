@@ -46,12 +46,22 @@ def _is_number(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def count_frames(clip_dir) -> int:
-    """Conta quadros ``f*.png`` no nivel raiz do diretorio do clipe."""
+def clip_frames(clip_dir) -> list[Path]:
+    """Quadros ``f*.png`` do nivel raiz, em ordem.
+
+    Inventario unico do clipe: a contagem de ``count_frames``, o hash
+    do manifesto e o replay do corpus compartilham esta lista — o que
+    o sha256 cobre e o que entra no replay sao os mesmos arquivos.
+    """
     clip_dir = Path(clip_dir)
     if not clip_dir.is_dir():
-        return 0
-    return sum(1 for p in clip_dir.glob("f*.png") if p.is_file())
+        return []
+    return sorted(p for p in clip_dir.glob("f*.png") if p.is_file())
+
+
+def count_frames(clip_dir) -> int:
+    """Conta quadros ``f*.png`` no nivel raiz do diretorio do clipe."""
+    return len(clip_frames(clip_dir))
 
 
 def _read_json_dict(path: Path, label: str) -> dict:

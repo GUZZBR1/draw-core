@@ -115,6 +115,7 @@ def _write_outputs(out_dir: Path, results, baseline: str, title: str):
 
 
 def _cmd_run(args) -> int:
+    from lab.corpus.manifest import verify_manifest
     from lab.corpus.run import run_corpus
 
     bundles = _parse_bundles(args.bundle)
@@ -125,6 +126,7 @@ def _cmd_run(args) -> int:
     results = run_corpus(
         args.root,
         bundles,
+        verify_corpus=verify_manifest,
         only=args.only or None,
         verify=verify,
         progress=lambda clip, b, i, n: print(
@@ -136,6 +138,7 @@ def _cmd_run(args) -> int:
 
 
 def _cmd_sweep(args) -> int:
+    from lab.corpus.manifest import verify_manifest
     from lab.corpus.sweep import grid_bundles, parse_grid, run_sweep
 
     base_flags = [f.strip() for f in args.base.split(",") if f.strip()]
@@ -146,6 +149,7 @@ def _cmd_sweep(args) -> int:
         args.root,
         args.grid,
         base_flags=base_flags,
+        verify_corpus=verify_manifest,
         verify=verify,
         progress=lambda clip, b, i, n: print(
             f"[{i}/{n}] {clip} :: {b}", file=sys.stderr

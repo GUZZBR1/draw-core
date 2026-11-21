@@ -58,16 +58,18 @@ def grid_bundles(grid: dict, base_flags=()) -> dict:
     return bundles
 
 
-def run_sweep(root, spec: str, base_flags=(), **run_kwargs) -> list:
+def run_sweep(root, spec: str, base_flags=(), *, verify_corpus, **run_kwargs) -> list:
     """Roda o sweep inteiro: parse_grid -> grid_bundles -> run_corpus.
 
-    ``root`` é a raiz do corpus; ``run_kwargs`` (``only``, ``detector``,
-    ``page_clean``, ``verify``, ``progress``) é repassado verbatim ao
-    ``run_corpus``. Devolve a lista de ClipResult.
+    ``root`` é a raiz do corpus; ``verify_corpus`` é o callable de
+    integridade repassado ao ``run_corpus`` (``verify_manifest``, ou
+    ``None`` como opt-out explícito). ``run_kwargs`` (``only``,
+    ``detector``, ``page_clean``, ``verify``, ``progress``) é repassado
+    verbatim ao ``run_corpus``. Devolve a lista de ClipResult.
     """
     # Importe preguiçoso: quem só exercita a grade não precisa do
     # run.py (e de sua pilha de corpus/modelos) importado.
     from lab.corpus.run import run_corpus
 
     bundles = grid_bundles(parse_grid(spec), base_flags)
-    return run_corpus(root, bundles, **run_kwargs)
+    return run_corpus(root, bundles, verify_corpus=verify_corpus, **run_kwargs)

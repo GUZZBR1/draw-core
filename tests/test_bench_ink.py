@@ -251,6 +251,30 @@ def test_run_clip_honors_the_orientation_of_the_clip(tmp_path):
     assert out["_canvas"].shape == (850, 1200)
 
 
+def test_run_clip_threads_an_explicit_frame_inventory(tmp_path):
+    """O corpus passa os f*.png registrados: preview.png e raw/ nao
+    entram no replay nem substituem os quadros registrados."""
+    clip = _fake_clip(tmp_path)
+    img = np.zeros((64, 64, 3), np.uint8)
+    cv2.imwrite(str(clip / "preview.png"), img)
+    (clip / "raw").mkdir()
+    cv2.imwrite(str(clip / "raw" / "decoy.png"), img)
+
+    # Sem o inventario, a descoberta preferiria o raw/ solto.
+    out = bench.run_clip(clip, [], detector=_Detector(), page_clean=_Ink())
+    assert out["frames"] == 1
+
+    inventory = sorted(clip.glob("f*.png"))
+    out = bench.run_clip(
+        clip,
+        [],
+        detector=_Detector(),
+        page_clean=_Ink(),
+        frame_files=inventory,
+    )
+    assert out["frames"] == len(inventory) == 10
+
+
 # ----------------------------------------------------------------- presets
 
 

@@ -168,6 +168,45 @@ def test_run_replay_pareia_deteccao_consumida(tmp_path):
     assert np.allclose(records[2]["det_quad"], quads[1])
 
 
+def test_run_replay_usa_inventario_explicito_de_quadros(tmp_path):
+    """``frame_files`` (o inventario do corpus rotulado) exclui
+    preview.png e raw/ — que a descoberta generica engoliria."""
+    from lab.replay_lab import run_replay
+
+    img = np.full((64, 64, 3), 200, np.uint8)
+    for i in range(2):
+        cv2.imwrite(str(tmp_path / f"f{i}.png"), img)
+    cv2.imwrite(str(tmp_path / "preview.png"), img)
+    (tmp_path / "raw").mkdir()
+    cv2.imwrite(str(tmp_path / "raw" / "decoy.png"), img)
+
+    class FakeDetector:
+        last_presence_logit = None
+
+        def __call__(self, frame, return_mask=False):
+            quad = np.float32([[2, 2], [60, 2], [60, 60], [2, 60]])
+            return quad, "paper", np.ones(frame.shape[:2], np.uint8)
+
+    class FakeInk:
+        threshold = 0.5
+
+        def ink_mask(self, warp):
+            return np.zeros(warp.shape[:2], np.uint8)
+
+    # Contraste: a descoberta preferiria raw/ inteiro ao inventario.
+    assert [p.name for p in list_corpus_frames(tmp_path)] == ["decoy.png"]
+    inventory = sorted(tmp_path.glob("f*.png"))
+    records = run_replay(
+        tmp_path,
+        tmp_path / "out",
+        detector=FakeDetector(),
+        page_clean=FakeInk(),
+        frame_files=inventory,
+        verify=None,
+    )
+    assert [r["file"] for r in records] == ["f0.png", "f1.png"]
+
+
 def test_build_panel_sobrepoe_canvas_confirmado():
     frame = np.full((60, 80, 3), 255, np.uint8)
     warp = np.full((40, 30, 3), 128, np.uint8)

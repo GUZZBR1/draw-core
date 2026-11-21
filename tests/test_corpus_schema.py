@@ -10,6 +10,7 @@ from lab.corpus.clip import (
     CONDITION_KEYS,
     EXPECTED_RULES,
     ClipError,
+    clip_frames,
     count_frames,
     load_clip,
     validate_clip,
@@ -124,6 +125,28 @@ def test_count_frames_ignores_non_frame_pngs(tmp_path):
     sub.mkdir()
     cv2.imwrite(str(sub / "f0000.png"), img)
     assert count_frames(clip_dir) == 2
+
+
+def test_clip_frames_is_the_shared_inventory(tmp_path):
+    """O mesmo f*.png ordenado alimenta contagem e hash: preview.png,
+    raw/ e imagens de outra extensao ficam fora dos dois."""
+    clip_dir = tmp_path / "inv"
+    _write_frames(clip_dir, count=2)
+    img = np.zeros((8, 8, 3), dtype=np.uint8)
+    cv2.imwrite(str(clip_dir / "preview.png"), img)
+    raw = clip_dir / "raw"
+    raw.mkdir()
+    cv2.imwrite(str(raw / "f9999.png"), img)
+    cv2.imwrite(str(clip_dir / "f0002.jpg"), img)
+
+    assert [p.name for p in clip_frames(clip_dir)] == [
+        "f0000.png",
+        "f0001.png",
+    ]
+    assert count_frames(clip_dir) == 2
+    h = hash_clip(clip_dir)
+    cv2.imwrite(str(clip_dir / "mais_um.png"), img)
+    assert hash_clip(clip_dir) == h  # fora do padrao, fora do hash
 
 
 def test_init_clip_writes_v2_and_refuses_invalid_cases(tmp_path):

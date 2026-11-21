@@ -486,12 +486,17 @@ def _region_px(mask, boxes):
     return int(sum(np.count_nonzero(mask[y0:y1, x0:x1]) for x0, y0, x1, y1 in boxes))
 
 
-def run_clip(clip_dir, flags, *, detector=None, page_clean=None, verify=None):
+def run_clip(
+    clip_dir, flags, *, detector=None, page_clean=None, verify=None, frame_files=None
+):
     """Roda um clipe pelo laço real do app e devolve as medidas.
 
     Sem cache de inferência: o custo de CPU medido é o real. Devolve:
     canvas_px, writing_px/ruling_px (se houver regions.json), provisório
     (mediana e último) × retratado, e CPU-segundos por segundo de cena.
+    ``frame_files`` é um inventário de quadros explícito e ordenado (o
+    corpus passa os ``f*.png`` registrados); ``None`` deixa o replay
+    descobrir os frames genericamente (``raw/`` ou o próprio dir).
     """
     import lab.replay_lab as rl
     from draw import config
@@ -538,6 +543,7 @@ def run_clip(clip_dir, flags, *, detector=None, page_clean=None, verify=None):
                 page_clean=page_clean,
                 scene_fps=meta["scene_fps"],
                 verify=verify,
+                frame_files=frame_files,
             )
     finally:
         pipeline_module.Pipeline = real

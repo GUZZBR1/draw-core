@@ -4,6 +4,8 @@ import hashlib
 import json
 from pathlib import Path
 
+from lab.corpus.clip import clip_frames
+
 MANIFEST_NAME = "corpus.json"
 MANIFEST_VERSION = 1
 
@@ -27,7 +29,7 @@ def hash_clip(clip_dir) -> str:
         candidate = clip_dir / name
         if candidate.is_file():
             files.append(candidate)
-    files.extend(p for p in clip_dir.glob("f*.png") if p.is_file())
+    files.extend(clip_frames(clip_dir))
     files.sort(key=lambda p: p.name)
 
     digest = hashlib.sha256()
