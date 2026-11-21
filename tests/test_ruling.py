@@ -589,6 +589,32 @@ def test_staggered_shadow_shoulders_longer_than_a_stroke_do_not_exempt_the_fold(
             prob[y : y + 6, 640:653] = 0.95
     out = ruling.RulingFilter().apply(prob.copy())
     assert (out[:, 566:634] > 0.5).sum() == 0
+    # Nos ombros (< 60% das linhas), as linhas finas (impares) saem e as
+    # marcas dos ombros (pares) ficam fora de _gutter_mask
+    odd_rows = np.concatenate(
+        [np.arange(80 + 40 * k, 82 + 40 * k) for k in range(1, 12, 2)]
+    )
+    assert (out[odd_rows, 547:560] > 0.5).sum() == 0
+    assert (out[odd_rows, 640:653] > 0.5).sum() == 0
+    even_rows = np.concatenate(
+        [np.arange(80 + 40 * k, 86 + 40 * k) for k in range(0, 12, 2)]
+    )
+    assert (out[even_rows, 547:560] > 0.5).all()
+    assert (out[even_rows, 640:653] > 0.5).all()
+
+
+def test_shadow_shoulders_covering_most_rules_are_erased_with_the_fold():
+    """Ombros em >= 60% das linhas (8 de 12) entram em _gutter_mask e saem."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        y = 80 + 40 * k
+        prob[y : y + 2, :] = 0.95
+        prob[y : y + 6, 560:640] = 0.95
+        if k % 3 != 0:  # 8 de 12 linhas (66,7% >= 60%)
+            prob[y : y + 6, 547:560] = 0.95
+            prob[y : y + 6, 640:653] = 0.95
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[:, 550:650] > 0.5).sum() == 0
 
 
 def test_a_stroke_crossing_the_fold_through_staggered_shoulders_is_kept():
@@ -874,3 +900,87 @@ def test_the_inked_partial_tail_is_what_keeps_a_tilted_extrapolated_line():
         r = int(round(seg.paths[1, c]))
         with_tail[r : r + 2, c] = 0.95
     assert ruling._drop_unsupported(with_tail, seg).paths.shape[0] == 2
+
+
+def test_a_stroke_with_unequal_valid_extensions_across_a_split_fold_is_kept_on_both_halves():
+    """Ombros 13/20 e vinco [560,700) na divisa 600; traco com 18 col a esquerda
+    e 30 a direita vence os dois ombros locais e fica inteiro nos dois lados."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        y = 80 + 40 * k
+        prob[y : y + 2, :] = 0.95
+        prob[y : y + 6, 560:700] = 0.95
+        if k % 2 == 0:
+            prob[y : y + 6, 547:560] = 0.95  # 13 a esquerda
+            prob[y : y + 6, 700:720] = 0.95  # 20 a direita
+    y = 80 + 40 * 7
+    prob[y : y + 6, 542:730] = 0.95  # 18 a esquerda, 30 a direita
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[y : y + 6, 560:600] > 0.5).all()
+    assert (out[y : y + 6, 600:698] > 0.5).all()
+    others = out[:, 562:698] > 0.5
+    others[y : y + 6, :] = False
+    assert others.sum() == 0
+
+
+def test_a_fold_ending_8_columns_before_the_split_uses_adjacent_track_for_vote():
+    """Faixa [560, 592) termina 8 colunas antes da divisa em 600: a janela de
+    voto (12 col) cruza a divisa e usa amostras da trilha direita."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        y = 80 + 40 * k
+        prob[y : y + 2, :] = 0.95
+        prob[y : y + 6, 560:592] = 0.95
+        if k % 2 == 0:
+            prob[y : y + 6, 547:560] = 0.95
+            prob[y : y + 6, 592:605] = 0.95  # cruza a divisa em 600
+    out_plain = ruling.RulingFilter().apply(prob.copy())
+    assert (out_plain[:, 566:586] > 0.5).sum() == 0
+
+    y = 80 + 40 * 7
+    prob[y : y + 6, 540:612] = 0.95  # 20 col a esquerda, 20 a direita
+    out_stroke = ruling.RulingFilter().apply(prob.copy())
+    assert (out_stroke[y : y + 6, 562:590] > 0.5).all()
+    others = out_stroke[:, 566:586] > 0.5
+    others[y : y + 6, :] = False
+    assert others.sum() == 0
+
+
+def test_a_narrow_vertical_crossing_inside_the_fold_is_kept():
+    """Cruzamento vertical estreito (8 px x 3 col) no meio da sombra (6 px)
+    fica protegido mesmo abaixo do teto elevado da faixa."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        y = 80 + 40 * k
+        prob[y : y + 2, :] = 0.95
+        prob[y : y + 6, 560:640] = 0.8
+    dash = np.zeros(prob.shape, bool)
+    y = 80 + 40 * 5
+    dash[y - 1 : y + 7, 575:578] = True  # 8 px x 3 col = 24 px
+    prob[dash] = 0.95
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[y - 1 : y + 7, 575:578] > 0.5).all()
+    assert ((out > 0.5) & ~dash)[:, 560:640].sum() == 0
+
+
+def test_off_frame_extrapolated_rule_does_not_erase_border_dash():
+    """Linha extrapolada inclinada (0,15 px/col) que entra na imagem no fim da
+    metade direita nao pode apagar um traco desconectado na borda onde ela
+    ainda esta fora da imagem, e deve apagar o trecho que entra."""
+    prob = np.zeros((600, 1200), np.float32)
+    xs = np.arange(1200)
+    for k in range(18):
+        ys = np.round(-160.0 + 40.0 * k + 0.15 * xs).astype(np.int32)
+        for dy in (0, 1):
+            r = ys + dy
+            ok = (r >= 0) & (r < 600)
+            prob[r[ok], xs[ok]] = 0.95
+    # Entre 952 e 975, a linha k=0 esta em y <= -13,75 (fora da imagem)
+    prob[5:7, 952:976] = 0.95  # traco 2x24 = 48 px na borda superior
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[5:7, 952:976] > 0.5).all()
+    # O trecho da linha k=0 que entra na imagem (x >= 1075) e apagado
+    enter_x = np.arange(1075, 1200)
+    enter_y = np.round(-160.0 + 0.15 * enter_x).astype(np.int32)
+    assert (out[enter_y, enter_x] > 0.5).sum() == 0
+    assert (out[enter_y + 1, enter_x] > 0.5).sum() == 0

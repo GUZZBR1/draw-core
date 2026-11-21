@@ -72,7 +72,7 @@ _GUTTER_FRAC = 0.6  # fração das linhas grossas na coluna
 _GUTTER_MIN_W = 16  # colunas contínuas (mais largo que qualquer traço de caneta)
 _GUTTER_EDGE_RUN = 3  # colunas bastam num trecho que encosta na divisa
 _GUTTER_EXTRA = 4  # px a mais de espessura apagável dentro da faixa
-_STROKE_RUN = 4  # colunas de desvio numa so linha = traco dentro da sombra
+_STROKE_RUN = 2  # colunas seguidas de desvio numa so linha = traco dentro da sombra
 
 
 @dataclass(frozen=True)
@@ -425,8 +425,9 @@ class _Track:
     def __init__(self, seg, shape):
         self.x0, self.x1 = seg.x0, seg.x1
         self.paths = seg.paths.copy()
+        self.period = seg.period
         self.shape = shape
-        self._mapx = self._mapy = self._yi = None
+        self._mapx = self._mapy = self._yi = self._valid = None
         # nível típico e ruído da própria linha (por estimativa, não por passada)
         self.base_level = None
         self.base_sigma = None
@@ -434,7 +435,8 @@ class _Track:
     def _build(self):
         h, _ = self.shape
         k, x = self.paths.shape
-        self._yi = np.clip(np.round(self.paths).astype(np.int32), _R, h - 1 - _R)
+        self._valid = (self.paths >= 0) & (self.paths <= h - 1)
+        self._yi = np.clip(np.round(self.paths).astype(np.int32), 0, h - 1)
         rows = self._yi[:, None, :] + _J[None, :, None]  # (K, 2R+1, X)
         self._mapy = rows.reshape(k * (2 * _R + 1), x).astype(np.float32)
         cols = (np.arange(x) + self.x0).astype(np.float32)
@@ -445,7 +447,7 @@ class _Track:
     def shift(self, delta):
         """Desloca o pente (px) e invalida o cache."""
         self.paths += delta
-        self._mapx = self._mapy = self._yi = None
+        self._mapx = self._mapy = self._yi = self._valid = None
 
     def window(self, ink):
         """Padrão de bits da janela vertical ao longo de cada caminho: (K, X).
@@ -460,7 +462,7 @@ class _Track:
         pattern = np.einsum(
             "i,kix->kx", _POW, bits.reshape(k, 2 * _R + 1, x), dtype=np.int16
         )
-        return pattern, self._yi
+        return pattern, self._yi, self._valid
 
 
 def _along(a, k):
@@ -482,8 +484,8 @@ def _dilate_cols(mask, pad):
 def _ink_on_path(prob, seg):
     """(K, X) bool: há tinta fina sobre o caminho. Um remap por segmento."""
     ink = (prob > _T_RUN).view(np.uint8)
-    pattern, _ = _Track(seg, prob.shape).window(ink)
-    return _lut()[0][pattern] >= 1
+    pattern, _, valid = _Track(seg, prob.shape).window(ink)
+    return (_lut()[0][pattern] >= 1) & valid
 
 
 def _support(prob, seg, has=None):
@@ -571,9 +573,9 @@ def _estimate_h(prob, segments):
     runs = []
     for seg in segments:
         track = _Track(seg, prob.shape)
-        pattern, _ = track.window(ink)
+        pattern, _, valid = track.window(ink)
         run = run_t[pattern]
-        ok = (run >= 1) & (run <= 6)
+        ok = valid & (run >= 1) & (run <= 6)
         if ok.any():
             runs.append(run[ok])
     if not runs:
@@ -591,8 +593,9 @@ def _gutter_mask(tracks_raw, width):
     caneta também, mas só por poucas colunas.
     """
     frac = np.zeros(width, np.float32)
-    for x0, x1, raw in tracks_raw:
-        frac[x0:x1] = raw.mean(axis=0)
+    for x0, x1, raw, valid in tracks_raw:
+        cnt = valid.sum(axis=0)
+        frac[x0:x1] = np.where(cnt > 0, raw.sum(axis=0) / np.maximum(cnt, 1), 0.0)
     hot = np.concatenate([[0], frac >= _GUTTER_FRAC, [0]]).astype(np.int8)
     edges = np.flatnonzero(np.diff(hot))
     out = np.zeros(width, bool)
@@ -638,50 +641,128 @@ def _bulk_ext(vals):
     return groups[int(np.argmax([g.size for g in groups]))][-1]
 
 
-def _joined_through(raw, gutter, edge_bulk=None):
-    """(K, X): trecho da linha dentro da faixa que continua grosso fora dela.
+def _match_tracks(t_left, v_left, t_right, v_right):
+    """Pares (k_left, k_right) de linhas correspondentes na divisa entre trilhas."""
+    y_l = t_left.paths[:, -1]
+    y_r = t_right.paths[:, 0]
+    tol = max(float(_R), 0.35 * min(t_left.period, t_right.period))
+    dist = np.abs(y_l[:, None] - y_r[None, :]).astype(np.float32)
+    invalid = ~v_left[:, -1][:, None] | ~v_right[:, 0][None, :] | (dist > tol)
+    dist[invalid] = np.inf
+    pairs = []
+    while np.isfinite(dist).any():
+        kl, kr = np.unravel_index(int(np.argmin(dist)), dist.shape)
+        pairs.append((int(kl), int(kr)))
+        dist[kl, :] = np.inf
+        dist[:, kr] = np.inf
+    return pairs
 
-    A sombra engrossa todas as linhas por igual, então por espessura um traço
-    de caneta deitado sobre ela some na sombra. O que o separa é a continuidade:
-    a linha segue grossa (>= pauta + margem) por _PROB_MIN_RUN colunas logo
-    antes E logo depois da faixa. O ombro da sombra, que afina de forma
-    irregular, não dura isso — e quando dura, aparece escalonado em muitas
-    linhas: nesse padrão comum só isenta quem vai claramente ALÉM do maior
-    grupo de extensões (os ombros formam o grupo; um traço atravessa mais
-    longe). Na divisa das metades a trilha só vê um lado, mas julga pelo MESMO
-    ombro comum (`edge_bulk`, medido nas duas pontas da faixa) — um traço não
-    pode sair isento numa metade e apagado na outra.
+
+def _gather_side(tracks, thick, matches, idx, line_ids, edge_col, direction):
+    """Colunas de `thick` a partir de `edge_col` para fora (cruzando a divisa se preciso)."""
+    t = tracks[idx]
+    if direction < 0:
+        part = thick[idx][line_ids, : edge_col - t.x0][:, ::-1]
+        if idx > 0 and tracks[idx - 1].x1 == t.x0:
+            m_rev = {kr: kl for kl, kr in matches[idx - 1]}
+            adj = np.zeros((line_ids.size, thick[idx - 1].shape[1]), bool)
+            for pos, lid in enumerate(line_ids):
+                if int(lid) in m_rev:
+                    adj[pos] = thick[idx - 1][m_rev[int(lid)], ::-1]
+            return np.concatenate([part, adj], axis=1)
+        return part
+    part = thick[idx][line_ids, edge_col - t.x0 :]
+    if idx + 1 < len(tracks) and tracks[idx + 1].x0 == t.x1:
+        m_fwd = dict(matches[idx])
+        adj = np.zeros((line_ids.size, thick[idx + 1].shape[1]), bool)
+        for pos, lid in enumerate(line_ids):
+            if int(lid) in m_fwd:
+                adj[pos] = thick[idx + 1][m_fwd[int(lid)]]
+        return np.concatenate([part, adj], axis=1)
+    return part
+
+
+def _joined_through_bands(tracks, thick, valid_list, gutter_full):
+    """Lista de máscaras (K, X): trecho da linha na faixa que continua grosso fora dela.
+
+    Cada faixa física de `gutter_full` é julgada uma vez só: se cruza a divisa
+    entre trilhas, as linhas são pareadas por geometria, cada ponta é comparada
+    com o próprio ombro local e o mesmo veredito vale para os dois lados.
     """
-    k, x = raw.shape
-    out = np.zeros_like(raw)
-    edges = np.flatnonzero(np.diff(np.concatenate([[0], gutter.view(np.uint8), [0]])))
+    joined = [np.zeros_like(raw) for raw in thick]
+    if not tracks:
+        return joined
+    matches = [
+        _match_tracks(tracks[i], valid_list[i], tracks[i + 1], valid_list[i + 1])
+        if tracks[i].x1 == tracks[i + 1].x0
+        else []
+        for i in range(len(tracks) - 1)
+    ]
+    w = gutter_full.size
+    need = _PROB_MIN_RUN
+    edges = np.flatnonzero(
+        np.diff(np.concatenate([[0], gutter_full.view(np.uint8), [0]]))
+    )
     for a, b in zip(edges[::2], edges[1::2], strict=False):
-        need = _PROB_MIN_RUN
-        left = right = None
-        if a >= need:
-            left = raw[:, a - need : a].mean(axis=1) >= 0.85
-        if b + need <= x:
-            right = raw[:, b : b + need].mean(axis=1) >= 0.85
-        sides = [s for s in (left, right) if s is not None]
-        if len(sides) == 2 or (len(sides) == 1 and (a == 0 or b == x)):
-            cont = np.logical_and.reduce(sides)
-            if cont.sum() > max(2, k // 4):
-                exts = []
-                if left is not None:
-                    exts.append(_extent(raw[:, :a][:, ::-1], need))
-                if right is not None:
-                    exts.append(_extent(raw[:, b:], need))
-                ext = np.minimum.reduce(exts)
-                vals = ext[cont]
-                bulk = None
-                if edge_bulk is not None and len(sides) == 1:
-                    bulk = edge_bulk.get("left" if a == 0 else "right")
-                if bulk is None:
-                    bulk = _bulk_ext(vals)
-                keep = vals > bulk + _GUTTER_EDGE_RUN
-                cont &= np.isin(np.arange(k), np.flatnonzero(cont)[keep])
-            out[:, a:b] = cont[:, None]
-    return out
+        over = [i for i, t in enumerate(tracks) if t.x0 < b and t.x1 > a]
+        if not over:
+            continue
+        if len(over) == 1:
+            i_left = i_right = over[0]
+            kl = kr = np.arange(tracks[i_left].paths.shape[0], dtype=np.int64)
+        elif (
+            len(over) == 2
+            and over[1] == over[0] + 1
+            and tracks[over[0]].x1 == tracks[over[1]].x0
+        ):
+            i_left, i_right = over
+            pairs = matches[i_left]
+            if not pairs:
+                continue
+            kl = np.array([p[0] for p in pairs], dtype=np.int64)
+            kr = np.array([p[1] for p in pairs], dtype=np.int64)
+        else:
+            continue
+        left_cols = (
+            _gather_side(tracks, thick, matches, i_left, kl, a, -1) if a > 0 else None
+        )
+        right_cols = (
+            _gather_side(tracks, thick, matches, i_right, kr, b, +1) if b < w else None
+        )
+        left_vote = (
+            left_cols[:, :need].mean(axis=1) >= 0.85
+            if left_cols is not None and left_cols.shape[1] >= need
+            else None
+        )
+        right_vote = (
+            right_cols[:, :need].mean(axis=1) >= 0.85
+            if right_cols is not None and right_cols.shape[1] >= need
+            else None
+        )
+        sides = [v for v in (left_vote, right_vote) if v is not None]
+        if not (len(sides) == 2 or (len(sides) == 1 and (a == 0 or b == w))):
+            continue
+        cont = np.logical_and.reduce(sides)
+        n_lines = max(tracks[i].paths.shape[0] for i in over)
+        if cont.sum() > max(2, n_lines // 4):
+            keep = np.ones(cont.size, bool)
+            if left_vote is not None:
+                ext_l = _extent(left_cols, need)
+                bulk_l = _bulk_ext(ext_l[cont])
+                keep &= ext_l > bulk_l + _GUTTER_EDGE_RUN
+            if right_vote is not None:
+                ext_r = _extent(right_cols, need)
+                bulk_r = _bulk_ext(ext_r[cont])
+                keep &= ext_r > bulk_r + _GUTTER_EDGE_RUN
+            cont &= keep
+        if i_left == i_right:
+            t = tracks[i_left]
+            joined[i_left][kl, a - t.x0 : b - t.x0] |= cont[:, None]
+        else:
+            t_l, t_r = tracks[i_left], tracks[i_right]
+            joined[i_left][kl, a - t_l.x0 :] |= cont[:, None]
+            joined[i_right][kr, : b - t_r.x0] |= cont[:, None]
+    return joined
 
 
 def _long_runs(mask, length, edge_length):
@@ -704,7 +785,7 @@ def _long_runs(mask, length, edge_length):
     return out
 
 
-def _stroke_on_shade(run, gutter):
+def _stroke_on_shade(run, gutter, valid=None):
     """(K, X): traço de caneta dentro da sombra, por desvio das linhas vizinhas.
 
     A sombra engrossa todas as linhas ao mesmo tempo (e a curva do vinco move
@@ -712,8 +793,21 @@ def _stroke_on_shade(run, gutter):
     por um trecho contínuo. Vale também para marcas curtas inteiras na faixa,
     sem continuação fora dela.
     """
-    med = np.median(run, axis=0)
-    above = (run > med[None, :]) & gutter[None, :]
+    if valid is None:
+        med = np.median(run, axis=0)
+        above = (run > med[None, :]) & gutter[None, :]
+    else:
+        n = valid.sum(axis=0)
+        med = np.zeros(run.shape[1], np.float32)
+        has = n > 0
+        if has.any():
+            srt = np.sort(
+                np.where(valid[:, has], run[:, has].astype(np.float32), np.inf), axis=0
+            )
+            nh = n[has]
+            cols = np.arange(nh.size)
+            med[has] = 0.5 * (srt[(nh - 1) // 2, cols] + srt[nh // 2, cols])
+        above = valid & (run > med[None, :]) & gutter[None, :]
     # uma ondulação da sombra desvia várias linhas na mesma coluna; um traço
     # desvia só a linha que ele toca — conta só o desvio isolado
     shared = above.sum(axis=0) > max(2, above.shape[0] // 4)
@@ -726,7 +820,7 @@ def _stroke_on_shade(run, gutter):
         # dele segue valendo como traço
         level = srt[(n - 1) // 2, np.arange(sel.shape[1])]
         above[:, shared] = sel & (run[:, shared] > level[None, :])
-    return _long_runs(above, _STROKE_RUN, _GUTTER_EDGE_RUN)
+    return _long_runs(above, _STROKE_RUN, _STROKE_RUN)
 
 
 def _opening_cols(mask, length):
@@ -765,56 +859,33 @@ def erase_tracks(prob, tracks, h_pauta):
     n_total, shift_total = 0, 0
     passes = []
     for track in tracks:
-        pattern, yi = track.window(ink)
-        run = run_t[pattern].astype(np.int16)
+        pattern, yi, valid = track.window(ink)
+        run = np.where(valid, run_t[pattern], 0).astype(np.int16)
         thin_any = (run >= 1) & (run <= h_run + _THIN_MARGIN)
         if thin_any.any():
             delta = int(np.round(np.median(jstar_t[pattern][thin_any])))
             if delta != 0:
                 track.shift(delta)
                 shift_total += delta
-                pattern, yi = track.window(ink)
-                run = run_t[pattern].astype(np.int16)
-        passes.append((pattern, yi, run))
+                pattern, yi, valid = track.window(ink)
+                run = np.where(valid, run_t[pattern], 0).astype(np.int16)
+        passes.append((pattern, yi, valid, run))
     # Âncora = cruzamento de verdade: run vertical acima da pauta em
     # >= 2 colunas SEGUIDAS. Um ponto isolado é flutuação de espessura da
     # própria pauta (medido no e5: 14% dos pontos, runs de 6 a 13 px) e,
     # tratado como âncora, protegia 5 colunas e deixava a pauta tracejada.
-    thick = [run > h_run + _THIN_MARGIN for _p, _y, run in passes]
+    thick = [run > h_run + _THIN_MARGIN for _p, _y, _v, run in passes]
+    valid_list = [v for _p, _y, v, _r in passes]
     gutter_full = _gutter_mask(
-        [(t.x0, t.x1, raw) for t, raw in zip(tracks, thick, strict=True)], w
+        [
+            (t.x0, t.x1, raw, v)
+            for t, raw, v in zip(tracks, thick, valid_list, strict=True)
+        ],
+        w,
     )
     cap = h_run + _THIN_MARGIN + _GUTTER_EXTRA
-    # uma faixa que cruza a divisa é julgada em cada trilha, mas pela MESMA
-    # referência: o maior ombro comum medido nas pontas da faixa dos dois
-    # lados (um traço não pode sair isento numa metade e apagado na outra)
-    edge_bulks = [dict() for _ in tracks]
-    for i in range(len(tracks) - 1):
-        xc = tracks[i].x1
-        if tracks[i + 1].x0 != xc or not (gutter_full[xc - 1] and gutter_full[xc]):
-            continue
-        a = xc - 1
-        while a > 0 and gutter_full[a - 1]:
-            a -= 1
-        b = xc
-        while b < w and gutter_full[b]:
-            b += 1
-        bulk = 0
-        for t, raw in zip(tracks, thick, strict=True):
-            la, lb = a - t.x0, b - t.x0  # a faixa em coordenada local da trilha
-            if t.x1 == xc and la >= _PROB_MIN_RUN:
-                vote = raw[:, la - _PROB_MIN_RUN : la].mean(axis=1) >= 0.85
-                if vote.sum() > max(2, raw.shape[0] // 4):
-                    ext = _extent(raw[:, :la][:, ::-1], _PROB_MIN_RUN)
-                    bulk = max(bulk, _bulk_ext(ext[vote]))
-            if t.x0 == xc and lb + _PROB_MIN_RUN <= raw.shape[1]:
-                vote = raw[:, lb : lb + _PROB_MIN_RUN].mean(axis=1) >= 0.85
-                if vote.sum() > max(2, raw.shape[0] // 4):
-                    ext = _extent(raw[:, lb:], _PROB_MIN_RUN)
-                    bulk = max(bulk, _bulk_ext(ext[vote]))
-        edge_bulks[i]["right"] = bulk
-        edge_bulks[i + 1]["left"] = bulk
-    for i, (track, (pattern, yi, run), raw) in enumerate(
+    joined_list = _joined_through_bands(tracks, thick, valid_list, gutter_full)
+    for i, (track, (pattern, yi, valid, run), raw) in enumerate(
         zip(tracks, passes, thick, strict=True)
     ):
         jstar = jstar_t[pattern].astype(np.int64)
@@ -822,8 +893,8 @@ def erase_tracks(prob, tracks, h_pauta):
         gutter = gutter_full[track.x0 : track.x1]
         if gutter.any():
             shaded = (run >= 1) & (run <= cap) & gutter[None, :]
-            shaded &= ~_joined_through(raw, gutter, edge_bulks[i])
-            shaded &= ~_stroke_on_shade(run, gutter)
+            shaded &= ~joined_list[i]
+            shaded &= ~_stroke_on_shade(run, gutter, valid)
             thin |= shaded
             raw = raw & ~(gutter[None, :] & (run <= cap))
         anchor = np.zeros_like(raw)
@@ -833,7 +904,7 @@ def erase_tracks(prob, tracks, h_pauta):
         protect = _dilate_cols(anchor, _ANCHOR_PAD)
         centers = yi + jstar
         cols = (np.arange(track.paths.shape[1]) + track.x0)[None, :]
-        peak = flat_prob.take(centers * w + cols)
+        peak = flat_prob.take(np.clip(centers, 0, h - 1) * w + cols)
         if track.base_level is None:
             _baseline(track, peak, thin)
         # traço de caneta deitado sobre a linha: trecho contínuo cuja
