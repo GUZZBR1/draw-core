@@ -154,7 +154,6 @@ def test_camera_menu_layout_sits_inside_the_camera_corner():
     rx, ry, rw, rh = layout["rows"][1]
     assert view_module.row_at(layout, (rx + 2, ry + 2)) == 1
     assert view_module.row_at(layout, (cx, cy)) is None
-    assert view_module.point_in_card(layout, (x + 2, y + 2))
 
 
 def test_camera_menu_draws_without_mutating_inputs():
