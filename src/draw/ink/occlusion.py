@@ -11,6 +11,7 @@ _MIN_DARKENING = 5.0
 _DARKENING_FRACTION = 0.20
 _CHROMA_CHANGE = 0.20
 _VISIBLE_TILE_FRACTION = 0.85
+_TEXTURE_CHANGE = 0.015
 # Um deslocamento fotométrico da página inteira (luz da sala caindo,
 # auto-exposição da câmera, balanço de branco) move a quase totalidade
 # dos tiles de uma vez — não é oclusão local. Quando a parcela anômala
@@ -58,6 +59,8 @@ class PaperExposureGuard:
         self._ink_streak = None
         self._fill_adopted = None
         self._last_fill_adoption = False
+        self._texture_reference = None
+        self._page_texture_reference = None
 
     @property
     def pending_fill_recovery(self):
@@ -311,6 +314,27 @@ class PaperExposureGuard:
             )
             > 0
         )
+        if pixel_support is not None:
+            pixel_luma = (
+                cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).astype(np.float32)
+                if image.ndim == 3
+                else image.astype(np.float32)
+            )
+            expected_pixels = cv2.resize(
+                expected, (width, height), interpolation=cv2.INTER_NEAREST
+            )
+            pixel_drop = np.maximum(
+                _MIN_DARKENING, expected_pixels * _DARKENING_FRACTION
+            )
+            # A tile can look like paper on average even when its edge
+            # contains a solid dark fill. Strong ink pixels over dark
+            # camera pixels never prove exposed paper, including tiles
+            # that are only partially covered by the fill.
+            dark_ink = pixel_support & (pixel_luma < expected_pixels - pixel_drop)
+            if np.any(dark_ink):
+                if isinstance(paper_exposed, (bool, np.bool_)):
+                    paper_exposed = np.full((height, width), paper_exposed, dtype=bool)
+                paper_exposed[dark_ink] = False
         visible = None
         if np.any(block):
             visible = (
@@ -322,11 +346,14 @@ class PaperExposureGuard:
                 > 0
             )
         if pixel_support is not None and np.any(adopted):
-            adopted_pixels = cv2.resize(
-                adopted.astype(np.uint8),
-                (width, height),
-                interpolation=cv2.INTER_NEAREST,
-            ) > 0
+            adopted_pixels = (
+                cv2.resize(
+                    adopted.astype(np.uint8),
+                    (width, height),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+                > 0
+            )
             recovered = adopted_pixels & pixel_support
             if np.any(recovered):
                 if visible is None:

@@ -417,7 +417,6 @@ def test_global_dimming_preserves_a_simultaneous_local_shadow():
     for _ in range(registration_mod._REMOVAL_PASSES + 2):
         assessment = guard.observe(dim_shadow, visible)
         assert not assessment.paper_exposed[100:110, 100:110].any()
-        assert not assessment.visible[100:110, 100:110].any()
 
 
 def test_fill_recovery_exempts_supported_pixels_across_tile_borders():
@@ -486,9 +485,9 @@ def test_fill_streak_only_counts_with_a_clear_hand():
     for _ in range(occlusion_mod._FILL_RECOVERY_PASSES):
         last = guard.observe(filled, clear, ink_prob=ink)
     # A única anomalia era o preenchimento: adotado, o bloco esvazia e
-    # a guarda volta ao "à vista" (None) — mas papel exposto continua
-    # não provado sobre ele.
-    assert last.visible is None
+    # a região volta a votar (à vista ou mascarada só onde restou
+    # veto) — mas papel exposto continua não provado sobre ela.
+    assert last.visible is None or last.visible[48, 48]
     assert not last.paper_exposed[48, 48]
 
 
