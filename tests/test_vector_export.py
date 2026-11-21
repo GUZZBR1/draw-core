@@ -223,6 +223,27 @@ def test_stroke_scale_mm_per_px_diagonal_matches_axis_on_uniform_grid():
     assert aniso == pytest.approx(np.sqrt(10.0))
 
 
+def test_weighted_segments_gives_each_elbow_leg_its_own_thickness():
+    """Cotovelo sob escala anisotropica (Devin Review PR #122): a perna
+    horizontal mede pela perpendicular sy, a vertical por sx — uma
+    unica espessura por traço distorceria uma delas."""
+    elbow = np.array([[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]])
+    parts, ths = ev.weighted_segments([(elbow, False)], [4.0], 2.0, 4.0, 7)
+    assert len(parts) == 2
+    assert ths == [1, 2]  # 4 mm / sy=4 na horizontal, 4 mm / sx=2 na vertical
+
+
+def test_weighted_segments_collapses_the_dxf_duplicated_dot():
+    """write_dxf grava o ponto isolado com dois vértices idênticos:
+    sem colapsar, o único segmento degenerado era pulado e o ponto
+    sumia da prova DXF (Devin Review PR #122)."""
+    dot = np.array([[5.0, 5.0], [5.0, 5.0]])
+    parts, ths = ev.weighted_segments([(dot, False)], [2.0], 1.0, 1.0, 7)
+    assert len(parts) == 1 and len(parts[0][0]) == 1
+    raster = ev.rasterize(parts, (20, 20), 1.0, 1.0, 7, thicknesses_px=ths)
+    assert int(raster.sum()) > 0
+
+
 def test_lines_without_width_px_keep_the_uniform_fallback(tmp_path):
     """Polilinhas sem anotação (caminhos que não passam por
     vectorize_mask/stroke_widths_px) seguem com a largura global."""

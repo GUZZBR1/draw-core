@@ -38,9 +38,9 @@ from draw.exporters.export_vectors import (  # noqa: E402
     parse_svg_paths,
     rasterize,
     simplify_polylines,
-    stroke_scale_mm_per_px,
     stroke_widths_px,
     trace_polylines,
+    weighted_segments,
     write_dxf,
     write_svg,
     zhang_suen_thin,
@@ -294,29 +294,10 @@ def main(argv=None):
     ink = result["ink"]
 
     def _rasterize_weighted(parsed, widths, **kw):
-        # Uma varredura de página por arquivo; sob escala anisotrópica
-        # cada SEGMENTO leva a espessura da sua perpendicular — um
-        # cotovelo com espessura única distorceria uma das pernas.
-        parts, ths = [], []
-        for (pts, closed), w_mm in zip(parsed, widths, strict=True):
-            if w_mm is None or len(pts) < 2:
-                scale = 0.5 * (sx + sy)
-                parts.append((pts, closed))
-                ths.append(
-                    thickness if w_mm is None else max(1, int(round(w_mm / scale)))
-                )
-                continue
-            for i in range(len(pts) if closed else len(pts) - 1):
-                seg = np.array([pts[i], pts[(i + 1) % len(pts)]])
-                if np.allclose(seg[0], seg[1]):
-                    continue
-                parts.append((seg, False))
-                ths.append(
-                    max(
-                        1,
-                        int(round(w_mm / stroke_scale_mm_per_px(seg, sx, sy))),
-                    )
-                )
+        # Uma varredura de página por arquivo; weighted_segments expande
+        # em segmentos com a espessura da SUA perpendicular (cotovelos
+        # sob escala anisotrópica) e colapsa pontos duplicados do DXF.
+        parts, ths = weighted_segments(parsed, widths, sx, sy, thickness)
         return rasterize(parts, ink.shape, sx, sy, thickness, thicknesses_px=ths, **kw)
 
     widths_svg, widths_dxf = [], []

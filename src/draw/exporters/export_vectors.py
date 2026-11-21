@@ -642,6 +642,34 @@ def rasterize(
     return raster > 0
 
 
+def weighted_segments(mm_polylines, widths_mm, sx, sy, thickness_px):
+    """Expande entidades em segmentos com espessura px própria (prova).
+
+    Sob escala anisotrópica cada segmento leva a espessura da SUA
+    perpendicular — um cotovelo com espessura única distorce uma das
+    pernas. Vértices todos idênticos viram um ponto (write_dxf duplica
+    o vértice do ponto); sem largura gravada, o fallback global.
+    """
+    parts, ths = [], []
+    for (pts, closed), w_mm in zip(mm_polylines, widths_mm, strict=True):
+        if len(pts) >= 2 and np.allclose(pts, pts[0]):
+            pts = pts[:1]
+        if w_mm is None or len(pts) < 2:
+            parts.append((pts, closed))
+            scale = 0.5 * (sx + sy)
+            ths.append(
+                thickness_px if w_mm is None else max(1, int(round(w_mm / scale)))
+            )
+            continue
+        for i in range(len(pts) if closed else len(pts) - 1):
+            seg = np.array([pts[i], pts[(i + 1) % len(pts)]])
+            if np.allclose(seg[0], seg[1]):
+                continue
+            parts.append((seg, False))
+            ths.append(max(1, int(round(w_mm / stroke_scale_mm_per_px(seg, sx, sy)))))
+    return parts, ths
+
+
 def stroke_scale_mm_per_px(pts_mm, sx, sy):
     """Escala mm/px da ESPESSURA do traço sob escala anisotrópica.
 
