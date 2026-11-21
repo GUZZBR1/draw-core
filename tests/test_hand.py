@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 
 from draw import hand as hand_module
+from draw.contracts import FramePacket
 
 
 def _landmarks_result():
@@ -413,3 +414,26 @@ def test_low_light_cutoff_uses_luminance_not_channel_mean():
     frame = np.empty((120, 160, 3), np.uint8)
     frame[:] = (100, 40, 80)
     assert hand_module._lift_dark(frame) is not frame
+
+
+def test_observe_keeps_image_mask_and_capture_identity(monkeypatch, tmp_path):
+    _install_fake_mediapipe(monkeypatch)
+    frame = np.zeros((100, 150, 3), dtype=np.uint8)
+    with hand_module.HandMasker(_model(tmp_path), verify=None) as masker:
+        expected = masker.mask(frame) > 0
+        result = masker.observe(FramePacket(frame, 3.0, 7), source_id=5)
+    assert (result.frame_sequence, result.captured_at, result.source_id) == (7, 3.0, 5)
+    np.testing.assert_array_equal(result.occlusion_mask, expected)
+    assert result.orientation_mask is None
+    assert result.present is None
+
+
+def test_observe_resets_retention_when_the_source_changes(monkeypatch, tmp_path):
+    _install_fake_mediapipe(monkeypatch)
+    frame = np.zeros((100, 150, 3), dtype=np.uint8)
+    with hand_module.HandMasker(_model(tmp_path), verify=None) as masker:
+        masker.observe(FramePacket(frame, 1.0, 1), source_id=1)
+        assert masker._held_hands is not None
+        masker.observe(FramePacket(frame, 2.0, 2), source_id=2)
+        # A deteccao do stub devolve mao e repopula; o reset ocorreu antes.
+        assert masker._held_misses == 0

@@ -261,6 +261,7 @@ class Pipeline:
         self.ink_worker = ink_worker
         self.hand_presence_worker = hand_presence_worker
         self.hand_masker = hand_masker
+        self._observe_hand = getattr(hand_masker, "observe", None)
         self._config = PipelineConfig() if config is None else config
         self.format_suggester = (
             paper.FormatSuggester() if format_suggester is None else format_suggester
@@ -402,7 +403,7 @@ class Pipeline:
             return None
         return _coverage_iou(warp_corners, self._coverage_mask, self._hand_mask_det)
 
-    def _warp_and_submit_ink(self, frame, warp_corners, captured_at=None):
+    def _warp_and_submit_ink(self, packet, warp_corners):
         """Warp + visibilidade + submissao a trabalhadora de tinta.
 
         Os cantos sao o quad que retifica ESTE warp, e a
@@ -411,6 +412,7 @@ class Pipeline:
         entre passadas re-projeta a tinta assentada e cada
         alinhamento confirma a sua copia.
         """
+        frame = packet.image
         settled_wake = (
             self._detect_wake is not None
             and self._detect_wake.settled
@@ -457,7 +459,18 @@ class Pipeline:
         # trabalhadora resolve as duas grades com uma retificação
         # só (M·C = A), e o laço deixa de pagar warps de máscara.
         visible = None
-        if self.hand_masker is not None:
+        if self._observe_hand is not None:
+            observation = self._observe_hand(packet, source_id=self._source_id)
+            camera_mask = observation.occlusion_mask
+            if (
+                observation.source_id == self._source_id
+                and observation.frame_sequence == packet.sequence
+                and observation.captured_at == packet.captured_at
+                and camera_mask is not None
+                and camera_mask.shape == frame.shape[:2]
+            ):
+                visible = ~camera_mask
+        elif self.hand_masker is not None:
             camera_mask = self.hand_masker.mask(frame)
             if camera_mask is not None:
                 visible = camera_mask == 0
@@ -578,7 +591,7 @@ class Pipeline:
                 warp_corners,
                 visible,
                 coverage,
-                captured_at=captured_at,
+                captured_at=packet.captured_at,
             )
         )
 
@@ -1025,9 +1038,7 @@ class Pipeline:
                 np.float32
             )
             self._last_ink_submit_at = packet.captured_at
-            self._warp_and_submit_ink(
-                frame, ink_corners, captured_at=packet.captured_at
-            )
+            self._warp_and_submit_ink(packet, ink_corners)
         elif (
             self._detect_wake is not None
             and (
@@ -1065,9 +1076,7 @@ class Pipeline:
                     np.float32
                 )
                 self._last_ink_submit_at = packet.captured_at
-                self._warp_and_submit_ink(
-                    frame, ink_corners, captured_at=packet.captured_at
-                )
+                self._warp_and_submit_ink(packet, ink_corners)
 
         return self.collect_ink()
 

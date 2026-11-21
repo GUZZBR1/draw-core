@@ -35,7 +35,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .contracts import HandSignature
+from .contracts import FramePacket, HandOcclusion, HandSignature
 
 # O caminho convencional e resolvido a partir da RAIZ DO REPO, como
 # o do detector neural e o do pagina->limpa; era relativo ao CWD e
@@ -177,6 +177,7 @@ class HandMasker:
         self._held_shape = None
         self._held_misses = 0
         self.last_detection_held = False
+        self._observed_source_id = None
         self._warned = False
         self._closed = False
         self._lock = threading.RLock()
@@ -456,6 +457,21 @@ class HandMasker:
             cv2.MORPH_ELLIPSE, (2 * _DILATE_PX + 1, 2 * _DILATE_PX + 1)
         )
         return cv2.dilate(mask, kernel)
+
+    def observe(self, packet: FramePacket, *, source_id: int) -> HandOcclusion:
+        """Publica a máscara IMAGE com a identidade da captura."""
+        if source_id != self._observed_source_id:
+            # Outra fonte/vista: marcos retidos da anterior nao valem.
+            if self._observed_source_id is not None:
+                self.reset_retention()
+            self._observed_source_id = source_id
+        mask = self.mask(packet.image)
+        return HandOcclusion(
+            frame_sequence=packet.sequence,
+            captured_at=packet.captured_at,
+            source_id=source_id,
+            occlusion_mask=None if mask is None else mask != 0,
+        )
 
     def presence_signature(self, frame, timestamp_ms=None):
         """Assinatura de presenca sem construir mascara nenhuma.
