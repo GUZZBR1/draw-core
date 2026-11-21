@@ -1084,3 +1084,53 @@ def test_a_4_column_1px_dash_straddling_the_split_is_kept():
     out = ruling.RulingFilter().apply(prob.copy())
     assert (out[y - 1 : y + 6, 598:602] > 0.5).all()
     assert ((out > 0.5) & ~dash)[:, 560:640].sum() == 0
+
+
+def test_staggered_shoulders_on_both_sides_without_stroke_are_erased():
+    """Ombros escalonados de 13 col dos dois lados (4 linhas na esquerda,
+    4 na direita, apenas 1 linha compartilhada) e SEM traço: nenhuma linha
+    pode escapar do apagamento na faixa."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        y = 80 + 40 * k
+        prob[y : y + 2, :] = 0.95
+        prob[y : y + 6, 560:700] = 0.95
+    for k in range(1, 5):  # linhas 1..4 com ombro a esquerda
+        y = 80 + 40 * k
+        prob[y : y + 6, 547:560] = 0.95
+    for k in range(4, 8):  # linhas 4..7 com ombro a direita (so linha 4 nos dois)
+        y = 80 + 40 * k
+        prob[y : y + 6, 700:713] = 0.95
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[:, 562:698] > 0.5).sum() == 0
+
+
+def test_disconnected_2px_bumps_across_a_stepped_split_are_erased():
+    """Degrau vertical na divisa (10 px) com calombos de +1 px por 2 colunas
+    em cada lado: desconexos verticalmente, nenhum pode somar 4 colunas."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        yl = 80 + 40 * k
+        yr = yl + 10
+        prob[yl : yl + 2, :600] = 0.95
+        prob[yr : yr + 2, 600:] = 0.95
+        prob[yl : yl + 6, 560:600] = 0.8
+        prob[yr : yr + 6, 600:640] = 0.8
+    yl = 80 + 40 * 5
+    yr = yl + 10
+    prob[yl : yl + 7, 598:600] = 0.8  # +1 px x 2 col na esquerda
+    prob[yr : yr + 7, 600:602] = 0.8  # +1 px x 2 col na direita (degrau 10 px)
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[:, 566:634] > 0.5).sum() == 0
+
+
+def test_empty_fold_without_any_pen_strokes_is_completely_erased():
+    """Invariante: faixa inteira sem tinta de caneta (com sombra na divisa)
+    nao pode deixar nenhuma linha isenta."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        y = 80 + 40 * k
+        prob[y : y + 2, :] = 0.95
+        prob[y : y + 6, 560:640] = 0.9
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[:, 560:640] > 0.5).sum() == 0

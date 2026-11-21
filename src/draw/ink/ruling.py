@@ -750,15 +750,18 @@ def _joined_through_bands(tracks, thick, valid_list, gutter_full):
         cont = np.logical_and.reduce(sides)
         n_lines = max(tracks[i].paths.shape[0] for i in over)
         min_bulk = max(2, n_lines // 4)
-        if cont.sum() > min_bulk:
-            if left_vote is not None and left_vote.sum() > min_bulk:
-                ext_l = _extent(left_cols, need)
-                bulk_l = _bulk_ext(ext_l[left_vote])
-                cont &= ext_l > bulk_l + _GUTTER_EDGE_RUN
-            if right_vote is not None and right_vote.sum() > min_bulk:
-                ext_r = _extent(right_cols, need)
-                bulk_r = _bulk_ext(ext_r[right_vote])
-                cont &= ext_r > bulk_r + _GUTTER_EDGE_RUN
+        has_l = left_vote is not None and left_vote.sum() > min_bulk
+        has_r = right_vote is not None and right_vote.sum() > min_bulk
+        if has_l:
+            ext_l = _extent(left_cols, need)
+            bulk_l = _bulk_ext(ext_l[left_vote])
+        if has_r:
+            ext_r = _extent(right_cols, need)
+            bulk_r = _bulk_ext(ext_r[right_vote])
+        if has_l and has_r:
+            cont &= (ext_l > bulk_l + _GUTTER_EDGE_RUN) & (
+                ext_r > bulk_r + _GUTTER_EDGE_RUN
+            )
         if i_left == i_right:
             t = tracks[i_left]
             joined[i_left][kl, a - t.x0 : b - t.x0] |= cont[:, None]
@@ -837,17 +840,25 @@ def _stroke_on_shade_tracks(tracks, passes, valid_list, gutter_full):
     strokes = [np.zeros_like(v) for v in valid_list]
     if not tracks or not gutter_full.any():
         return strokes
-    devs = [
-        _shade_deviations(run, gutter_full[t.x0 : t.x1], valid)
-        for t, (_p, _y, valid, run) in zip(tracks, passes, strict=True)
-    ]
-    for i, (above, strong) in enumerate(devs):
+    _run_t, up_t, down_t, jstar_t = _lut()
+    devs = [None] * len(tracks)
+    for i, (t, (_p, _y, valid, run)) in enumerate(zip(tracks, passes, strict=True)):
+        gutter = gutter_full[t.x0 : t.x1]
+        if not gutter.any():
+            continue
+        above, strong = _shade_deviations(run, gutter, valid)
+        devs[i] = (above, strong)
         strokes[i] = _long_runs(above, _STROKE_RUN, _STROKE_RUN) | _long_runs(
             strong, _STROKE_SHORT_RUN, _STROKE_SHORT_RUN
         )
     for i in range(len(tracks) - 1):
         xc = tracks[i].x1
-        if tracks[i + 1].x0 != xc or not (gutter_full[xc - 1] and gutter_full[xc]):
+        if (
+            tracks[i + 1].x0 != xc
+            or not (gutter_full[xc - 1] and gutter_full[xc])
+            or devs[i] is None
+            or devs[i + 1] is None
+        ):
             continue
         pairs = _match_tracks(
             tracks[i], valid_list[i], tracks[i + 1], valid_list[i + 1]
@@ -856,6 +867,22 @@ def _stroke_on_shade_tracks(tracks, passes, valid_list, gutter_full):
             continue
         kl = np.array([p[0] for p in pairs], dtype=np.int64)
         kr = np.array([p[1] for p in pairs], dtype=np.int64)
+        # só combina desvios através da divisa quando os runs de tinta se tocam
+        # verticalmente (um degrau entre páginas não pode somar dois calombos)
+        pat_l, yi_l, _, _ = passes[i]
+        pat_r, yi_r, _, _ = passes[i + 1]
+        pl, pr = pat_l[kl, -1], pat_r[kr, 0]
+        cl = yi_l[kl, -1] + jstar_t[pl]
+        cr = yi_r[kr, 0] + jstar_t[pr]
+        touch = (
+            valid_list[i][kl, -1]
+            & valid_list[i + 1][kr, 0]
+            & (cl + down_t[pl] + 2 >= cr - up_t[pr])
+            & (cr + down_t[pr] + 2 >= cl - up_t[pl])
+        )
+        if not touch.any():
+            continue
+        kl, kr = kl[touch], kr[touch]
         wl = min(_STROKE_RUN, tracks[i].paths.shape[1])
         wr = min(_STROKE_RUN, tracks[i + 1].paths.shape[1])
         comb_above = np.concatenate(
