@@ -12,20 +12,75 @@ from .. import photometry
 from ..contracts import InkDelta, InkDisplaySnapshot, InkSnapshot
 from . import accumulator, identity, motion, registration, ruling, votes
 from . import anchor as anchor_mod
-from .config import InkConfig, resolve_border_guard_yx
+from .config import InkConfig, resolve_border_guard_px
 
 
-def _zero_border(prob, guard_y, guard_x):
-    if guard_y <= 0 and guard_x <= 0:
-        return prob
-    out = np.array(prob, copy=True)
-    if guard_y > 0:
-        out[:guard_y, :] = 0.0
-        out[-guard_y:, :] = 0.0
-    if guard_x > 0:
-        out[:, :guard_x] = 0.0
-        out[:, -guard_x:] = 0.0
-    return out
+def _inset_quad(corners, inset_px):
+    """Recua um quadrilatero convexo em `inset_px` para dentro no espaco da camera."""
+    pts = np.asarray(corners, dtype=np.float64)
+    if pts.shape != (4, 2):
+        return None
+    center = pts.mean(axis=0)
+    normals = []
+    offsets = []
+    for i in range(4):
+        p0 = pts[i]
+        p1 = pts[(i + 1) % 4]
+        edge = p1 - p0
+        length = float(np.hypot(edge[0], edge[1]))
+        if length < 1e-6:
+            return None
+        normal = np.array([-edge[1] / length, edge[0] / length], dtype=np.float64)
+        if float(np.dot(normal, center - p0)) < 0.0:
+            normal = -normal
+        normals.append(normal)
+        offsets.append(float(np.dot(normal, p0)) + float(inset_px))
+    inset_pts = np.empty((4, 2), dtype=np.float64)
+    for i in range(4):
+        prev = (i - 1) % 4
+        mat = np.vstack((normals[prev], normals[i]))
+        det = float(mat[0, 0] * mat[1, 1] - mat[0, 1] * mat[1, 0])
+        if abs(det) < 1e-6:
+            return None
+        inset_pts[i] = np.linalg.solve(mat, np.array([offsets[prev], offsets[i]]))
+    return inset_pts
+
+
+def _border_guard_mask(
+    shape,
+    configured,
+    corners=None,
+    *,
+    min_auto_side=0,
+    camera_jitter_px=3.5,
+):
+    """Mascara booleana da area util na grade retificada (False na faixa de guarda)."""
+    h, w = shape[:2]
+    base = resolve_border_guard_px(shape, configured, min_auto_side=min_auto_side)
+    if base <= 0:
+        return None
+    mask = np.ones((h, w), dtype=bool)
+    mask[:base, :] = False
+    mask[-base:, :] = False
+    mask[:, :base] = False
+    mask[:, -base:] = False
+    if configured is None and corners is not None:
+        inset_cam = _inset_quad(corners, camera_jitter_px)
+        if inset_cam is not None:
+            src = np.asarray(corners, dtype=np.float32)
+            dst = np.array(
+                [[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]],
+                dtype=np.float32,
+            )
+            homography = cv2.getPerspectiveTransform(src, dst)
+            inset_page = cv2.perspectiveTransform(
+                inset_cam.reshape(1, 4, 2).astype(np.float32),
+                homography,
+            )[0]
+            cam_mask = np.zeros((h, w), dtype=np.uint8)
+            cv2.fillConvexPoly(cam_mask, np.round(inset_page).astype(np.int32), 1)
+            mask &= cam_mask > 0
+    return mask
 
 
 # Porta de ociosidade sem mao: no maximo uma sonda a cada
@@ -1944,13 +1999,14 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             guard_corners = (
                 self._anchor_corners if self._anchor_corners is not None else corners
             )
-            guard_y, guard_x = resolve_border_guard_yx(
+            guard_mask = _border_guard_mask(
                 prob.shape,
                 self._config.border_guard_px,
                 guard_corners,
                 min_auto_side=200,
             )
-            prob = _zero_border(prob, guard_y, guard_x)
+            if guard_mask is not None:
+                visible = guard_mask if visible is None else (visible & guard_mask)
             result = self._accumulator.add(
                 prob,
                 visible,

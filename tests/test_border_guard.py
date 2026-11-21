@@ -4,8 +4,8 @@ import numpy as np
 import pytest
 
 from draw import contracts
-from draw.ink.config import InkConfig, resolve_border_guard_px, resolve_border_guard_yx
-from draw.ink.worker import PageCleanWorker
+from draw.ink.config import InkConfig, resolve_border_guard_px
+from draw.ink.worker import PageCleanWorker, _border_guard_mask
 from draw.pipeline import Pipeline
 from draw.settings import PipelineConfig
 
@@ -91,8 +91,15 @@ def test_border_guard_config_derivation_and_validation():
     small_quad = np.array(
         [[200, 100], [560, 100], [560, 600], [200, 600]], dtype=np.float32
     )
-    assert resolve_border_guard_yx((1200, 850), None, small_quad) == (9, 9)
-    assert resolve_border_guard_yx((1200, 850), 5, small_quad) == (5, 5)
+    mask = _border_guard_mask((1200, 850), None, small_quad)
+    assert mask is not None
+    assert not mask[:8, :].any()
+    assert not mask[:, :8].any()
+    assert mask[10:-10, 10:-10].all()
+    explicit = _border_guard_mask((1200, 850), 5, small_quad)
+    assert explicit is not None
+    assert not explicit[:5, :].any()
+    assert explicit[5:-5, 5:-5].all()
 
     with pytest.raises(ValueError, match="border_guard_px"):
         InkConfig(border_guard_px=-1)
@@ -251,7 +258,8 @@ def test_empty_coverage_mask_still_gates_votes():
     assert int(np.count_nonzero(loop.clean_mask)) == 0
 
 
-def test_empty_page_without_coverage_and_small_camera_sheet_stays_empty():
+@pytest.mark.parametrize("ink_cfg", [InkConfig.production(), InkConfig.sketch()])
+def test_empty_page_without_coverage_and_small_camera_sheet_stays_empty(ink_cfg):
     """Sem cobertura e com folha pequena na camera (360x500 -> 850x1200),
     a guarda projetada cobre o estiramento de 3 px da camera e mantem
     toda a pagina vazia (inclusive logo dentro da margem de 7 px)."""
@@ -261,7 +269,6 @@ def test_empty_page_without_coverage_and_small_camera_sheet_stays_empty():
         [[197, 97], [563, 97], [563, 603], [197, 603]],
         dtype=np.float32,
     )
-    ink_cfg = InkConfig.production()
     pipe_cfg = PipelineConfig(
         coverage=False,
         ink_auto_gain=False,
@@ -314,3 +321,63 @@ def test_near_edge_stroke_survives_persistent_inward_quad_shift():
     )
     assert loop.clean_mask is not None
     assert int(np.count_nonzero(loop.clean_mask[:, 9:30])) > 0
+
+
+def test_trapezoid_guard_suppresses_jitter_and_preserves_less_magnified_edge():
+    """Em pagina inclinada (trapezio 220..460 x 400 -> 850x1200), o inset
+    projetado pela homografia protege a borda mais comprimida sem cortar
+    um traco valido perto da borda inferior menos ampliada."""
+    trap = np.array(
+        [[530, 100], [750, 100], [870, 500], [410, 500]],
+        dtype=np.float32,
+    )
+    mask = _border_guard_mask((1200, 850), None, trap)
+    assert mask is not None
+    # A ~9 px da borda inferior (y=1190), 6 px na camera (~9 px no grid):
+    # preservado pela projecao em perspectiva (antes 11 px o cortava).
+    assert mask[1190, 425]
+    # Borda superior mais esticada recebe guarda maior (> 7 px):
+    assert not mask[8, 425]
+
+
+def test_confirmed_stroke_survives_reanchor_that_widens_guard():
+    """Quando a mesma folha reancora mais longe na camera e a guarda alarga,
+    tracos ja confirmados dentro da nova faixa nao sao apagados."""
+    clock = _Clock()
+    cfg = InkConfig.production()
+    worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
+    # Folha grande (700x1000 -> guarda ~7 px): traco em x=11..15 confirma.
+    near_quad = np.array(
+        [[100, 50], [800, 50], [800, 1050], [100, 1050]], dtype=np.float32
+    )
+    far_quad = np.array(
+        [[100, 50], [320, 50], [320, 350], [100, 350]], dtype=np.float32
+    )
+    img = np.full((1200, 850, 3), 215, np.uint8)
+    img[200:500, 11:16] = 25  # traco perto da borda (fora da guarda de 7 px)
+    img[300:700, 300:500] = 25  # escrita no miolo para testemunha de remocao
+
+    for _ in range(5):
+        clock.now += 0.2
+        worker.submit(contracts.WarpedPage(img, 0, near_quad, captured_at=clock.now))
+        worker.pump()
+    snap = worker.poll_display(0, 0)
+    assert snap is not None
+    assert int(np.count_nonzero(snap.confirmed[:, 11:16])) > 0
+
+    # Simula reancoragem com a folha mais longe (guarda > 13 px) e 10 passadas estaveis
+    worker._anchor_corners = far_quad.copy()
+    for _ in range(10):
+        clock.now += 0.2
+        worker.submit(contracts.WarpedPage(img, 0, far_quad, captured_at=clock.now))
+        worker.pump()
+    snap_after = worker.poll_display(0, 0)
+    assert snap_after is not None
+    assert int(np.count_nonzero(snap_after.confirmed[:, 11:16])) > 0
+
+
+def test_sim_writer_rejects_none_for_non_nullable_flags():
+    from lab import sim_writer
+
+    with pytest.raises(ValueError, match="booleano|invalido"):
+        sim_writer._parse_flags(["coverage=none"])
