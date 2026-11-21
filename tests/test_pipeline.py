@@ -8,6 +8,7 @@ congelada sem mão, oclusão semântica da mão e os desfechos
 reopen/drop/erro.
 """
 
+import cv2
 import numpy as np
 import pytest
 
@@ -17,6 +18,7 @@ from draw.contracts import (
     FramePacket,
     InkDisplaySnapshot,
 )
+from draw.ink import registration as registration_mod
 from draw.ink.config import InkConfig
 from draw.settings import PipelineConfig
 
@@ -216,11 +218,12 @@ def test_coverage_mask_gates_votes_off_sheet():
     # Sem mão sintética o visible segue None — a cobertura viaja
     # em canal próprio e não mistura semântica de oclusão.
     assert all(v is None for _g, _c, v, _cov in ink.submitted)
-    # A metade direita do quad cai sobre "mesa": nunca pode votar.
-    page_h, page_w = gated[-1].shape
-    assert not gated[-1][:, int(page_w * 0.60) :].any()
-    # E a região de folha segue aberta para o voto.
-    assert gated[-1][:, : int(page_w * 0.30)].all()
+    # A máscara sobe na grade da CÂMERA (720x1280, issue #100):
+    # x>=300 é mesa — nunca pode votar — e o miolo coberto segue
+    # aberto (a erosão de borda desconta ~2 px).
+    assert gated[-1].shape == (720, 1280)
+    assert not gated[-1][:, 320:].any()
+    assert gated[-1][10:700, 50:280].all()
 
 
 def test_paper_mean_bgr_hits_integer_boundary():
@@ -256,19 +259,55 @@ def test_coverage_fill_uses_the_paper_mean_bgr():
     sai igual à média BGR dos pixels cobertos do mesmo warp.
     """
     frame = np.full((720, 1280, 3), 220, np.uint8)  # mesa clara
-    frame[100:400, 100:350] = (30, 100, 170)  # papel cor própria
+    # Papel em dois tons: com o quad trapezoidal abaixo a media da
+    # camera difere da media do retificado — o teste distingue a
+    # media no dominio da camera (issue #100) de uma pos-warp.
+    frame[100:250, 100:350] = (60, 100, 200)
+    frame[250:400, 100:350] = (200, 80, 30)
     coverage = _mask_block(100, 400, 100, 350)
+    quad = np.array(
+        [[100.0, 100.0], [500.0, 140.0], [480.0, 400.0], [120.0, 380.0]],
+        dtype=np.float32,
+    )
     loop, _det, ink = _make_loop(
-        lambda _i: (QUAD.copy(), "paper", {"coverage_mask": coverage})
+        lambda _i: (quad.copy(), "paper", {"coverage_mask": coverage})
     )
     _drive(loop, 40, frame=frame)
     page = ink.pages[-1]
+    # Issue #100: a cobertura sobe em grade de câmera — retifico pelo
+    # quad da passada para comparar na grade do warp.
     assert page.coverage is not None and page.coverage.any()
-    inside = page.image[page.coverage]
-    expected = inside.mean(axis=0).astype(np.uint8)
-    outside = page.image[~page.coverage]
+    coverage_page = (
+        cv2.warpPerspective(
+            page.coverage.astype(np.uint8),
+            registration_mod._corners_page_matrix(
+                page.corners, page.image.shape[1], page.image.shape[0]
+            ),
+            (page.image.shape[1], page.image.shape[0]),
+            flags=cv2.INTER_NEAREST,
+            borderValue=0,
+        )
+        > 0
+    )
+    paper_cam = (
+        cv2.erode((coverage > 127).astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+    ) & pipeline_module._quad_camera_mask(quad, frame.shape)
+    expected = pipeline_module._paper_mean_bgr(frame, paper_cam)
+    # O anel fronteiriço mistura fill e papel no warp LINEAR da
+    # imagem (a máscara comparada é NEAREST) — a comparação exata
+    # vale no miolo claramente fora da folha; igualdade por pixel,
+    # porque a média esconderia uma faixa estreita de cor errada
+    # (review do PR #118).
+    inside = page.image[coverage_page]
+    outside = page.image[
+        cv2.dilate(coverage_page.astype(np.uint8), np.ones((9, 9), np.uint8)) == 0
+    ]
     assert outside.size, "o teste precisa de região fora da folha"
     assert (outside == expected).all()
+    # Não-vacuo: papel sombreado + quad trapezoidal fazem a média
+    # pós-warp diferir da de câmera — um fill no domínio da página
+    # sairia ~6 níveis mais claro no azul e no vermelho.
+    assert np.abs(inside.mean(axis=0) - expected.astype(float)).max() > 3
 
 
 def test_coverage_config_off_ignores_the_mask():
@@ -573,8 +612,34 @@ def test_ink_divnorm_skips_the_fill_and_the_gain():
     # x>350 -> página x>531.)
     assert float(page.image[100:1100, 600:800].mean()) > 200.0
     # E dentro da cobertura vai o pixel cru da cena (papel 100), não
-    # o ganho nem o normalizado.
-    assert float(page.image[page.coverage].mean()) < 110.0
+    # o ganho nem o normalizado. A cobertura sobe na grade da
+    # câmera (issue #100) — projeta à grade da página para indexar.
+    paper = pipeline_module.paper.warp_sheet(page.coverage.astype(np.uint8), QUAD) > 0
+    assert float(page.image[paper].mean()) < 110.0
+
+
+def test_ink_divnorm_skips_the_gain_so_bright_paper_is_not_clipped():
+    """Review #48: com os dois ligados, o ganho clipava em 255 o papel
+    claro de uma folha com luz desigual, e o traço fraco sobre ele sumia
+    antes da normalização. Como a divisão por I/blur(I) já anula a
+    escala, o divnorm dispensa o ganho: o warp sobe cru e a
+    normalização que salva o traço rola na trabalhadora
+    (tests/test_ink_divnorm.py)."""
+    frame = np.full((720, 1280, 3), 70, np.uint8)  # papel escuro (maioria)
+    frame[100:400, 440:464] = 200  # faixa bem iluminada (6%: fora do p90)
+    frame[200:300, 450:454] = 175  # traço fraco sobre a parte clara
+
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None),
+        config=PipelineConfig(ink_divnorm=True, ink_auto_gain=True),
+    )
+    _drive(loop, 40, frame=frame)
+    assert loop.last_ink_gain == 1.0
+    page = ink.pages[-1]
+    # Sem o ganho no laço a faixa clara sobe ~200 (não clipa a 255)
+    # e o traço de ~175 segue distinguível no warp cru.
+    bright = page.image.mean(axis=2)
+    assert 185.0 < float(bright.max()) < 235.0
 
 
 def _seen_then_lost():
@@ -1000,3 +1065,47 @@ def test_ink_page_carries_the_capture_timestamp_of_its_frame():
     assert stamps == sorted(stamps) and len(set(stamps)) == len(stamps)
     # carimbos de _packet: frame_number * 0.1
     assert all(abs(s * 10 - round(s * 10)) < 1e-6 for s in stamps)
+
+
+def test_off_frame_quad_padding_is_filled_with_the_paper_mean():
+    """Folha parcialmente fora do quadro: o preenchimento no frame só
+    alcança o que a câmera viu; o padding que o warp cria sobe com a
+    média do papel, não preto (review do PR #118)."""
+    quad = np.array(
+        [[-200.0, 100.0], [400.0, 100.0], [400.0, 400.0], [-200.0, 400.0]],
+        dtype=np.float32,
+    )
+    mask = np.zeros((720, 1280), np.uint8)
+    mask[100:400, :420] = 255  # folha segmentada, so o que a camera ve
+    frame = np.full((720, 1280, 3), 60, np.uint8)
+    frame[:, :420] = (200, 200, 200)
+    loop, _det, ink = _make_loop(
+        lambda _i: (quad.copy(), "paper", {"coverage_mask": mask})
+    )
+    _drive(loop, 40, frame=frame)
+    image = ink.pages[-1].image
+    left = image[:, : image.shape[1] // 3]  # fora do quadro: padding
+    assert left.mean() > 150, (
+        f"padding {left.mean():.1f} — a média do papel não chegou ao "
+        "recorte fora do quadro"
+    )
+
+
+def test_auto_gain_still_fills_off_sheet_inside_the_quad():
+    """Com ganho e cobertura juntos a máscara do quad não pode ser
+    consumida pelo &= do ganho — o preenchimento fora-folha dentro do
+    quad tem de continuar rodando (review do PR #118)."""
+    mask = _coverage_mask()  # papel só em x<300
+    frame = np.full((720, 1280, 3), 60, np.uint8)
+    frame[:, :300] = (200, 200, 200)
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", {"coverage_mask": mask}),
+        config=PipelineConfig(ink_auto_gain=True, detect_wake=False),
+    )
+    _drive(loop, 40, frame=frame)
+    image = ink.pages[-1].image
+    right = image[:, -image.shape[1] // 5 :]  # mesa dentro do quad
+    assert right.mean() > 150, (
+        f"fora-folha {right.mean():.1f} — o &= do ganho consumiu a "
+        "máscara do quad e o preenchimento não rodou"
+    )
