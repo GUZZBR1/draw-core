@@ -171,6 +171,7 @@ class Pipeline:
         self._coverage_mask = None
         self._hand_mask_det = None
         self._hand_mask_captured_at = None
+        self._hand_mask_needs_refresh = False
 
         self.tracker = tracker.SheetTracker()
         self._detect_wake = (
@@ -319,7 +320,6 @@ class Pipeline:
             # o retificado de mesa e trabalho morto e cada pixel
             # e mesa na trabalhadora de tinta.
             return
-        ink_warped = self._warp_sheet(frame, warp_corners)
         # Visibilidade na grade da pagina: onde a mao esta, a
         # passada nao ve a folha — a passada nao pode votar com
         # evidencia fabricada sob oclusao.
@@ -329,6 +329,15 @@ class Pipeline:
             if camera_mask is not None:
                 hand_warped = self._warp_sheet(camera_mask, warp_corners)
                 visible = hand_warped == 0
+        if (
+            self._config.seg_hand_occlusion
+            and self._hand_mask_needs_refresh
+            and visible is None
+        ):
+            # Uma oclusão expirada é evidência indisponível. Só um sinal
+            # deste quadro pode liberar votos enquanto o detector a renova.
+            return
+        ink_warped = self._warp_sheet(frame, warp_corners)
         if self._config.seg_hand_occlusion and self._hand_mask_det is not None:
             # seg_hand_occlusion: a classe mão do segmentador vira
             # segundo sinal de oclusão. Sem ela, a mão sobre a
@@ -482,6 +491,7 @@ class Pipeline:
         self._coverage_mask = None
         self._hand_mask_det = None
         self._hand_mask_captured_at = None
+        self._hand_mask_needs_refresh = False
         self._source_id += 1
         self._detections_since = since
         self.clean_hand_present = None
@@ -491,6 +501,16 @@ class Pipeline:
         if buf is not None and buf.shape != want_shape:
             self.canvas_buffer = np.empty(want_shape, dtype=np.uint8)
 
+    def _hand_mask_expired(self, mask_at, captured_at):
+        # Um heartbeat limita a idade do cache também durante o despertar.
+        # O quadro exatamente no limite ainda usa o último resultado (por
+        # exemplo, quando a captura e o heartbeat rodam ambos a 1 Hz).
+        return (
+            self._detect_wake is not None
+            and mask_at is not None
+            and captured_at - mask_at > self._config.detect_wake_interval_s + 1e-9
+        )
+
     def _update_hand_mask(self, detection, captured_at):
         if detection is None:
             mask = self._hand_mask_det
@@ -498,13 +518,7 @@ class Pipeline:
         else:
             mask = detection.hand_mask
             mask_at = detection.captured_at if mask is not None else None
-        # Um heartbeat limita a idade do cache mesmo durante o despertar,
-        # quando uma detecção ainda pode estar em voo.
-        expired = (
-            self._detect_wake is not None
-            and mask_at is not None
-            and captured_at - mask_at >= self._config.detect_wake_interval_s - 1e-9
-        )
+        expired = self._hand_mask_expired(mask_at, captured_at)
         if detection is None and not expired:
             return
 
@@ -522,6 +536,14 @@ class Pipeline:
             and mask_at < self._hand_exit_at
             and mask.any()
         )
+        if mask is not None and not expired and not before_exit:
+            self._hand_mask_needs_refresh = False
+        elif (expired and mask.any()) or (
+            self._hand_mask_expired(self._hand_mask_captured_at, captured_at)
+            and self._hand_mask_det.any()
+        ):
+            self._hand_mask_needs_refresh = True
+
         woke_for_stale_mask = before_exit and not self._stale_hand_woke
         if woke_for_stale_mask:
             self._stale_hand_woke = True

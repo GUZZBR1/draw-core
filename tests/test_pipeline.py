@@ -20,6 +20,7 @@ from draw.contracts import (
     InkDisplaySnapshot,
 )
 from draw.ink.config import InkConfig
+from draw.ink.worker import PageCleanWorker
 from draw.settings import PipelineConfig
 
 QUAD = np.array(
@@ -1016,14 +1017,50 @@ def test_reset_source_clears_presence_and_rejects_in_flight_sample():
     assert hp.submitted[-1][1] == 1
 
 
+def test_hand_exit_uses_sample_time_to_keep_newer_semantic_mask():
+    hp = _FakeHandPresenceWorker(
+        results=[HandPresenceResult(1, 0.2, 0, HandSample(False, False))]
+    )
+    loop, det, _ink = _make_loop(
+        lambda _i: (None, None, None),
+        config=PipelineConfig(),
+        hand_presence=hp,
+    )
+    frame = _frame()
+    loop.step(FramePacket(frame, 0.6, 0))
+    assert loop.clean_hand_present is False
+    hand = np.zeros(frame.shape[:2], np.uint8)
+    hand[150:250, 200:300] = 255
+    det._result = DetectionResult(
+        sequence=det._seq + 1,
+        corners=QUAD,
+        verdict="paper",
+        captured_at=0.3,
+        detect_ms=1.0,
+        hand_mask=hand,
+    )
+    loop.step(FramePacket(frame, 0.7, 1))
+    assert loop.last_hand_mask is not None
+    assert loop.last_hand_mask.any()
+
+
 @pytest.mark.parametrize("late_heartbeat", [False, True])
 def test_settled_hand_mask_expires_if_heartbeat_stalls(monkeypatch, late_heartbeat):
     frame = _frame()
     hand = np.zeros(frame.shape[:2], np.uint8)
     hand[150:250, 200:300] = 255
+
+    class _CurrentMasker:
+        available = False
+
+        def mask(self, frame):
+            return np.zeros(frame.shape[:2], np.uint8) if self.available else None
+
+    masker = _CurrentMasker()
     loop, det, ink = _make_loop(
         lambda _i: (QUAD.copy(), "paper", {"hand_mask": hand}),
         config=PipelineConfig(detect_wake=True, detect_wake_interval_s=1.0),
+        hand_masker=masker,
     )
     while not loop._detect_wake.settled and loop.frame_number < 30:
         loop.step(_packet(loop, frame))
@@ -1035,6 +1072,9 @@ def test_settled_hand_mask_expires_if_heartbeat_stalls(monkeypatch, late_heartbe
     loop.step(FramePacket(frame, captured_at + 0.9, loop.frame_number))
     assert loop.last_hand_mask is not None
     assert ink.submitted[-1][2] is not None
+    loop.step(FramePacket(frame, captured_at + 1.0, loop.frame_number))
+    assert loop.last_hand_mask is not None
+    submits = len(ink.submitted)
     if late_heartbeat:
         det._result = DetectionResult(
             sequence=det._result.sequence + 1,
@@ -1047,4 +1087,76 @@ def test_settled_hand_mask_expires_if_heartbeat_stalls(monkeypatch, late_heartbe
     loop.step(FramePacket(frame, captured_at + 1.1, loop.frame_number))
     assert loop._detect_wake.settled
     assert loop.last_hand_mask is None
-    assert ink.submitted[-1][2] is None
+    assert len(ink.submitted) == submits
+
+    masker.available = True
+    loop.step(FramePacket(frame, captured_at + 1.3, loop.frame_number))
+    assert len(ink.submitted) == submits + 1
+    assert ink.submitted[-1][2].all()
+
+
+def test_expired_hand_mask_without_mediapipe_cannot_confirm_hand_as_ink(monkeypatch):
+    class _DarkIsInk:
+        threshold = 0.5
+
+        def ink_prob(self, warped):
+            return (warped[:, :, 0] < 128).astype(np.float32)
+
+    frame = np.full_like(_frame(), 255)
+    frame[150:250, 200:300] = 0
+    hand = np.zeros(frame.shape[:2], np.uint8)
+    hand[150:250, 200:300] = 255
+    cleared = False
+
+    def detect(_i):
+        mask = np.zeros_like(hand) if cleared else hand
+        return QUAD.copy(), "paper", {"hand_mask": mask}
+
+    now = 0.0
+
+    def clock():
+        return now
+
+    config = PipelineConfig(ink=InkConfig(pass_interval_s=0.15), ink_auto_gain=False)
+    ink = PageCleanWorker(_DarkIsInk(), config=config.ink, clock=clock)
+    loop, det, _ink = _make_loop(detect, config=config, ink=ink, clock=clock)
+
+    def step(at):
+        nonlocal now
+        now = at
+        loop.step(FramePacket(frame, now, loop.frame_number))
+        ink.pump()
+        loop.collect_ink()
+
+    for index in range(30):
+        step(index * 0.1)
+        if loop._detect_wake.settled:
+            break
+    assert loop._detect_wake.settled
+    baseline = det._result.captured_at
+    for second in range(1, 4):
+        step(baseline + second)
+        assert loop.last_hand_mask is not None
+        assert loop.clean_mask is not None and not loop.clean_mask.any()
+
+    submit = det.submit
+    monkeypatch.setattr(det, "submit", lambda *_args: None)
+    step(baseline + 4)
+    assert loop.last_hand_mask is not None
+    passes = ink.stats()["passes_total"]
+
+    for second in range(5, 9):
+        step(baseline + second)
+    assert loop.last_hand_mask is None
+    assert ink.stats()["passes_total"] == passes
+    assert not loop.clean_mask.any()
+
+    # O classificador voltou a ver uma página livre. Um traço real no
+    # mesmo lugar já pode receber votos sem o auxílio do MediaPipe.
+    cleared = True
+    submit(frame, baseline + 9)
+    step(baseline + 10)
+    submit(frame, baseline + 10)
+    step(baseline + 11)
+    assert loop.last_hand_mask is not None and not loop.last_hand_mask.any()
+    assert loop.clean_mask.any()
