@@ -184,8 +184,12 @@ def suggest(summary, margin=4.0):
     if ghosts and sheets:
         high_ghost, low_sheet = ghosts[-1], sheets[0]
         if high_ghost < low_sheet:
+            # Sem arredondar: o gate rejeita iou < piso ESTRITO e o
+            # ponto médio de amostras de 4 casas tem 5 — round(,4)
+            # colapsaria sobre o fantasma e o piso deixaria de
+            # separar (revisão do PR #115).
             out["coverage_iou_floor"] = {
-                "value": round((high_ghost + low_sheet) / 2, 4),
+                "value": (high_ghost + low_sheet) / 2,
                 "evidence": (
                     f"maior IoU de mesa vazia {high_ghost} < menor IoU "
                     f"com folha {low_sheet} (regra do ponto médio)"
@@ -210,7 +214,9 @@ def suggest(summary, margin=4.0):
     empty_logits = summary["empty"]["presence"]
     sheet_logits = summary["sheet"]["presence"]
     if empty_logits and sheet_logits:
-        veto = round(max(empty_logits) + margin, 4)
+        # Também sem arredondar: um veto arredondado para cima
+        # poderia alcançar uma folha que o valor exato pouparia.
+        veto = max(empty_logits) + margin
         # Folhas cuja presença cairia sob o veto sugerido: cada uma
         # é uma folha real que o veto mataria nesta mesa — logo a
         # regra não separa aqui e a sugestão honesta é None. As

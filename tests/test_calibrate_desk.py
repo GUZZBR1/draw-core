@@ -159,6 +159,19 @@ def test_folhas_so_neurais_nao_confundem_evidencia(tmp_path):
     assert "2" in sug["evidence"]
 
 
+def test_piso_sugerido_separa_folga_minima(tmp_path):
+    """Revisão do PR #115: fantasma 0.2001 e folha 0.2002 — o gate
+    rejeita iou < piso ESTRITO, então o ponto médio arredondado a
+    4 casas (0.2001) deixaria o fantasma passar. Sem arredondar,
+    0.20015 separa a folga de uma casa decimal."""
+    empty = _write_telemetry(tmp_path, [_snapshot(rejects=[0.2001])], "e.jsonl")
+    sheet = _write_telemetry(tmp_path, [_snapshot(accepts=[0.2002])], "s.jsonl")
+    floor = cd.suggest(cd.summarize([empty], [sheet]))["coverage_iou_floor"]["value"]
+    assert floor == pytest.approx(0.20015)
+    # iou < floor rejeita: o fantasma morre, a folha mínima vive.
+    assert 0.2001 < floor <= 0.2002
+
+
 def test_distribuicoes_sobrepostas_nao_separam_piso(tmp_path):
     """Fantasma acima da folha mais baixa: o ponto médio não separa
     — reportar a sobreposição em vez de inventar um limiar."""
