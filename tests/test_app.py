@@ -8,6 +8,7 @@ de modelos do --check e a validacao de argumentos do main().
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
@@ -750,6 +751,8 @@ def test_show_posiciona_a_janela_ate_o_prazo(monkeypatch):
     """
     moves = []
     _stub_show_gui(monkeypatch, moves)
+    now = [1000.0]
+    monkeypatch.setattr(app_module, "time", SimpleNamespace(monotonic=lambda: now[0]))
     monkeypatch.setitem(app_module._settings["on"], "fullscreen", False)
     frame = np.zeros((640, 1600, 3), np.uint8)
     app_module._show(frame)
@@ -758,7 +761,7 @@ def test_show_posiciona_a_janela_ate_o_prazo(monkeypatch):
     assert moves == [
         (app_module._WINDOW, app_module._WINDOW_PLACE_X, app_module._WINDOW_PLACE_Y)
     ]
-    app_module._window_place_until[0] = 0.0
+    now[0] += app_module._WINDOW_PLACE_SECONDS + 1.0
     app_module._show(frame)
     assert len(moves) == 1
 
@@ -779,6 +782,21 @@ def test_show_nao_move_a_janela_em_fullscreen(monkeypatch):
         app_module._show(frame)
     assert moves == []
     assert app_module._window_place_until[0] > 0.0
+
+
+def test_show_nao_reabre_posicionamento_ao_sair_do_fullscreen(monkeypatch):
+    """Sair da tela cheia depois do prazo nao dispara o posicionamento."""
+    moves = []
+    _stub_show_gui(monkeypatch, moves)
+    now = [1000.0]
+    monkeypatch.setattr(app_module, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setitem(app_module._settings["on"], "fullscreen", True)
+    frame = np.zeros((640, 1600, 3), np.uint8)
+    app_module._show(frame)
+    now[0] += app_module._WINDOW_PLACE_SECONDS + 1.0
+    app_module._settings["on"]["fullscreen"] = False
+    app_module._show(frame)
+    assert moves == []
 
 
 def test_camera_menu_with_many_cameras_scrolls_and_selects_absolute_rows(monkeypatch):
