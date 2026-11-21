@@ -690,10 +690,11 @@ _window_sized = set()
 _window_place_until = [0.0]
 _WINDOW_PLACE_SECONDS = 2.5
 _WINDOW_PLACE_X, _WINDOW_PLACE_Y = 96, 48
-# Titulo unico por lancamento no WSLg: "Draw <pid>" identifica a hwnd
-# desta sessao para o helper de foreground, sem confundir sessoes
-# abertas. Volta a "Draw" quando o helper renomeia a janela ou, na
-# falta dele, ao expirar o prazo local (busca do helper + margem).
+# Titulo unico por lancamento no WSLg: "Draw <pid>-<hex>" identifica a
+# hwnd desta sessao para o helper de foreground, sem confundir sessoes
+# abertas — o pid sozinho colide entre distros (namespaces separados).
+# Volta a "Draw" quando o helper renomeia a janela ou, na falta dele,
+# ao expirar o prazo local (busca do helper + margem).
 _window_token = [None]
 _window_title_restore_at = [0.0]
 _WSL_RAISE_POLLS = 240  # ~60 s: o RAIL pode demorar a publicar a hwnd
@@ -1078,8 +1079,8 @@ def _start_wsl_foreground_helper(token):
     e o TOPMOST do Qt sao engolidos), entao a subida vai pelo lado
     Windows: AttachThreadInput na thread da janela ativa +
     SetForegroundWindow. A hwnd e identificada pelo titulo unico do
-    lancamento ("Draw <pid> (*)" no lado Windows) — sessoes antigas
-    nunca entram na busca. Ao achar, o helper levanta a janela e
+    lancamento ("Draw <pid>-<hex> (*)" no lado Windows) — sessoes
+    antigas nunca entram na busca. Ao achar, o helper levanta a janela e
     devolve o titulo normal via SetWindowText. Retorna o processo ou
     None fora do WSL/se o powershell nao subir; falhar em qualquer
     passo so perde a subida, nada mais.
@@ -1138,15 +1139,15 @@ def _start_wsl_foreground_helper(token):
 def _publish_unique_title_and_raise():
     """Publica o titulo unico do lancamento e dispara o helper de foreground.
 
-    A janela sai como "Draw <pid>" — o RAIL a apresenta no Windows como
-    "Draw <pid> (Ubuntu)" — e o helper casa esse titulo exato, entao
-    nenhuma sessao antiga pode ser levantada por engano. O titulo volta
-    a "Draw" quando o helper renomeia a hwnd ou, sem ele, ao expirar o
-    prazo local. Sem GUI do Qt o passo e ignorado.
+    A janela sai como "Draw <pid>-<hex>" — o RAIL a apresenta no Windows
+    como "Draw <pid>-<hex> (Ubuntu)" — e o helper casa esse titulo
+    exato, entao nenhuma sessao antiga pode ser levantada por engano. O
+    titulo volta a "Draw" quando o helper renomeia a hwnd ou, sem ele,
+    ao expirar o prazo local. Sem GUI do Qt o passo e ignorado.
     """
     if not camera_module.is_wsl():
         return
-    token = f"{_WINDOW} {os.getpid()}"
+    token = f"{_WINDOW} {os.getpid()}-{os.urandom(3).hex()}"
     try:
         cv2.setWindowTitle(_WINDOW, token)
     except cv2.error:
