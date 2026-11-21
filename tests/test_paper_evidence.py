@@ -209,3 +209,37 @@ def test_finger_wider_than_the_window_is_found_at_any_grid_offset(offset, width)
     ok = paper_evidence.paper_exposed(image, ref)
     assert ok.shape == image.shape[:2]
     assert not ok[80:176, x0 + 4 : x0 + 36].any()
+
+
+def test_bright_green_patch_is_not_paper_against_a_warm_reference():
+    image = np.empty((256, 384, 3), np.uint8)
+    image[:] = (70, 85, 100)  # papel quente e escuro: B/R 0,70
+    ref = paper_evidence.paper_reference(image)
+    image[64:192, 96:288] = (0, 245, 0)
+    ok = paper_evidence.paper_exposed(image, ref)
+    assert not ok[80:176, 112:272].any()
+
+
+def test_chroma_limit_is_inclusive():
+    image = np.empty((256, 384, 3), np.uint8)
+    image[:] = (240, 240, 240)
+    ref = paper_evidence.paper_reference(image)
+    image[32:224, 64:320] = (236, 220, 200)  # B/R exatamente 1,18
+    ok = paper_evidence.paper_exposed(image, ref)
+    assert ok[64:192, 96:288].all()
+
+
+@pytest.mark.parametrize("offset", range(4))
+def test_whole_covered_slice_is_frozen_at_every_sampling_offset(offset):
+    image = np.empty((256, 384, 3), np.uint8)
+    image[:] = PAPER
+    ref = paper_evidence.paper_reference(image)
+    x0 = 61 + offset
+    y0 = 61 + offset
+    image[y0 : y0 + 120, x0 : x0 + 40] = (60, 62, 64)
+    ok = paper_evidence.paper_exposed(image, ref)
+    assert not ok[y0 : y0 + 120, x0 : x0 + 40].any()
+    image[:] = PAPER
+    image[y0 : y0 + 40, 100 : 100 + 160] = (60, 62, 64)
+    ok = paper_evidence.paper_exposed(image, ref)
+    assert not ok[y0 : y0 + 40, 100 : 100 + 160].any()

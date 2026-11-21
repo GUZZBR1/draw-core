@@ -423,7 +423,9 @@ def main(argv=None):
     from draw.settings import PipelineConfig
 
     pipeline_config = (
-        PipelineConfig(ink=InkConfig(), ink_auto_gain=False, detect_wake=False)
+        PipelineConfig(
+            ink=InkConfig(paper_guard=False), ink_auto_gain=False, detect_wake=False
+        )
         if args.legacy_ink
         else PipelineConfig()
     )

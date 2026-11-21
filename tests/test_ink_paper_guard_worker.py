@@ -1,5 +1,6 @@
 """Guarda fotometrica pelo worker real (issue #129): mao sem mascara."""
 
+import dataclasses
 import time
 
 import numpy as np
@@ -141,5 +142,32 @@ def test_post_exit_confirm_window_is_refunded_while_the_guard_freezes(monkeypatc
         # A guarda congelou as passadas pos-saida: a janela segue armada.
         assert worker._confirm_passes >= 1
         assert worker._confirm_masked_skips >= 1
+    finally:
+        worker.stop()
+
+
+def test_stroke_finished_under_a_shadow_confirms_after_hand_exit_at_production(
+    monkeypatch,
+):
+    """Producao pede 3 votos fortes pos-saida; a guarda segura a regiao por
+    occlusion_hold_passes. O descanso nao pode chegar antes do traco."""
+    # Hold maior que a janela de voto: a devolucao precisa cobrir o hold inteiro.
+    config = dataclasses.replace(InkConfig.production(), occlusion_hold_passes=5)
+    worker, ink, generation = _run(monkeypatch, config)
+    try:
+        for _ in range(14):  # pagina madura e parada: o descanso esta ao alcance
+            _pass(worker, generation, _paper())
+        worker.set_hand_presence(True)
+        late = (slice(224, 240), slice(16, 120))
+        ink.content = _prob(extra=late)
+        shadow = _paper()
+        shadow[(slice(208, 256), slice(0, 160))] = (60, 62, 64)
+        for _ in range(4):
+            _pass(worker, generation, shadow)
+        assert not worker.poll(generation, 0).confirmed[late].any()
+        worker.set_hand_presence(False)
+        for _ in range(config.occlusion_hold_passes + 5):
+            _pass(worker, generation, _paper())
+        assert worker.poll(generation, 0).confirmed[late].all()
     finally:
         worker.stop()

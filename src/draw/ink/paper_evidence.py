@@ -87,13 +87,23 @@ def paper_exposed(image, reference, *, min_ratio=_MIN_RATIO, block=_BLOCK_PX):
         ok = total >= 3.0 * min_ratio * level
         red_f = red.astype(np.float32)
         blue_f = blue.astype(np.float32)
-        spread = _CHROMA_TOL * max(ratio, 1e-3)
-        ok &= (blue_f >= (ratio - spread) * red_f) & (
+        # Folga de 1e-6 na razao: o limite e inclusivo e o produto em
+        # float32 nao pode arredondar um bloco exatamente no limite para
+        # fora (ex.: B 236 / R 200 contra referencia neutra, 1,18).
+        spread = _CHROMA_TOL * max(ratio, 1e-3) + 1e-6
+        bounds = (blue_f >= (ratio - spread) * red_f) & (
             blue_f <= (ratio + spread) * red_f
         )
+        # Vermelho <= 1: a razao nao existe e os dois limites colapsam em 0
+        # (verde puro passaria). Cai na razao neutra 1, como na referencia.
+        neutral_ok = abs(1.0 - ratio) <= spread
+        ok &= np.where(red > 1, bounds, neutral_ok)
     else:
         ok = peak >= min_ratio * level
-    half = max(1, cells // 2)
+    # Meia janela + 1 amostra: a borda de um ocluso pode cair entre duas
+    # amostras (ate step-1 px), e a expansao inteira de cada amostra a
+    # deixaria aparecer como papel.
+    half = max(1, cells // 2) + 1
     ok = cv2.erode(
         ok.astype(np.uint8),
         np.ones((2 * half + 1, 2 * half + 1), np.uint8),

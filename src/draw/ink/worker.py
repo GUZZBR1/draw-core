@@ -2022,7 +2022,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 self._spent_confirm_pass
                 and result["frozen_px"]
                 and self._confirm_passes < self._post_exit_confirm_passes()
-                and self._confirm_masked_skips < votes._INK_VOTE_WINDOW
+                and self._confirm_masked_skips
+                < votes._INK_VOTE_WINDOW + self._config.occlusion_hold_passes + 1
             ):
                 # Pos-saida da mao: a guarda ainda congela regiao nesta
                 # passada, entao ela nao deu voto limpo. Devolve a
