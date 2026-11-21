@@ -260,10 +260,18 @@ def test_coverage_fill_uses_the_paper_mean_bgr():
     sai igual à média BGR dos pixels cobertos do mesmo warp.
     """
     frame = np.full((720, 1280, 3), 220, np.uint8)  # mesa clara
-    frame[100:400, 100:350] = (30, 100, 170)  # papel cor própria
+    # Papel em dois tons: com o quad trapezoidal abaixo a media da
+    # camera difere da media do retificado — o teste distingue a
+    # media no dominio da camera (issue #100) de uma pos-warp.
+    frame[100:250, 100:350] = (60, 100, 200)
+    frame[250:400, 100:350] = (200, 80, 30)
     coverage = _mask_block(100, 400, 100, 350)
+    quad = np.array(
+        [[100.0, 100.0], [500.0, 140.0], [480.0, 400.0], [120.0, 380.0]],
+        dtype=np.float32,
+    )
     loop, _det, ink = _make_loop(
-        lambda _i: (QUAD.copy(), "paper", {"coverage_mask": coverage})
+        lambda _i: (quad.copy(), "paper", {"coverage_mask": coverage})
     )
     _drive(loop, 40, frame=frame)
     page = ink.pages[-1]
@@ -282,11 +290,23 @@ def test_coverage_fill_uses_the_paper_mean_bgr():
         )
         > 0
     )
+    paper_cam = (
+        cv2.erode((coverage > 127).astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+    ) & pipeline_module._quad_camera_mask(quad, frame.shape)
+    expected = pipeline_module._paper_mean_bgr(frame, paper_cam)
+    # O anel fronteiriço mistura fill e papel no warp LINEAR da
+    # imagem (a máscara comparada é NEAREST) — a comparação exata
+    # vale no miolo claramente fora da folha.
     inside = page.image[coverage_page]
-    expected = inside.mean(axis=0).astype(np.uint8)
-    outside = page.image[~coverage_page]
+    outside = page.image[
+        cv2.dilate(coverage_page.astype(np.uint8), np.ones((9, 9), np.uint8)) == 0
+    ]
     assert outside.size, "o teste precisa de região fora da folha"
-    assert (outside == expected).all()
+    np.testing.assert_allclose(outside.mean(axis=0), expected.astype(float), atol=1.5)
+    # Não-vacuo: papel sombreado + quad trapezoidal fazem a média
+    # pós-warp diferir da de câmera — um fill no domínio da página
+    # sairia ~6 níveis mais claro no azul e no vermelho.
+    assert np.abs(inside.mean(axis=0) - expected.astype(float)).max() > 3
 
 
 def test_coverage_config_off_ignores_the_mask():
