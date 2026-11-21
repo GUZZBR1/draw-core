@@ -51,31 +51,69 @@ _gui_ready() {
 import cv2, onnxruntime, draw
 from draw.app import _gui_backend_compiled
 assert _gui_backend_compiled(), "headless opencv"
+assert hasattr(cv2, "ximgproc"), "opencv sem modulos contrib"
 ' >/dev/null 2>&1
 }
 
 _drop_extra_cv2_providers() {
     # A second registered cv2 provider is a time bomb: the next exact
     # `uv sync` uninstalls one dist and deletes the shared cv2 files.
-    # When the GUI works the files are already the contrib ones — only
-    # the extra dist-info registration needs to go. Pure metadata
-    # removal: no wheel, no network, and nothing is ever uninstalled,
-    # so a working env stays launchable even offline on a cold cache.
+    # When the GUI works the files are already the contrib ones — the
+    # extra provider only needs to lose what it owns alone: its RECORD
+    # entries minus every file a retained distribution also lists, and
+    # only inside this venv's own purelib/platlib — registrations
+    # inherited from system or user site-packages are never touched.
+    # No wheel, no network, and nothing shared is ever removed, so a
+    # working env stays launchable even offline on a cold cache.
     _resolve_venv_paths
     [ -n "$VENV_PYTHON" ] && "$VENV_PYTHON" -c '
-import shutil
+import shutil, sysconfig
+from pathlib import Path
 from importlib.metadata import distributions
-names = {d.metadata["Name"].lower() for d in distributions()}
+
+extra = {
+    "opencv-contrib-python-headless",
+    "opencv-python",
+    "opencv-python-headless",
+}
+roots = {
+    Path(sysconfig.get_path(key)).resolve()
+    for key in ("purelib", "platlib")
+}
+dists = [
+    d for d in distributions()
+    if (p := getattr(d, "_path", None)) is not None
+    and Path(p).resolve().parent in roots
+]
+names = {d.metadata["Name"].lower() for d in dists}
 if "opencv-contrib-python" in names:
-    for d in distributions():
-        if d.metadata["Name"].lower() in {
-            "opencv-contrib-python-headless",
-            "opencv-python",
-            "opencv-python-headless",
-        }:
-            path = getattr(d, "_path", None)
-            if path is not None:
-                shutil.rmtree(path, ignore_errors=True)
+    keep = {
+        Path(d.locate_file(f)).resolve()
+        for d in dists
+        if d.metadata["Name"].lower() not in extra
+        for f in (d.files or ())
+    }
+    for d in dists:
+        if d.metadata["Name"].lower() not in extra:
+            continue
+        root = Path(d._path).resolve().parent
+        parents = set()
+        for f in d.files or ():
+            target = Path(d.locate_file(f)).resolve()
+            if target in keep or root not in target.parents:
+                continue
+            if target.is_file() or target.is_symlink():
+                target.unlink(missing_ok=True)
+                parents.update(target.parents)
+        for folder in sorted(
+            (p for p in parents if root in p.parents),
+            key=lambda p: -len(p.parts),
+        ):
+            try:
+                folder.rmdir()
+            except OSError:
+                pass
+        shutil.rmtree(d._path, ignore_errors=True)
 ' >/dev/null 2>&1 || true
 }
 

@@ -33,6 +33,8 @@ def launcher(tmp_path):
         "    for name in ('cv2', 'onnxruntime', 'draw', 'draw.app'):\n"
         "        sys.modules[name] = types.ModuleType(name)\n"
         "    sys.modules['draw.app']._gui_backend_compiled = lambda: not (prefix / 'gui-broken').exists()\n"
+        "    if not (prefix / 'ximgproc-missing').exists():\n"
+        "        sys.modules['cv2'].ximgproc = object()\n"
         "    site = prefix / 'site'\n"
         "    def _dists():\n"
         "        out = []\n"
@@ -45,11 +47,21 @@ def launcher(tmp_path):
         "                    for line in meta_file.read_text().splitlines()\n"
         "                    if line.startswith('Name:')\n"
         "                )\n"
-        "            out.append(types.SimpleNamespace(metadata={'Name': name}, _path=p))\n"
+        "            record = p / 'RECORD'\n"
+        "            files = (\n"
+        "                [row.split(',', 1)[0] for row in record.read_text().splitlines()]\n"
+        "                if record.exists() else []\n"
+        "            )\n"
+        "            out.append(types.SimpleNamespace(\n"
+        "                metadata={'Name': name}, _path=p, files=files,\n"
+        "                locate_file=lambda f, p=p: p.parent / f))\n"
         "        return out\n"
         "    meta = types.ModuleType('importlib.metadata')\n"
         "    meta.distributions = _dists\n"
         "    sys.modules['importlib.metadata'] = meta\n"
+        "    sc = types.ModuleType('sysconfig')\n"
+        "    sc.get_path = lambda key: str(site)\n"
+        "    sys.modules['sysconfig'] = sc\n"
         "    if (prefix / 'hand-installed').exists():\n"
         "        sys.modules['mediapipe'] = types.ModuleType('mediapipe')\n"
         "    else:\n"
@@ -210,11 +222,13 @@ if [ "$1" = "sync" ]; then
     case " $* " in
         *" --reinstall-package opencv-contrib-python "*)
             add_dist "$prefix" opencv-contrib-python
-            rm -f "$prefix/gui-broken" ;;
+            rm -f "$prefix/gui-broken" "$prefix/ximgproc-missing" ;;
         *" --extra gui "*)
-            add_dist "$prefix" opencv-contrib-python
-            [ -e "$prefix/site/opencv_contrib_python_headless-5.0.0.93.dist-info" ] ||
-                rm -f "$prefix/gui-broken" ;;
+            if [ ! -d "$prefix/site/opencv_contrib_python-5.0.0.93.dist-info" ]; then
+                add_dist "$prefix" opencv-contrib-python
+                [ -e "$prefix/site/opencv_contrib_python_headless-5.0.0.93.dist-info" ] ||
+                    rm -f "$prefix/gui-broken" "$prefix/ximgproc-missing"
+            fi ;;
     esac
     exit 0
 fi
@@ -244,19 +258,49 @@ _CV2_GUI_CHECK = (
 
 # Mesmo script do _drop_extra_cv2_providers no run.sh.
 _CV2_DROP_EXTRAS = (
-    "import shutil\n"
+    "import shutil, sysconfig\n"
+    "from pathlib import Path\n"
     "from importlib.metadata import distributions\n"
-    "names = {d.metadata['Name'].lower() for d in distributions()}\n"
+    "extra = {\n"
+    "    'opencv-contrib-python-headless',\n"
+    "    'opencv-python',\n"
+    "    'opencv-python-headless',\n"
+    "}\n"
+    "roots = {Path(sysconfig.get_path(k)).resolve() for k in ('purelib', 'platlib')}\n"
+    "dists = [\n"
+    "    d for d in distributions()\n"
+    "    if (p := getattr(d, '_path', None)) is not None\n"
+    "    and Path(p).resolve().parent in roots\n"
+    "]\n"
+    "names = {d.metadata['Name'].lower() for d in dists}\n"
     "if 'opencv-contrib-python' in names:\n"
-    "    for d in distributions():\n"
-    "        if d.metadata['Name'].lower() in {\n"
-    "            'opencv-contrib-python-headless',\n"
-    "            'opencv-python',\n"
-    "            'opencv-python-headless',\n"
-    "        }:\n"
-    "            path = getattr(d, '_path', None)\n"
-    "            if path is not None:\n"
-    "                shutil.rmtree(path, ignore_errors=True)\n"
+    "    keep = {\n"
+    "        Path(d.locate_file(f)).resolve()\n"
+    "        for d in dists\n"
+    "        if d.metadata['Name'].lower() not in extra\n"
+    "        for f in (d.files or ())\n"
+    "    }\n"
+    "    for d in dists:\n"
+    "        if d.metadata['Name'].lower() not in extra:\n"
+    "            continue\n"
+    "        root = Path(d._path).resolve().parent\n"
+    "        parents = set()\n"
+    "        for f in d.files or ():\n"
+    "            target = Path(d.locate_file(f)).resolve()\n"
+    "            if target in keep or root not in target.parents:\n"
+    "                continue\n"
+    "            if target.is_file() or target.is_symlink():\n"
+    "                target.unlink(missing_ok=True)\n"
+    "                parents.update(target.parents)\n"
+    "        for folder in sorted(\n"
+    "            (p for p in parents if root in p.parents),\n"
+    "            key=lambda p: -len(p.parts),\n"
+    "        ):\n"
+    "            try:\n"
+    "                folder.rmdir()\n"
+    "            except OSError:\n"
+    "                pass\n"
+    "        shutil.rmtree(d._path, ignore_errors=True)\n"
 )
 
 
@@ -288,10 +332,13 @@ _REPAIR_SYNC_FALLBACK = (
 )
 
 
-def _add_provider(venv, name):
-    dist_info = venv / "site" / f"{name.replace('-', '_')}-5.0.0.93.dist-info"
+def _add_provider(venv, name, files=()):
+    norm = name.replace("-", "_")
+    dist_info = venv / "site" / f"{norm}-5.0.0.93.dist-info"
     dist_info.mkdir(parents=True, exist_ok=True)
     (dist_info / "METADATA").write_text(f"Name: {name}\n")
+    rows = [f"{dist_info.name}/METADATA,,"] + [f"{f},," for f in files]
+    (dist_info / "RECORD").write_text("\n".join(rows) + "\n")
     return dist_info
 
 
@@ -302,6 +349,9 @@ def test_armed_env_collapses_providers_offline(tmp_path, launcher):
     desinstalava os providers antes de saber se havia wheel."""
     contrib = _add_provider(tmp_path / ".venv", "opencv-contrib-python")
     headless = _add_provider(tmp_path / ".venv", "opencv-contrib-python-headless")
+    # Dist-info fora do purelib do env ("herdado" de outra instalacao):
+    # o collapse nunca pode tocar nele.
+    foreign = _add_provider(tmp_path / "foreign-venv", "opencv-contrib-python-headless")
     (tmp_path / ".venv" / "hand-installed").touch()
     uv = launcher / "uv"
     uv.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> commands\nexit 7\n")
@@ -316,7 +366,81 @@ def test_armed_env_collapses_providers_offline(tmp_path, launcher):
     )
     assert not headless.exists()
     assert contrib.exists()
+    assert foreign.exists()
     assert not (tmp_path / "commands").exists()
+    launched = (tmp_path / "launches").read_text().strip()
+    assert tmp_path / launched == tmp_path / ".venv/bin/draw"
+
+
+def test_collapse_removes_only_exclusive_files(tmp_path, launcher):
+    """O dist-info extra sai junto com os arquivos que so ele possui
+    (.libs privados); arquivos cv2 compartilhados ficam intactos."""
+    site = tmp_path / ".venv" / "site"
+    contrib = _add_provider(
+        tmp_path / ".venv",
+        "opencv-contrib-python",
+        files=["cv2/shared.py", "cv2/gui.so"],
+    )
+    headless = _add_provider(
+        tmp_path / ".venv",
+        "opencv-contrib-python-headless",
+        files=[
+            "cv2/shared.py",
+            "opencv_contrib_python_headless.libs/libfoo.so",
+        ],
+    )
+    for rel in (
+        "cv2/shared.py",
+        "cv2/gui.so",
+        "opencv_contrib_python_headless.libs/libfoo.so",
+    ):
+        target = site / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x")
+    (tmp_path / ".venv" / "hand-installed").touch()
+    uv = launcher / "uv"
+    uv.write_text("#!/bin/sh\nexit 7\n")
+    uv.chmod(0o755)
+
+    subprocess.run(
+        [BASH, "run.sh", "--check"],
+        cwd=tmp_path,
+        env={"PATH": str(launcher)},
+        check=True,
+        timeout=10,
+    )
+    assert not headless.exists()
+    assert contrib.exists()
+    assert not (site / "opencv_contrib_python_headless.libs").exists()
+    assert (site / "cv2" / "shared.py").is_file()
+    assert (site / "cv2" / "gui.so").is_file()
+    launched = (tmp_path / "launches").read_text().strip()
+    assert tmp_path / launched == tmp_path / ".venv/bin/draw"
+
+
+def test_ximgproc_missing_forces_reinstall(tmp_path, launcher):
+    """opencv-python por cima do contrib: a janela abriria, mas sem
+    cv2.ximgproc a sonda falha e o repair reinstala o contrib por cima
+    antes de derrubar o dist-info do opencv-python."""
+    contrib = _add_provider(tmp_path / ".venv", "opencv-contrib-python")
+    opencv = _add_provider(tmp_path / ".venv", "opencv-python")
+    (tmp_path / ".venv" / "ximgproc-missing").touch()
+    (tmp_path / "wheel-cached").touch()
+    (tmp_path / "uv.lock").touch()
+    _fake_uv(launcher)
+
+    subprocess.run(
+        [BASH, "run.sh", "--check"],
+        cwd=tmp_path,
+        env={"PATH": str(launcher)},
+        check=True,
+        timeout=10,
+    )
+    syncs = [c for c in _commands(tmp_path) if c.startswith("sync")]
+    assert syncs == [_INSTALL_SYNC_HAND, _REPAIR_SYNC]
+    assert not (tmp_path / ".venv" / "ximgproc-missing").exists()
+    assert not opencv.exists()
+    assert contrib.exists()
     launched = (tmp_path / "launches").read_text().strip()
     assert tmp_path / launched == tmp_path / ".venv/bin/draw"
 
@@ -513,12 +637,11 @@ def test_real_uv_plain_sync_keeps_cv2_importable(tmp_path):
             )
         )
 
-    # Apos `uv sync --extra gui` o env ja esta armado: os dois dists
-    # registrados, contrib por cima. O colapso so-metadados do launcher
-    # desarma sem wheel e sem rede — mesmo com o cache frio.
-    assert gui_opens()
+    # Apos `uv sync --extra gui` os dois dists ficam registrados; o
+    # headless pode escrever por cima (GUI morta) — o repair offline
+    # reinstala o contrib por cima e desarma, sem uninstall.
     assert not only_contrib()
-    drop_extras()
+    repair()
     assert gui_opens()
     assert only_contrib()
 
@@ -560,3 +683,133 @@ def test_real_uv_plain_sync_keeps_cv2_importable(tmp_path):
     repair()
     assert gui_opens()
     assert only_contrib()
+
+
+@pytest.mark.slow
+def test_real_launcher_lifecycle(tmp_path):
+    """run.sh real contra uv real: env armado lanca e desarma so por
+    metadados (um provider "herdado" via PYTHONPATH sobrevive intacto);
+    depois de um `uv sync` manual que rearma com headless por cima, o
+    launcher repara offline e lanca — sem uninstall em nenhum ponto."""
+    uv = shutil.which("uv")
+    bash = shutil.which("bash")
+    if uv is None or bash is None:
+        pytest.skip("uv/bash nao esta no PATH")
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key != "VIRTUAL_ENV" and not key.startswith("UV_") and key != "PYTHONPATH"
+    }
+    env["UV_CACHE_DIR"] = str(tmp_path / "uvcache")
+    (tmp_path / "pyproject.toml").write_text(MINI_PYPROJECT)
+    lock = subprocess.run(
+        [uv, "lock"],
+        cwd=tmp_path,
+        env=env,
+        check=False,
+        timeout=120,
+        capture_output=True,
+    )
+    if lock.returncode != 0:
+        pytest.skip("sem rede para resolver o lock do fixture")
+
+    def run(args, **kw):
+        subprocess.run(args, cwd=tmp_path, env=env, check=True, timeout=300, **kw)
+
+    run([uv, "sync", "--extra", "gui"])
+    python = tmp_path / ".venv" / "bin" / "python"
+    site = Path(
+        subprocess.run(
+            [
+                str(python),
+                "-c",
+                "import sysconfig; print(sysconfig.get_path('purelib'))",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    )
+    # Minimo para a sonda do launcher: draw.app + onnxruntime.
+    (site / "onnxruntime.py").write_text("")
+    (site / "draw").mkdir()
+    (site / "draw" / "__init__.py").write_text("")
+    (site / "draw" / "app.py").write_text(
+        "import re, cv2\n"
+        "def _gui_backend_compiled():\n"
+        "    m = re.search(r'^[ \\t]*GUI:[ \\t]*(\\S*)', "
+        "cv2.getBuildInformation(), re.M)\n"
+        "    return bool(m and m.group(1).upper() "
+        "not in ('NONE','NO','OFF','FALSE','0'))\n"
+    )
+    draw_bin = tmp_path / ".venv" / "bin" / "draw"
+    draw_bin.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$0" >> launches\n[ "$1" = --check ]\n'
+    )
+    draw_bin.chmod(0o755)
+    (tmp_path / ".venv" / ".no_hand").touch()  # pula o retry do hand
+    shutil.copyfile(Path(__file__).resolve().parents[1] / "run.sh", tmp_path / "run.sh")
+    foreign = tmp_path / "foreign-site"
+    foreign_dist = foreign / "opencv_contrib_python_headless-9.9.9.dist-info"
+    foreign_dist.mkdir(parents=True)
+    (foreign_dist / "METADATA").write_text("Name: opencv-contrib-python-headless\n")
+    env["PYTHONPATH"] = str(foreign)
+    shutil.rmtree(tmp_path / "uvcache" / "simple-v21", ignore_errors=True)
+
+    def providers():
+        return subprocess.run(
+            [uv, "pip", "list", "--python", str(python)],
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+
+    # 1. Estado armado deterministico (par registrado, contrib por
+    # cima): o launcher lanca e desarma so por metadados — inclusive as
+    # .libs privadas do headless sao removidas pelo RECORD, e o provider
+    # herdado sobrevive.
+    run(
+        [
+            uv,
+            "sync",
+            "--locked",
+            "--offline",
+            "--inexact",
+            "--extra",
+            "gui",
+            "--reinstall-package",
+            "opencv-contrib-python",
+            "--no-install-package",
+            "opencv-contrib-python-headless",
+        ]
+    )
+    gui = subprocess.run([str(python), "-c", _CV2_GUI_CHECK], check=False)
+    assert gui.returncode == 0
+    assert "opencv-contrib-python-headless" in providers()
+    subprocess.run(
+        [bash, "run.sh", "--check"], cwd=tmp_path, env=env, check=True, timeout=60
+    )
+    dists = providers()
+    assert "opencv-contrib-python-headless" not in dists
+    assert "opencv-contrib-python " in dists
+    assert not (site / "opencv_contrib_python_headless.libs").exists()
+    assert foreign_dist.exists()
+    assert (tmp_path / ".venv" / "bin" / "draw").name in (
+        tmp_path / "launches"
+    ).read_text()
+
+    # 2. `uv sync` manual rearma com headless por cima: o launcher
+    # repara offline (cache quente pelo proprio setup) e lanca.
+    run([uv, "sync", "--inexact"])
+    gui = subprocess.run([str(python), "-c", _CV2_GUI_CHECK], check=False)
+    assert gui.returncode != 0
+    subprocess.run(
+        [bash, "run.sh", "--check"], cwd=tmp_path, env=env, check=True, timeout=60
+    )
+    dists = providers()
+    assert "opencv-contrib-python-headless" not in dists
+    assert "opencv-contrib-python " in dists
+    gui = subprocess.run([str(python), "-c", _CV2_GUI_CHECK], check=False)
+    assert gui.returncode == 0
+    assert (tmp_path / "launches").read_text().count("draw") == 2
