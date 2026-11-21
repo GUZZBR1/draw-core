@@ -216,11 +216,12 @@ def test_coverage_mask_gates_votes_off_sheet():
     # Sem mão sintética o visible segue None — a cobertura viaja
     # em canal próprio e não mistura semântica de oclusão.
     assert all(v is None for _g, _c, v, _cov in ink.submitted)
-    # A metade direita do quad cai sobre "mesa": nunca pode votar.
-    page_h, page_w = gated[-1].shape
-    assert not gated[-1][:, int(page_w * 0.60) :].any()
-    # E a região de folha segue aberta para o voto.
-    assert gated[-1][:, : int(page_w * 0.30)].all()
+    # A máscara sobe na grade da CÂMERA (720x1280, issue #100):
+    # x>=300 é mesa — nunca pode votar — e o miolo coberto segue
+    # aberto (a erosão de borda desconta ~2 px).
+    assert gated[-1].shape == (720, 1280)
+    assert not gated[-1][:, 320:].any()
+    assert gated[-1][10:700, 50:280].all()
 
 
 def test_coverage_config_off_ignores_the_mask():
@@ -520,8 +521,10 @@ def test_ink_divnorm_bright_desk_does_not_darken_paper_edge():
     _drive(loop, 40, frame=frame)
     page = ink.pages[-1]
     img = page.image.mean(axis=2)
-    paper = page.coverage
-    assert paper is not None and paper.any()
+    assert page.coverage is not None and page.coverage.any()
+    # A cobertura sobe na grade da câmera (issue #100) — projeta à
+    # grade da página para ler os pixels do papel retificado.
+    paper = pipeline_module.paper.warp_sheet(page.coverage.astype(np.uint8), QUAD) > 0
     vals = img[paper]
     # Sem o preenchimento prévio o papel perto da mesa caía para ~155
     # contra ~235 no interior; aqui a página sai uniforme.

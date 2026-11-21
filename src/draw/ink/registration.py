@@ -155,8 +155,15 @@ def _deadband_step(frozen, corners, over):
     return frozen, frozen, over, False, shift
 
 
-def _register_ink_probability(prob, anchor, corners, visible=None):
-    """Registra a passada na geometria ancora; devolve (prob, visible)."""
+def _register_ink_probability(prob, anchor, corners, visible=None, visible_cam=None):
+    """Registra a passada na geometria ancora; devolve (prob, visible).
+
+    `visible` é a máscara já na grade da página; `visible_cam` (issue
+    #100) é a mesma máscara na grade da câmera — quando presente, a
+    versão registrada sai por UM resample câmera→âncora com a
+    homografia A da âncora (M·C = A), em vez do NEAREST
+    página→âncora de sempre (dois resamples acumulados por pixel).
+    """
     if visible is not None:
         prob = prob.copy()
         prob[~visible] = 0.0
@@ -172,7 +179,18 @@ def _register_ink_probability(prob, anchor, corners, visible=None):
             flags=cv2.INTER_LINEAR,
             borderValue=0.0,
         )
-        if visible is not None:
+        if visible_cam is not None:
+            visible = (
+                cv2.warpPerspective(
+                    visible_cam.astype(np.uint8),
+                    _corners_page_matrix(anchor, size[0], size[1]),
+                    size,
+                    flags=cv2.INTER_NEAREST,
+                    borderValue=0,
+                )
+                > 0
+            )
+        elif visible is not None:
             visible = (
                 cv2.warpPerspective(
                     visible.astype(np.uint8),

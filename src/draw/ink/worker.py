@@ -419,21 +419,26 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         malformado nao pode derrubar a thread da tinta; sem
         cantos, a passada entra na propria geometria.
 
-        visible e a mascara de visibilidade DESTE warp (True onde
-        a camera ve a pagina; False sob a mao), na mesma grade do
-        warp. Onde ela e False, a passada se abstem: a evidencia
+        visible e a mascara de visibilidade do FRAME que originou
+        este warp (True onde a camera ve a pagina; False sob a
+        mao), NA GRADE DA CAMERA quando corners vem junto — a
+        passada a retifica para a pagina ou direto para a ancora
+        (resample unico, issue #100). Sem cantos nao ha geometria
+        de camera: ela entra na grade do proprio warp, como antes.
+        Onde ela e False, a passada se abstem: a evidencia
         nao vota, a virada nao julga e a decisao de identidade so
-        olha a tinta anterior visivel. Formato divergente do warp
-        e tratado como ausente, pela mesma razao dos cantos.
+        olha a tinta anterior visivel. Formato nao-2D e tratado
+        como ausente, pela mesma razao dos cantos.
 
-        coverage e a cobertura de folha DESTE warp (True onde a
-        retificacao cobre papel de verdade; False onde o quad
+        coverage e a cobertura de folha do mesmo FRAME (True onde
+        a retificacao cobre papel de verdade; False onde o quad
         admitiu o que esta fora da folha — mesa que entra por
-        quad largo ou atrasado depois de movimento). Onde ela e
-        False, a passada so vota sobre a tinta que a ancora ja
-        conhece: re-confirmar e retrair o que existe, sim; tinta
-        nova nascendo fora da folha, nunca. Assim o defeito
-        semantico da mascara (traco denso virando "fundo" numa
+        quad largo ou atrasado depois de movimento), na mesma
+        regra de grade do visible. Onde ela e False, a passada so vota
+        sobre a tinta que a ancora ja conhece: re-confirmar e
+        retrair o que existe, sim; tinta nova nascendo fora da
+        folha, nunca. Assim o defeito semantico da mascara
+        (traco denso virando "fundo" numa
         pose nova) nao congela a tinta real — ela ja e tinta —
         e a banda de mesa, que nunca foi tinta, segue vedada.
         """
@@ -454,14 +459,14 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 visible = np.asarray(visible, dtype=bool)
             except (TypeError, ValueError):
                 visible = None
-            if visible is not None and visible.shape != warped.shape[:2]:
+            if visible is not None and visible.ndim != 2:
                 visible = None
         if coverage is not None:
             try:
                 coverage = np.asarray(coverage, dtype=bool)
             except (TypeError, ValueError):
                 coverage = None
-            if coverage is not None and coverage.shape != warped.shape[:2]:
+            if coverage is not None and coverage.ndim != 2:
                 coverage = None
         with self._condition:
             if self._stopped or generation != self._generation:
@@ -1024,6 +1029,33 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         force_publish = False
         reg_info = {}
         try:
+            # As mascaras do WarpedPage sao de CAMERA quando a
+            # passada tem cantos (issue #100): visivel na grade da
+            # pagina e o mesmo resultado de sempre — o LINEAR da
+            # oclusao invertida *255 so e 0 onde TODO pixel-fonte
+            # era visivel, e o borderValue=0 fora do frame cai em
+            # "visivel" como o `warp(hand) == 0` que o laco
+            # produzia (bit-identico). A versao da ancora sai pelo
+            # resample unico no registro. Sem cantos nao ha
+            # geometria de camera: quem submete sem quad entrega a
+            # mascara ja na grade do warp, como antes.
+            visible_cam = None
+            if visible is not None and corners is not None:
+                visible_cam = visible
+                visible = (
+                    cv2.warpPerspective(
+                        (~visible).astype(np.uint8) * 255,
+                        registration._corners_page_matrix(
+                            corners, warped.shape[1], warped.shape[0]
+                        ),
+                        (warped.shape[1], warped.shape[0]),
+                        flags=cv2.INTER_LINEAR,
+                        borderValue=0,
+                    )
+                    == 0
+                )
+            coverage_cam = coverage if corners is not None else None
+            coverage_page_static = coverage if corners is None else None
             if visible is None and self._hand_masker is not None:
                 hand_mask = self._hand_masker.mask(warped)
                 if hand_mask is not None:
@@ -1143,7 +1175,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 )
             registered_prob, registered_visible = (
                 registration._register_ink_probability(
-                    prob, anchor, registration_corners, visible
+                    prob, anchor, registration_corners, visible, visible_cam=visible_cam
                 )
             )
             self._last_registration = (
@@ -1210,7 +1242,11 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     registration_corners = anchor.copy()
                     registered_prob, registered_visible = (
                         registration._register_ink_probability(
-                            prob, anchor, registration_corners, visible
+                            prob,
+                            anchor,
+                            registration_corners,
+                            visible,
+                            visible_cam=visible_cam,
                         )
                     )
                     self._last_registration = (
@@ -1229,7 +1265,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                             )
                             > 0
                         )
-            if coverage is not None and coverage.shape == prob.shape:
+            if coverage_cam is not None or coverage_page_static is not None:
                 # Gate de re-confirmacao (cobertura de folha do loop): onde
                 # o warp nao e folha, so a tinta que a ancora JA
                 # conhece vota — re-confirmar e retrair o que
@@ -1240,24 +1276,55 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 # sao "fora da mascara perto dela", mas so um ja
                 # era tinta. Sem tinta de ancora o gate e o veto
                 # seco de sempre.
+                coverage_page = coverage_page_static
+                coverage_anchor = None
+
                 def _covered(reg_corners):
-                    if anchor is None or reg_corners is None:
-                        return coverage
-                    reg_matrix = registration._registration_matrix(
-                        anchor, reg_corners, prob.shape
-                    )
-                    if registration._registration_is_identity(reg_matrix):
-                        return coverage
-                    return (
-                        cv2.warpPerspective(
-                            coverage.astype(np.uint8),
-                            reg_matrix,
-                            (prob.shape[1], prob.shape[0]),
-                            flags=cv2.INTER_NEAREST,
-                            borderValue=0,
+                    nonlocal coverage_page, coverage_anchor
+                    size = (prob.shape[1], prob.shape[0])
+                    if (
+                        coverage_cam is not None
+                        and anchor is not None
+                        and reg_corners is not None
+                    ):
+                        reg_matrix = registration._registration_matrix(
+                            anchor, reg_corners, prob.shape
                         )
-                        > 0
-                    )
+                        if not registration._registration_is_identity(reg_matrix):
+                            if coverage_anchor is None:
+                                # Resample único câmera→âncora (issue
+                                # #100): M·C = A — a cobertura chega
+                                # à grade da âncora direto da fonte.
+                                coverage_anchor = (
+                                    cv2.warpPerspective(
+                                        coverage_cam.astype(np.uint8),
+                                        registration._corners_page_matrix(
+                                            anchor, size[0], size[1]
+                                        ),
+                                        size,
+                                        flags=cv2.INTER_NEAREST,
+                                        borderValue=0,
+                                    )
+                                    > 0
+                                )
+                            return coverage_anchor
+                    if coverage_page is None:
+                        # Sem registro (ou identidade): a grade da
+                        # própria passada — o mesmo `warped > 127`
+                        # que o laço produzia.
+                        coverage_page = (
+                            cv2.warpPerspective(
+                                coverage_cam.astype(np.uint8) * 255,
+                                registration._corners_page_matrix(
+                                    corners, size[0], size[1]
+                                ),
+                                size,
+                                flags=cv2.INTER_LINEAR,
+                                borderValue=0,
+                            )
+                            > 127
+                        )
+                    return coverage_page
 
                 def _gate(evidence, reg_coverage):
                     if anchor_ink is None:
@@ -1562,6 +1629,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                             self._anchor_corners,
                             (self._reg_frozen_corners if reg_deadband else corners),
                             visible,
+                            visible_cam=visible_cam,
                         )
                     )
                     self._last_registration = (
@@ -1620,6 +1688,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                             self._anchor_corners,
                             (self._reg_frozen_corners if reg_deadband else corners),
                             visible,
+                            visible_cam=visible_cam,
                         )
                     )
                     self._last_registration = (

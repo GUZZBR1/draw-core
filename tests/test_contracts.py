@@ -322,8 +322,6 @@ def test_warped_page_rejects_bad_fields():
     with pytest.raises(ValueError):
         _warped_page(visible=np.ones((8, 8), dtype=np.float32))
     with pytest.raises(ValueError):
-        _warped_page(visible=np.ones((9, 9), dtype=bool))
-    with pytest.raises(ValueError):
         _warped_page(coverage=np.ones((8, 8, 3), dtype=bool))
 
 
