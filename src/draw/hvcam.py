@@ -1843,9 +1843,3 @@ def _probe_hvcam_stream(capture, attempts=3):
     if len(timestamps) >= 2 and timestamps[-1] > timestamps[0]:
         measured_fps = (len(timestamps) - 1) * 1000.0 / (timestamps[-1] - timestamps[0])
     return True, measured_fps
-
-
-def _probe_hvcam_frame(capture, attempts=3):
-    """Confirma que a fonte hvcam entrega ao menos um quadro valido."""
-    ok, _fps = _probe_hvcam_stream(capture, attempts=attempts)
-    return ok

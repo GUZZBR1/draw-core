@@ -253,11 +253,6 @@ def _detect_sheet_combined_traced(frame, neural_detector):
     return _done(corners, verdict, "classic" if corners is not None else "none")
 
 
-def _detect_sheet_combined(frame, neural_detector):
-    corners, verdict = _detect_sheet_combined_traced(frame, neural_detector)[:2]
-    return corners, verdict
-
-
 def run_check(source=0, helper_token_file=None):
     """Validacao da camera, porta por porta. Retorna 0 ou 1.
 
@@ -1649,7 +1644,6 @@ def run(
                 on_acquisition=emit_acquisition,
                 on_ink=ink_stream.publish if ink_stream is not None else _ignore_ink,
                 ink_meta=ink_stream is not None,
-                save_page_snapshot=save_page_snapshot,
                 config=pipeline_config,
             )
             tracker = pipeline.tracker
