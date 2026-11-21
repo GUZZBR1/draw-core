@@ -432,6 +432,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._identity_recovery_requested = False
         self._identity_defer_count = 0
         self._identity_switch_votes = 0
+        # Memo da guarda por quad: a ancora fica estavel por longas
+        # sequencias e rasterizar a mascara cheia a cada passada,
+        # sob o lock, custa arrays da pagina inteira.
+        self._guard_memo = {}
         # Degrau entre quads consecutivos (a entrada de cadencia
         # geometrica do follow e do portao de remocao).
         self._previous_corners = None
@@ -515,6 +519,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._identity_recovery_requested = bool(preserve_identity)
             self._identity_defer_count = 0
             self._identity_switch_votes = 0
+            self._guard_memo.clear()
             self._previous_corners = None
             if preserve_identity:
                 reference = self._accumulator._confirmed
@@ -559,6 +564,37 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._delta_prev = None
             self._condition.notify_all()
             return self._generation
+
+    def _cached_border_guard(self, shape, corners):
+        """Guarda da passada com memo por quad.
+
+        Rasterizar a mascara cheia a cada passada, sob o lock,
+        aloca arrays da pagina inteira; a ancora fica estavel por
+        longas sequencias, entao a mascara depende so do quad.
+        """
+        key = (shape, None if corners is None else corners.tobytes())
+        if key not in self._guard_memo:
+            if len(self._guard_memo) >= 8:
+                self._guard_memo.clear()
+            self._guard_memo[key] = _border_guard_mask(
+                shape,
+                self._config.border_guard_px,
+                corners,
+                min_auto_side=200,
+            )
+        return self._guard_memo[key]
+
+    def _pass_sampled(self, anchor, corners, shape, registered_visible):
+        """Pegada amostrada do registro, so quando ela testemunha.
+
+        Com mascara de visibilidade a mesma pegada ja sai dobrada
+        no resample dela (borderValue=0); sem guarda ativa, o
+        dominio valido nao a consome — e o warp da pagina inteira
+        seria descartado.
+        """
+        if self._config.border_guard_px == 0 or registered_visible is not None:
+            return None
+        return registration._sampled_footprint(anchor, corners, shape)
 
     def submit(self, page):
         """Entrega a página retificada mais recente (latest-wins).
@@ -1420,8 +1456,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # onde a passada nao alcancou a ancora): separa "nao
             # observei" de "observei vazio" quando nao ha mascara de
             # visibilidade — entra no dominio valido la no voto.
-            sampled = registration._sampled_footprint(
-                anchor, registration_corners, prob.shape
+            sampled = self._pass_sampled(
+                anchor, registration_corners, prob.shape, registered_visible
             )
             # Mapa registrado SO pela camera: e o que a arbitragem de
             # ancora compara com o mapa cru para julgar pouso x quad ruim.
@@ -1495,8 +1531,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         registration_corners.copy(),
                         None if corners is None else corners.copy(),
                     )
-                    sampled = registration._sampled_footprint(
-                        anchor, registration_corners, prob.shape
+                    sampled = self._pass_sampled(
+                        anchor, registration_corners, prob.shape, registered_visible
                     )
                 if motion_decision == "correct":
                     # A evidencia volta para a grade da ancora pelo
@@ -1512,15 +1548,16 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     # A correcao afim tambem recorta a pegada: a
                     # faixa que o warp_back preenche de zeros nao
                     # foi observada.
-                    sampled = (
-                        motion_fix.warp_back(
-                            np.ones(prob.shape, np.uint8)
-                            if sampled is None
-                            else sampled.astype(np.uint8),
-                            nearest=True,
+                    if self._config.border_guard_px != 0 and registered_visible is None:
+                        sampled = (
+                            motion_fix.warp_back(
+                                np.ones(prob.shape, np.uint8)
+                                if sampled is None
+                                else sampled.astype(np.uint8),
+                                nearest=True,
+                            )
+                            > 0
                         )
-                        > 0
-                    )
             if coverage_cam is not None or coverage_page_static is not None:
                 # Gate de re-confirmacao (cobertura de folha do loop): onde
                 # o warp nao e folha, so a tinta que a ancora JA
@@ -1689,26 +1726,38 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     # containment nem rejeitar a pagina vazia; a
                     # guarda do voto final segue amarrada a ancora
                     # final, calculada depois.
-                    identity_guard = _border_guard_mask(
-                        prob.shape,
-                        self._config.border_guard_px,
-                        identity_corners,
-                        min_auto_side=200,
+                    identity_guard = self._cached_border_guard(
+                        prob.shape, identity_corners
                     )
                     inspected = identity_visible
                     if inspected is None:
                         inspected = identity_guard
                     elif identity_guard is not None:
                         inspected = inspected & identity_guard
-                    prior_eval = prior if inspected is None else (prior & inspected)
+                    # A guarda e estatica: o que ela exclui nao
+                    # volta a aparecer e sai do denominador da
+                    # oclusao, que mede so o escondido pela mao
+                    # DESTA passada — senao a tinta sob a faixa
+                    # segura a decisao ate o timeout de quarentena.
+                    prior_guard = (
+                        prior if identity_guard is None else (prior & identity_guard)
+                    )
+                    prior_guard_px = int(np.count_nonzero(prior_guard))
+                    prior_eval = (
+                        prior_guard
+                        if identity_visible is None
+                        else (prior_guard & identity_visible)
+                    )
                     prior_eval_px = int(np.count_nonzero(prior_eval))
                     if (
                         identity_visible is not None
-                        and prior_px > 0
+                        and prior_guard_px > 0
                         and prior_eval_px
                         < max(
                             identity._IDENTITY_MIN_VISIBLE_PX,
-                            int(identity._IDENTITY_MIN_VISIBLE_FRACTION * prior_px),
+                            int(
+                                identity._IDENTITY_MIN_VISIBLE_FRACTION * prior_guard_px
+                            ),
                         )
                     ):
                         # Tinta anterior quase toda coberta pela mao:
@@ -1909,10 +1958,11 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         ),
                         None if corners is None else corners.copy(),
                     )
-                    sampled = registration._sampled_footprint(
+                    sampled = self._pass_sampled(
                         self._anchor_corners,
                         (self._reg_frozen_corners if reg_deadband else corners),
                         prob.shape,
+                        registered_visible,
                     )
                     force_publish = True
             follow_abstain = False
@@ -1973,10 +2023,11 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         ),
                         None if corners is None else corners.copy(),
                     )
-                    sampled = registration._sampled_footprint(
+                    sampled = self._pass_sampled(
                         self._anchor_corners,
                         (self._reg_frozen_corners if reg_deadband else corners),
                         prob.shape,
+                        registered_visible,
                     )
                     arbitration_abstain = False
                     force_publish = True
@@ -2046,12 +2097,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             guard_corners = (
                 self._anchor_corners if self._anchor_corners is not None else corners
             )
-            guard_mask = _border_guard_mask(
-                prob.shape,
-                self._config.border_guard_px,
-                guard_corners,
-                min_auto_side=200,
-            )
+            guard_mask = self._cached_border_guard(prob.shape, guard_corners)
             # A pegada amostrada entra no dominio valido so com a
             # guarda ativa: sem ela, a abstencao legada sem mascara
             # de visibilidade continua valendo (zeros de
