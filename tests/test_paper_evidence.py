@@ -254,17 +254,23 @@ def test_bright_cyan_patch_with_no_red_is_not_paper():
     assert not ok[80:176, 112:272].any()
 
 
-def test_frozen_border_without_pending_ink_is_not_pending():
-    acc = accumulator_mod.LayeredInkAccumulator()
+def test_recovery_counts_only_shadow_that_cleared_not_permanent_border():
+    config = InkConfig(occlusion_hold_passes=3)
+    acc = accumulator_mod.LayeredInkAccumulator(config=config)
     prob = _ink_prob()
     _confirm(acc, prob)
+    visible = np.ones((H, W), bool)
     ok_all = np.ones((H, W), bool)
     border = ok_all.copy()
-    border[:, :20] = False  # borda de pagina permanente, sem tinta
-    result = acc.add(prob, np.ones((H, W), bool), paper_ok=border)
-    assert result["frozen_px"] > 0 and result["frozen_pending_px"] == 0
-    # Traco novo sob regiao congelada: isso sim e pendente.
-    new = prob.copy()
-    new[140:150, 5:15] = 0.95
-    result = acc.add(new, np.ones((H, W), bool), paper_ok=border)
-    assert result["frozen_pending_px"] > 0
+    border[:, :20] = False  # borda permanente
+    for _ in range(4):
+        result = acc.add(prob, visible, paper_ok=border)
+        assert result["frozen_px"] > 0 and result["recovering_px"] == 0
+    shadow = border.copy()
+    shadow[95:135, 145:215] = False
+    acc.add(prob, visible, paper_ok=shadow)
+    cleared = acc.add(prob, visible, paper_ok=border)
+    assert cleared["recovering_px"] >= 40 * 70
+    for _ in range(4):
+        result = acc.add(prob, visible, paper_ok=border)
+    assert result["recovering_px"] == 0

@@ -1,6 +1,5 @@
 """Guarda fotometrica pelo worker real (issue #129): mao sem mascara."""
 
-import dataclasses
 import time
 
 import numpy as np
@@ -71,6 +70,15 @@ def _no_idle_probe(monkeypatch):
     time.sleep(0.1)
 
 
+def _pass_until(worker, generation, image, done, limit):
+    """Submete ate done(snapshot) ou o limite: parar a tempo, porque a
+    trabalhadora descansa de verdade quando nao ha mais o que votar."""
+    for _ in range(limit):
+        if done(worker.poll(generation, 0)):
+            return
+        _pass(worker, generation, image)
+
+
 def _hand_image():
     image = _paper()
     image[HAND] = (60, 62, 64)  # mao/sombra escura que o MediaPipe nao viu
@@ -135,54 +143,24 @@ def test_black_frame_after_a_reference_freezes_instead_of_erasing(monkeypatch):
         worker.stop()
 
 
-def test_post_exit_confirm_window_is_refunded_while_the_guard_freezes(monkeypatch):
+def test_post_exit_confirm_window_is_rearmed_while_a_shadow_recovers(monkeypatch):
     worker, ink, generation = _run(monkeypatch, InkConfig(post_exit_full_window=True))
     try:
         _no_idle_probe(monkeypatch)
         worker.set_hand_presence(True)
-        # Traco novo sob a sombra: o que a espera pos-saida precisa.
-        pending = (slice(130, 142), slice(212, 348))
-        ink.content = _prob(covered_ink=False, extra=pending)
+        for _ in range(2):
+            _pass(worker, generation, _hand_image())
         worker.set_hand_presence(False)
         window = worker._post_exit_confirm_passes()
         assert window > 1
-        for _ in range(2):
-            _pass(worker, generation, _hand_image())
-        # A guarda congelou as passadas pos-saida: a janela segue armada.
-        assert worker._confirm_passes >= 1
+        _pass(worker, generation, _paper())  # sombra saiu: papel em recuperacao
+        assert worker._confirm_passes == window
         assert worker._confirm_masked_skips >= 1
     finally:
         worker.stop()
 
 
-def test_stroke_finished_under_a_shadow_confirms_after_hand_exit_at_production(
-    monkeypatch,
-):
-    """Producao pede 3 votos fortes pos-saida; a guarda segura a regiao por
-    occlusion_hold_passes. O descanso nao pode chegar antes do traco."""
-    # Hold maior que a janela de voto: a devolucao precisa cobrir o hold inteiro.
-    config = dataclasses.replace(InkConfig.production(), occlusion_hold_passes=5)
-    worker, ink, generation = _run(monkeypatch, config)
-    try:
-        for _ in range(14):  # pagina madura e parada: o descanso esta ao alcance
-            _pass(worker, generation, _paper())
-        worker.set_hand_presence(True)
-        late = (slice(224, 240), slice(16, 120))
-        ink.content = _prob(extra=late)
-        shadow = _paper()
-        shadow[(slice(208, 256), slice(0, 160))] = (60, 62, 64)
-        for _ in range(4):
-            _pass(worker, generation, shadow)
-        assert not worker.poll(generation, 0).confirmed[late].any()
-        worker.set_hand_presence(False)
-        for _ in range(config.occlusion_hold_passes + 5):
-            _pass(worker, generation, _paper())
-        assert worker.poll(generation, 0).confirmed[late].all()
-    finally:
-        worker.stop()
-
-
-def test_permanent_border_without_pending_ink_does_not_spend_refunds(monkeypatch):
+def test_permanent_border_does_not_rearm_the_window(monkeypatch):
     worker, ink, generation = _run(monkeypatch, InkConfig(post_exit_full_window=True))
     try:
         worker.set_hand_presence(True)
@@ -192,5 +170,67 @@ def test_permanent_border_without_pending_ink_does_not_spend_refunds(monkeypatch
         for _ in range(2):
             _pass(worker, generation, image)
         assert worker._confirm_masked_skips == 0
+    finally:
+        worker.stop()
+
+
+def _mature(monkeypatch, config, *, idle_probe=False):
+    worker, ink, generation = _run(monkeypatch, config)
+    for _ in range(14):  # pagina madura e parada: o descanso esta ao alcance
+        _pass(worker, generation, _paper())
+    if not idle_probe:
+        _no_idle_probe(monkeypatch)
+    return worker, ink, generation
+
+
+def test_stroke_hidden_on_the_first_post_exit_pass_still_confirms(monkeypatch):
+    """Sombra ainda cobre o traco na 1a passada pos-saida (modelo ve 0,0) e
+    some na seguinte: a janela cheia de votos precisa sobrar apos o hold."""
+    config = InkConfig.production()
+    worker, ink, generation = _mature(monkeypatch, config)
+    try:
+        worker.set_hand_presence(True)
+        late = (slice(224, 240), slice(16, 120))
+        shadow = _paper()
+        shadow[(slice(208, 256), slice(0, 160))] = (60, 62, 64)
+        for _ in range(3):
+            _pass(worker, generation, shadow)
+        worker.set_hand_presence(False)
+        ink.content = _prob()  # o modelo ainda nao ve o traco sob a sombra
+        _pass(worker, generation, shadow)
+        ink.content = _prob(extra=late)
+        _pass_until(
+            worker,
+            generation,
+            _paper(),
+            lambda snap: snap.confirmed[late].all(),
+            config.occlusion_hold_passes + 8,
+        )
+        assert worker.poll(generation, 0).confirmed[late].all()
+    finally:
+        worker.stop()
+
+
+def test_stroke_erased_under_a_shadow_is_removed_after_hand_exit(monkeypatch):
+    """Apagou um traco confirmado sob a sombra da mao: ao levantar a mao, o
+    hold barra a remocao, mas o descanso nao pode chegar antes dela."""
+    config = InkConfig.production()
+    worker, ink, generation = _mature(monkeypatch, config, idle_probe=True)
+    try:
+        worker.set_hand_presence(True)
+        ink.content = _prob(covered_ink=False)
+        for _ in range(3):
+            _pass(worker, generation, _hand_image())
+        worker.set_hand_presence(False)
+        _pass_until(
+            worker,
+            generation,
+            _paper(),
+            lambda snap: not snap.confirmed[COVERED].any(),
+            config.occlusion_hold_passes + 12,
+        )
+        snap = worker.poll(generation, 0)
+        assert not snap.confirmed[COVERED].any()
+        assert snap.confirmed[WITNESS].all()
     finally:
         worker.stop()

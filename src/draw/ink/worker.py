@@ -56,6 +56,9 @@ _NO_HAND_REST_AFTER_STILL_PASSES = 4
 # de acordar desse clone — com a porta de fronteira, ela nao
 # acumula mais.
 _REST_MIN_GENERATION_PASSES = 3
+# Pixels minimos de papel em recuperacao (hold) para re-armar a janela de
+# confirmacao pos-saida; abaixo disso e ruido de borda.
+_RECOVERY_MIN_PX = 256
 
 
 _REST_QUIET_PASSES = 2
@@ -2020,17 +2023,20 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # warp e nao pode segurar a trabalhadora acordada).
             if (
                 self._spent_confirm_pass
-                and result["frozen_pending_px"]
+                and result["recovering_px"] >= _RECOVERY_MIN_PX
                 and self._confirm_passes < self._post_exit_confirm_passes()
                 and self._confirm_masked_skips
                 < votes._INK_VOTE_WINDOW + self._config.occlusion_hold_passes + 1
             ):
-                # Pos-saida da mao: a guarda ainda congela regiao nesta
-                # passada, entao ela nao deu voto limpo. Devolve a
-                # passada da janela (limitado, como as mascaradas) para o
-                # descanso nao chegar antes do traco final confirmar.
+                # Pos-saida da mao: uma sombra esta saindo (papel de volta,
+                # regiao ainda no hold), entao as passadas gastas ate aqui
+                # nao deram voto limpo — nem para tinta que o modelo nao
+                # via sob a sombra, nem para remocao que o hold barrou.
+                # Re-arma a janela cheia (limitado pelo teto de devolucoes)
+                # para que, solto o hold, haja uma janela inteira de votos
+                # antes do descanso.
                 self._confirm_masked_skips += 1
-                self._confirm_passes += 1
+                self._confirm_passes = self._post_exit_confirm_passes()
             self._generation_passes += 1
             if result["confirmed_changed"] or result["turn"] or motion_abstain:
                 # Passada vetada nao e quietude: a folha esta fora do
