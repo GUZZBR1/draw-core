@@ -35,6 +35,7 @@ _GAIN_DEADBAND_LOG = math.log1p(0.03)
 _GLOBAL_EXPOSURE_LOG_TOLERANCE = math.log1p(0.01)
 _CLIP_RELEASE_FRACTION = 1e-4
 _MIN_SHARED_SAMPLES = 32
+_CEILING_GUARD_LOG = math.log(_MAX_GAIN) - _GAIN_DEADBAND_LOG
 
 
 def _sampled_grid(image, mask):
@@ -144,6 +145,11 @@ class PaperGainSmoother:
                     clip_sample = clip_sample[clip_mask]
         if self._gain is None or self._updated_at is None:
             self._gain = target
+            if math.log(target) >= _CEILING_GUARD_LOG:
+                # O primeiro quadro vale pela mesma regra do teto —
+                # sem a verificação ele cliparia a faixa clara na
+                # primeira passada (Devin Review PR #140).
+                self._gain = self._ceiling_safe_gain(target, clip_sample, clip_is_color)
             self._updated_at = now
             self._prev_sample = sample
             self._prev_mask = sample_mask
@@ -186,25 +192,15 @@ class PaperGainSmoother:
         error = target_log - current_log
         alpha = -math.expm1(-elapsed / _GAIN_TIME_CONSTANT_SECONDS)
 
-        if target >= _MAX_GAIN:
-            # Alvo travado no teto não mede a cena: o limite real é o
-            # maior ganho que não satura a observação — referência 1x,
-            # não o ganho retido. Pixels já clipados pelo retido saíam
-            # da janela do predicado e um clarão breve os apagava para
-            # sempre (Devin Review PR #140). O limite seguro pode ficar
-            # ABAIXO do retido — é o que desfaz a catraca.
+        if target_log >= _CEILING_GUARD_LOG:
+            # Alvos dentro da banda morta do teto são indistinguíveis
+            # dele — e o teto não mede a cena: o limite real é o maior
+            # ganho que não satura a observação (referência 1x, não o
+            # ganho retido). Valer dos dois lados do teto impede o
+            # flicker quando a máscara cruza o corte (Devin Review
+            # PR #140): a mesma cena produz a mesma saída.
             proposed = math.exp(current_log + alpha * error)
-            if self._saturates_newly(clip_sample, clip_is_color, proposed, 1.0):
-                lo, hi = 1.0, proposed
-                for _ in range(10):
-                    mid = math.sqrt(lo * hi)
-                    if self._saturates_newly(clip_sample, clip_is_color, mid, 1.0):
-                        hi = mid
-                    else:
-                        lo = mid
-                self._gain = lo
-                return self._gain
-            self._gain = proposed
+            self._gain = self._ceiling_safe_gain(proposed, clip_sample, clip_is_color)
             return self._gain
 
         if abs(error) <= _GAIN_DEADBAND_LOG:
@@ -273,6 +269,25 @@ class PaperGainSmoother:
             )
             return p90_cur / p90_prev, target_reliable
         return None
+
+    def _ceiling_safe_gain(self, proposed, clip_sample, is_color):
+        """Maior ganho em (1, `proposed`] que não satura a observação.
+
+        Referência crua (1x): pixels que `proposed` cliparia e o ganho
+        1x preserva. O predicado é monotônico no ganho — bisseção em
+        log basta — e o resultado pode ficar ABAIXO do retido, o que
+        desfaz a catraca de um clarão breve (Devin Review PR #140).
+        """
+        if not self._saturates_newly(clip_sample, is_color, proposed, 1.0):
+            return proposed
+        lo, hi = 1.0, proposed
+        for _ in range(10):
+            mid = math.sqrt(lo * hi)
+            if self._saturates_newly(clip_sample, is_color, mid, 1.0):
+                hi = mid
+            else:
+                lo = mid
+        return lo
 
     def _saturates_newly(self, clip_sample, is_color, high_gain, low_gain):
         """Fração do papel que `high_gain` satura e `low_gain` preserva.

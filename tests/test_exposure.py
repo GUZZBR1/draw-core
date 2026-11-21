@@ -219,6 +219,54 @@ def test_ceiling_clip_guard_measures_the_observation_not_the_retained_gain():
     assert out[0, 112, 0] < 255  # contraste da faixa restaurado
 
 
+def test_crossing_the_ceiling_keeps_a_consistent_highlight_limit():
+    """Devin Review PR #140: a mão cobre a faixa média e o alvo cruza
+    o teto (2,985 <-> 3,0) sem esconder a faixa clara — o papel
+    inalterado piscava 197 <-> 84 conforme a guarda ligava e desligava.
+    Alvos dentro da banda morta do teto são indistinguíveis dele: o
+    limite de realce vale dos dois lados e a mesma cena dá a mesma
+    saída."""
+    page = np.full((480, 800, 3), 66, np.uint8)
+    page[:, 560:680] = 67  # ~15% amostrado: p90 = 67 -> alvo ~2,985
+    page[:, 680:720] = 60  # faixa escura ~5%
+    page[:, 720:760] = 199  # faixa clara ~5% — a mão nunca a cobre
+    full = np.ones((480, 800), dtype=bool)
+    hand = full.copy()
+    hand[:, 560:720] = False  # cobre a faixa média e a escura
+
+    smoother = exposure.PaperGainSmoother()
+    gains = []
+    for index in range(10):
+        mask = hand if index % 2 else full
+        target = exposure.paper_gain(page, mask)
+        gain = smoother.update(target, index * 0.15, image=page, mask=mask)
+        gains.append(gain)
+
+    # convergido: os dois estados de máscara dão a mesma saída
+    assert gains[-2] == pytest.approx(gains[-1], rel=0.02)
+    out = exposure.apply_gain(page, gains[-1])
+    assert out[0, 720, 0] < 255  # faixa preservada nos dois lados
+    assert out[0, 40, 0] > 70  # papel escuro subiu (~84), não crua a 66
+
+
+def test_first_frame_at_the_ceiling_applies_the_highlight_limit():
+    """Devin Review PR #140: o primeiro update aceitava o alvo sem
+    verificar clip — com alvo no teto e faixa clara visível, o ganho
+    inicial já entra limitado pela observação."""
+    visible = np.ones((120, 120), dtype=bool)
+    page = np.full((120, 120, 3), 66, np.uint8)
+    page[:, 112:] = 199  # faixa ~7%: p90 fica 66 -> teto
+
+    smoother = exposure.PaperGainSmoother()
+    target = exposure.paper_gain(page, visible)
+    assert target == 3.0
+    gain = smoother.update(target, 0.0, image=page, mask=visible)
+
+    assert gain == pytest.approx(255 / 199, rel=0.02)
+    out = exposure.apply_gain(page, gain)
+    assert out[0, 112, 0] < 255
+
+
 def test_static_scene_converges_to_the_target():
     """Invariante: cena estática converge à banda morta do alvo em
     poucas passadas — nenhum caminho pode travar o ganho num platô."""
