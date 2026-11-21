@@ -864,9 +864,11 @@ def test_start_wsl_foreground_helper_so_dispara_powershell_em_wsl(monkeypatch):
     monkeypatch.setattr(app_module.camera_module, "is_wsl", lambda: True)
     app_module._start_wsl_foreground_helper("Draw 4242")
     assert len(calls) == 1
-    assert calls[0][0][0] == "powershell.exe"
-    assert "SetForegroundWindow" in calls[0][0][3]
-    assert "Draw 4242" in calls[0][0][3]
+    argv = calls[0][0]
+    assert argv[0] == "powershell.exe"
+    assert "-NonInteractive" in argv
+    assert "SetForegroundWindow" in argv[-1]
+    assert "Draw 4242" in argv[-1]
 
 
 def test_publish_usa_titulo_unico_por_lancamento(monkeypatch):
@@ -892,12 +894,18 @@ def test_publish_usa_titulo_unico_por_lancamento(monkeypatch):
 @pytest.mark.slow
 @pytest.mark.skipif(
     not app_module.camera_module.is_wsl()
+    or not app_module._gui_backend_compiled()
     or not os.environ.get("DISPLAY")
     or shutil.which("powershell.exe") is None,
-    reason="fumaca de foreground so roda em WSLg com powershell",
+    reason="fumaca de foreground so roda em WSLg com GUI e powershell",
 )
 def test_foreground_helper_levanta_a_janela_real_no_wslg():
-    """Fumaca end-to-end: a hwnd do titulo-token vira a janela ativa."""
+    """Fumaca end-to-end: a hwnd do titulo-token vira a janela ativa.
+
+    A verificacao e por identidade de hwnd (foreground == a janela do
+    token), nao por titulo: janela ja ativa ou outra janela chamada
+    "Draw" em foreground nao aprovam o teste.
+    """
     token = f"{app_module._WINDOW} smoke-{os.getpid()}-x1"
     cv2.namedWindow(app_module._WINDOW, cv2.WINDOW_NORMAL)
     cv2.setWindowTitle(app_module._WINDOW, token)
@@ -906,24 +914,46 @@ def test_foreground_helper_levanta_a_janela_real_no_wslg():
     try:
         for _ in range(60):  # realiza a janela e deixa o RAIL mapear
             cv2.waitKey(50)
-        proc = app_module._start_wsl_foreground_helper(token)
-        assert proc is not None
-        ps = (
+        # Resolve a hwnd desta janela ANTES do helper — depois que ele
+        # a renomeia para "Draw" o titulo unico nao existe mais.
+        ps_find = (
             "$s='using System;using System.Text;"
             "using System.Runtime.InteropServices;"
+            'public class F{[DllImport("user32.dll")]public static extern '
+            "bool EnumWindows(E e,IntPtr l);public delegate bool E("
+            'IntPtr h,IntPtr l);[DllImport("user32.dll")]public static '
+            "extern int GetWindowTextA(IntPtr h,StringBuilder s,int n);}';"
+            "Add-Type -TypeDefinition $s;$t=[IntPtr]::Zero;$n=0;"
+            "while($t -eq [IntPtr]::Zero -and $n -lt 60){$n++;"
+            "[F]::EnumWindows({param($h,$l)$b=New-Object "
+            "Text.StringBuilder 512;[F]::GetWindowTextA($h,$b,512)|Out-Null;"
+            f"if($b.ToString() -like '*{token}*'){{$script:t=$h}};"
+            "return $true},[IntPtr]::Zero)|Out-Null;"
+            "if($t -eq [IntPtr]::Zero){Start-Sleep -Milliseconds 250}};"
+            "if($t -ne [IntPtr]::Zero){Write-Output $t.ToInt64()}"
+        )
+        found = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps_find],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        target = int(found.stdout.strip() or "0")
+        assert target != 0, "janela do token nao apareceu no Windows (RAIL)"
+        proc = app_module._start_wsl_foreground_helper(token)
+        assert proc is not None
+        ps_fg = (
+            "$s='using System;using System.Runtime.InteropServices;"
             'public class G{[DllImport("user32.dll")]public static extern '
-            'IntPtr GetForegroundWindow();[DllImport("user32.dll")]public '
-            "static extern int GetWindowTextA(IntPtr h,StringBuilder s,int n);}';"
+            "IntPtr GetForegroundWindow();}';"
             "Add-Type -TypeDefinition $s;"
-            "for($i=0;$i -lt 120;$i++){$h=[G]::GetForegroundWindow();"
-            "$b=New-Object Text.StringBuilder 512;"
-            "[G]::GetWindowTextA($h,$b,512)|Out-Null;"
-            f"if($b.ToString() -like '{token} (*)' -or $b.ToString() -eq "
-            f"'{app_module._WINDOW}'){{Write-Output 'FG';break}};"
+            "for($i=0;$i -lt 120;$i++){"
+            f"if([G]::GetForegroundWindow().ToInt64() -eq {target})"
+            "{Write-Output 'FG';break};"
             "Start-Sleep -Milliseconds 250}"
         )
         out = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-Command", ps],
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps_fg],
             capture_output=True,
             text=True,
             timeout=45,

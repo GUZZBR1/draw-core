@@ -698,7 +698,11 @@ _WINDOW_PLACE_X, _WINDOW_PLACE_Y = 96, 48
 _window_token = [None]
 _window_title_restore_at = [0.0]
 _WSL_RAISE_POLLS = 240  # ~60 s: o RAIL pode demorar a publicar a hwnd
-_WSL_TITLE_RESTORE_SECONDS = _WSL_RAISE_POLLS / 4 + 10.0
+_WSL_RAISE_POLL_MS = 250
+# O prazo local cobre a vida inteira do helper com folga: cada sonda
+# paga o EnumWindows alem do sleep, entao a duracao real passa do
+# nominal — restaurar o titulo no meio da busca perderia o raise.
+_WSL_TITLE_RESTORE_SECONDS = _WSL_RAISE_POLLS * _WSL_RAISE_POLL_MS / 1000 * 1.5 + 10.0
 
 
 _mouse = {}
@@ -1079,8 +1083,10 @@ def _start_wsl_foreground_helper(token):
     e o TOPMOST do Qt sao engolidos), entao a subida vai pelo lado
     Windows: AttachThreadInput na thread da janela ativa +
     SetForegroundWindow. A hwnd e identificada pelo titulo unico do
-    lancamento ("Draw <pid>-<hex> (*)" no lado Windows) — sessoes
-    antigas nunca entram na busca. Ao achar, o helper levanta a janela e
+    lancamento — o RAIL pode adicionar afixos em volta (" (Ubuntu)",
+    "[WARN:COPY MODE] ..." com captura de tela ativa), entao a busca e
+    por substring e sessoes antigas nunca entram nela. Ao achar, o
+    helper levanta a janela e
     devolve o titulo normal via SetWindowText. Retorna o processo ou
     None fora do WSL/se o powershell nao subir; falhar em qualquer
     passo so perde a subida, nada mais.
@@ -1108,9 +1114,9 @@ def _start_wsl_foreground_helper(token):
         "while($t -eq [IntPtr]::Zero -and $n -lt __POLLS__){$n++;"
         "[W]::EnumWindows({param($h,$l)$b=New-Object Text.StringBuilder 512;"
         "[W]::GetWindowTextA($h,$b,512)|Out-Null;"
-        "if($b.ToString() -like '__TOKEN__ (*)'){$script:t=$h};return $true},"
+        "if($b.ToString() -like '*__TOKEN__*'){$script:t=$h};return $true},"
         "[IntPtr]::Zero)|Out-Null;"
-        "if($t -eq [IntPtr]::Zero){Start-Sleep -Milliseconds 250}};"
+        "if($t -eq [IntPtr]::Zero){Start-Sleep -Milliseconds __POLLMS__}};"
         "if($t -ne [IntPtr]::Zero){$fg=[W]::GetForegroundWindow();"
         "$ft=[W]::GetWindowThreadProcessId($fg,[ref]([uint32]$p=0));"
         "$me=[W]::GetCurrentThreadId();"
@@ -1124,11 +1130,13 @@ def _start_wsl_foreground_helper(token):
     ps = (
         ps.replace("__TOKEN__", token)
         .replace("__POLLS__", str(_WSL_RAISE_POLLS))
+        .replace("__POLLMS__", str(_WSL_RAISE_POLL_MS))
         .replace("__TITLE__", _WINDOW)
     )
     try:
         return subprocess.Popen(
-            ["powershell.exe", "-NoProfile", "-Command", ps],
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps],
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -1140,8 +1148,9 @@ def _publish_unique_title_and_raise():
     """Publica o titulo unico do lancamento e dispara o helper de foreground.
 
     A janela sai como "Draw <pid>-<hex>" — o RAIL a apresenta no Windows
-    como "Draw <pid>-<hex> (Ubuntu)" — e o helper casa esse titulo
-    exato, entao nenhuma sessao antiga pode ser levantada por engano. O
+    como "Draw <pid>-<hex> (Ubuntu)", com possiveis afixos extras — e
+    o helper casa por substring, entao nenhuma sessao antiga pode ser
+    levantada por engano. O
     titulo volta a "Draw" quando o helper renomeia a hwnd ou, sem ele,
     ao expirar o prazo local. Sem GUI do Qt o passo e ignorado.
     """
