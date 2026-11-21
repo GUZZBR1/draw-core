@@ -17,7 +17,7 @@ HAND_MARGIN = (slice(8, 72), slice(104, 120))
 # ESTIMATIVA — a cena física (sombra, traço) não muda com ele.
 GLINT = (slice(0, H), slice(88, 104))
 DELTAS = (0, 1, -1, 1, 0, -1, 0)
-GLINT_LEVELS = (80, 86, 77, 85, 79, 84, 80)
+GLINT_LEVELS = (80, 85, 77, 84, 78, 83, 80)
 
 
 def _low_light_page(delta, glint, hand_at_margin):
@@ -26,7 +26,8 @@ def _low_light_page(delta, glint, hand_at_margin):
     page = np.repeat(page[..., None], 3, axis=2)
     page[SHADOW] -= 10.0
     page[STROKE] = 28.0
-    page[GLINT] = float(glint)
+    if glint is not None:
+        page[GLINT] = float(glint)
     if hand_at_margin:
         page[HAND_MARGIN] = 235.0
     return np.clip(page + delta, 0, 255).astype(np.uint8)
@@ -62,19 +63,23 @@ def test_low_light_shadow_replay_keeps_weak_stroke_without_shadow_flicker(
     stable_gains = []
     outputs = []
     raw_outputs = []
+    smooth_shadow_levels = []
+    raw_shadow_levels = []
     smooth_ref = raw_ref = None
     # Pequena oscilação temporal de exposição sobre gradiente e sombra
-    # fixos; a faixa de brilho faz o p90 oscilar ±6% em cena parada, e a
+    # fixos; a faixa de brilho perturba o p90 sem mover a mediana, e a
     # mão branca ocupa a margem sem participar do p90.
     for index, (delta, glint) in enumerate(zip(DELTAS, GLINT_LEVELS, strict=True)):
         page = _low_light_page(delta, glint, hand_at_margin)
         target = exposure.paper_gain(page, visible)
-        gain = smoother.update(target, index / 10.0)
+        gain = smoother.update(target, index / 10.0, image=page, mask=visible)
         target_gains.append(target)
         stable_gains.append(gain)
 
         smooth_input = exposure.apply_gain(page, gain)
         raw_input = exposure.apply_gain(page, target)  # baseline sem suavizar
+        smooth_shadow_levels.append(float(smooth_input[SHADOW].mean()))
+        raw_shadow_levels.append(float(raw_input[SHADOW].mean()))
         if smooth_ref is None:
             smooth_ref = (
                 float(smooth_input[SHADOW].mean()),
@@ -98,8 +103,33 @@ def test_low_light_shadow_replay_keeps_weak_stroke_without_shadow_flicker(
         1 for output in raw_outputs if output["provisional"][SHADOW].any()
     )
     assert raw_shadow_frames > 0
+    assert max(smooth_shadow_levels) - min(smooth_shadow_levels) <= (
+        max(raw_shadow_levels) - min(raw_shadow_levels)
+    )
     assert outputs[0]["provisional"][STROKE].all()
     assert outputs[2]["confirmed"][STROKE].all()
     if hand_at_margin:
         assert not outputs[-1]["confirmed"][HAND_MARGIN].any()
         assert not outputs[-1]["provisional"][HAND_MARGIN].any()
+
+
+def test_global_exposure_jitter_does_not_worsen_shadow_input_variation():
+    """A variação global do sensor aparece igualmente na mediana e no p90.
+    Nesse caso o alvo fresco já compensa a mudança e o deadband não deve
+    aumentar a oscilação da sombra em relação ao ganho sem suavizar."""
+    smoother = exposure.PaperGainSmoother()
+    smooth_shadow, raw_shadow = [], []
+    visible = np.ones((H, W), dtype=bool)
+
+    for index, delta in enumerate(DELTAS):
+        page = _low_light_page(delta, None, False)
+        target = exposure.paper_gain(page, visible)
+        gain = smoother.update(target, index / 10.0, image=page, mask=visible)
+        smooth_input = exposure.apply_gain(page, gain)
+        raw_input = exposure.apply_gain(page, target)
+        smooth_shadow.append(float(smooth_input[SHADOW].mean()))
+        raw_shadow.append(float(raw_input[SHADOW].mean()))
+
+    smooth_range = max(smooth_shadow) - min(smooth_shadow)
+    raw_range = max(raw_shadow) - min(raw_shadow)
+    assert smooth_range <= raw_range + 0.1

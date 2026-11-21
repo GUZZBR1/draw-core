@@ -552,17 +552,18 @@ def test_ink_auto_gain_brightens_dark_page_before_ink():
 def test_ink_auto_gain_smoothing_reaches_the_page_clean_input():
     """Devin Review PR #140: o replay do issue-133 derivava a prob do
     escalar de ganho; aqui a página efetivamente entregue ao page_clean
-    prova que a LUT aplicada é a saída do suavizador, não o alvo cru. O
-    p90 do papel oscila ±2,5% — dentro da banda morta de 3%, então o
-    ganho fica ~2,5; com o alvo cru a sombra oscilaria ~6 níveis."""
+    prova que a LUT aplicada é a saída do suavizador, não o alvo cru. Uma
+    faixa clara local muda o p90 em ±2,5%, sem deslocar a mediana do papel.
+    A banda morta segura a LUT e mantém a sombra estável."""
     loop, _det, ink = _make_loop(
         lambda _i: (QUAD.copy(), "paper", None),
         config=PipelineConfig(ink_auto_gain=True),
     )
 
-    def scene(level):
+    def scene(glint_level):
         frame = np.full((720, 1280, 3), 225, np.uint8)
-        frame[100:400, 100:500] = level
+        frame[100:400, 100:500] = 80
+        frame[100:400, 350:500] = glint_level
         frame[150:250, 200:300] = 50  # sombra local não altera o p90 do papel
         return frame
 
@@ -570,8 +571,8 @@ def test_ink_auto_gain_smoothing_reaches_the_page_clean_input():
     ink.pages.clear()
     shadow_samples = []
     applied_gains = []
-    for level in (80, 78, 82, 78, 80, 82, 80):
-        loop.step(_packet(loop, scene(level)))
+    for glint_level in (80, 78, 82, 78, 80, 82, 80):
+        loop.step(_packet(loop, scene(glint_level)))
         page = ink.pages[-1].image
         # page[270:295, 300:350] cai sobre a sombra (y 150-250, x 200-300
         # do frame) na grade retificada (1200, 850).
@@ -590,18 +591,19 @@ def test_ink_auto_gain_smoothing_reaches_the_page_clean_input():
 
 
 def test_ink_auto_gain_deadband_releases_when_gain_clips_faint_stroke():
-    """Devin Review PR #140: a folha clareia de p90 194 para 199 e o alvo
-    novo (1,005) cai dentro da banda morta — mas o ganho retido (1,031)
-    clipa a faixa clara junto do traço fraco. A banda cede e a página
-    entregue à tinta recupera o contraste nas passadas seguintes."""
+    """Devin Review PR #140: uma faixa clara local muda o p90 de 194 para
+    199 sem mover a mediana; o alvo novo (1,005) cai dentro da banda morta,
+    mas o ganho retido (1,031) clipa a faixa clara junto do traço fraco.
+    A banda cede e a página recupera contraste nas passadas seguintes."""
     loop, _det, ink = _make_loop(
         lambda _i: (QUAD.copy(), "paper", None),
         config=PipelineConfig(ink_auto_gain=True),
     )
 
-    def scene(p90):
+    def scene(glint_level):
         frame = np.full((720, 1280, 3), 225, np.uint8)
-        frame[100:400, 100:500] = p90
+        frame[100:400, 100:500] = 194
+        frame[100:400, 350:500] = glint_level  # p90 muda; a mediana fica em 194
         frame[150:200, 230:280] = 252  # faixa: clipa com 1,031, não com 1,005
         frame[170:175, 240:270] = 248  # traço fraco dentro da faixa
         return frame

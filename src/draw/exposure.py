@@ -32,6 +32,7 @@ _MAX_GAIN = 3.0
 _SAMPLE_STRIDE = 8
 _GAIN_TIME_CONSTANT_SECONDS = 0.35
 _GAIN_DEADBAND_LOG = math.log1p(0.03)
+_GLOBAL_EXPOSURE_LOG_TOLERANCE = math.log1p(0.01)
 _CLIP_RELEASE_FRACTION = 1e-4
 
 
@@ -79,6 +80,8 @@ class PaperGainSmoother:
     A banda morta de 3% evita que ruído do p90 altere a LUT. Mudanças
     maiores são seguidas em escala logarítmica, com constante de tempo
     curta para não prender a exposição quando a iluminação realmente muda.
+    Quando mediana e p90 acompanham a mesma mudança global, usa o alvo
+    atual para compensar a exposição do quadro sem criar atraso.
     Alvo 1,0 é bypass, não amortecimento: papel já bem exposto não pode
     esperar a banda morta liberar o resíduo — cada passada ganhada clipa
     o traço claro junto do papel. Pela mesma razão, um decréscimo dentro
@@ -92,21 +95,32 @@ class PaperGainSmoother:
     def reset(self):
         self._gain = None
         self._updated_at = None
+        self._target_gain = None
+        self._paper_median = None
 
     def update(self, target_gain, timestamp, *, image=None, mask=None):
         """Retorna o ganho temporalmente estabilizado para `timestamp` (s).
 
         `image`/`mask` são o quadro e a máscara da estimativa (opcionais):
         com eles um decréscimo dentro da banda morta sai da banda quando
-        o ganho retido saturaria pixels do papel que o alvo preserva.
+        o ganho retido saturaria pixels do papel que o alvo preserva. Uma
+        mudança proporcional da mediana e do p90 sinaliza exposição global
+        e aplica o alvo do quadro imediatamente.
         """
         target = float(np.clip(target_gain, 1.0, _MAX_GAIN))
         now = float(timestamp)
         if not math.isfinite(now):
             raise ValueError(f"timestamp precisa ser finito: {timestamp!r}")
+        paper_median = None
+        if image is not None:
+            gray = _sampled_gray(image, mask)
+            if gray.size:
+                paper_median = float(np.median(gray))
         if self._gain is None or self._updated_at is None:
             self._gain = target
             self._updated_at = now
+            self._target_gain = target
+            self._paper_median = paper_median
             return self._gain
 
         elapsed = now - self._updated_at
@@ -114,7 +128,15 @@ class PaperGainSmoother:
             return self._gain
         self._updated_at = now
 
+        global_shift = self._is_global_exposure_shift(target, paper_median)
+        self._target_gain = target
+        self._paper_median = paper_median
+
         if target == 1.0:
+            self._gain = target
+            return self._gain
+
+        if global_shift:
             self._gain = target
             return self._gain
 
@@ -132,17 +154,41 @@ class PaperGainSmoother:
         self._gain = math.exp(current_log + alpha * error)
         return self._gain
 
+    def _is_global_exposure_shift(self, target, paper_median):
+        if (
+            self._target_gain is None
+            or self._paper_median is None
+            or paper_median is None
+            or min(self._target_gain, target, self._paper_median, paper_median) <= 0.0
+            or self._target_gain == 1.0
+            or target == 1.0
+        ):
+            return False
+        p90_delta = math.log(self._target_gain / target)
+        median_delta = math.log(paper_median / self._paper_median)
+        return (
+            abs(p90_delta) >= _GLOBAL_EXPOSURE_LOG_TOLERANCE
+            and abs(median_delta) >= _GLOBAL_EXPOSURE_LOG_TOLERANCE
+            and abs(p90_delta - median_delta) <= _GLOBAL_EXPOSURE_LOG_TOLERANCE
+        )
+
     def _newly_saturates(self, image, mask, target):
         """Fração do papel que o ganho retido satura e o alvo preserva.
 
-        Banda (255/ganho retido, 255/alvo]: pixels nela vão a 255 com o
-        ganho atual mas seguiriam distintos com o alvo. Retorna True se
-        a banda cobre mais que _CLIP_RELEASE_FRACTION do papel amostrado.
+        Um pixel conta quando algum canal cai em [255/ganho retido,
+        255/alvo): aquele canal vai a 255 com o ganho atual mas segue
+        distinto com o alvo. Retorna True se a fração passa o limite.
         """
         if image is None:
             return False
-        gray = _sampled_gray(image, mask)
-        if gray.size == 0:
+        sample = image[::_SAMPLE_STRIDE, ::_SAMPLE_STRIDE]
+        if mask is not None:
+            sampled_mask = np.asarray(mask)[::_SAMPLE_STRIDE, ::_SAMPLE_STRIDE] > 0
+            if sampled_mask.any():
+                sample = sample[sampled_mask]
+        if sample.size == 0:
             return False
-        band = (gray > 255.0 / self._gain) & (gray <= 255.0 / target)
-        return float(band.mean()) > _CLIP_RELEASE_FRACTION
+        newly_saturated = (sample >= 255.0 / self._gain) & (sample < 255.0 / target)
+        if newly_saturated.ndim == 3:
+            newly_saturated = newly_saturated.any(axis=2)
+        return float(newly_saturated.mean()) > _CLIP_RELEASE_FRACTION

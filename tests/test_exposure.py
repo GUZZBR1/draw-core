@@ -90,6 +90,17 @@ def test_deadband_releases_a_decrease_that_clips_paper_pixels():
     assert out[30, 30, 0] > out[45, 15, 0]  # e segue acima do traço
 
 
+def test_deadband_clip_release_checks_each_color_channel():
+    smoother = exposure.PaperGainSmoother()
+    first = smoother.update(200 / 194, 0.0)
+    page = np.full((120, 90, 3), 199, np.uint8)
+    page[20:60, 20:70] = (250, 100, 100)
+
+    gain = smoother.update(200 / 199, 0.1, image=page)
+
+    assert gain < first  # vermelho clippa mesmo com brilho médio abaixo da banda
+
+
 def _dark_paper_with_bright_desk(desk_fraction=0.14, shape=(1200, 850)):
     h, w = shape
     img = np.full((h, w, 3), 80, np.uint8)
