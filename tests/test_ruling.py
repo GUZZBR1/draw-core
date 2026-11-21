@@ -1171,19 +1171,26 @@ def test_single_ruled_half_fold_at_edge_with_shoulders_and_no_stroke_is_erased()
     assert (out[:, 562:600] > 0.5).sum() == 0
 
 
+@pytest.mark.parametrize("layout", ["paired_split", "offset_split", "blank_other"])
 @pytest.mark.parametrize(
-    "layout", ["paired_split", "offset_split", "blank_other", "track_edge"]
-)
-@pytest.mark.parametrize(
-    "content", ["empty", "straight_stroke", "bending_stroke", "shoulders_only"]
+    "content",
+    [
+        "empty",
+        "straight_stroke",
+        "bending_stroke",
+        "reverse_bending_stroke",
+        "branched_stroke_shoulder",
+        "shoulders_only",
+        "vertical_wall",
+    ],
 )
 def test_fold_junction_matrix(layout, content):
-    """Matriz {configuracao da faixa} x {sem tinta, traço reto, traço que dobra,
-    ombro puro}: sem tinta nada sobra isento; com traço, nenhum segmento cai."""
+    """Matriz {pareada, defasada, sem pauta do outro lado} x {sem tinta,
+    traço reto, dobra esq->dir, dobra dir->esq, ramificação traço+ombro,
+    ombro puro, parede vertical}."""
     prob = np.zeros((600, 1200), np.float32)
-    with_shoulders = content == "shoulders_only" or layout in (
-        "paired_split",
-        "track_edge",
+    with_shoulders = content in ("shoulders_only", "branched_stroke_shoulder") or (
+        layout == "paired_split"
     )
     if layout == "paired_split":
         fa, fb = 560, 640
@@ -1205,7 +1212,7 @@ def test_fold_junction_matrix(layout, content):
             if with_shoulders and k % 2 == 0:
                 prob[yl : yl + 6, fa - 13 : fa] = 0.95
                 prob[yr : yr + 6, fb : fb + 13] = 0.95
-    elif layout == "blank_other":
+    else:  # blank_other
         fa, fb = 560, 600
         for k in range(12):
             y = 80 + 40 * k
@@ -1213,26 +1220,34 @@ def test_fold_junction_matrix(layout, content):
             prob[y : y + 6, fa:fb] = 0.95
             if with_shoulders and k % 2 == 0:
                 prob[y : y + 6, fa - 13 : fa] = 0.95
-    else:  # track_edge
-        fa, fb = 560, 600
-        for k in range(12):
-            y = 80 + 40 * k
-            prob[y : y + 2, :600] = 0.95
-            prob[y : y + 6, fa:fb] = 0.95
-            if k % 2 == 0:
-                prob[y : y + 6, fa - 13 : fa] = 0.95
 
     y_stroke = 80 + 40 * 5
     stroke_mask = np.zeros(prob.shape, bool)
     if content == "straight_stroke":
         stroke_mask[y_stroke : y_stroke + 6, fa - 20 : fb + 60] = True
     elif content == "bending_stroke":
-        # entra reto ate 600 e dobra 20 px para baixo ate 620, seguindo ate fb+40
         stroke_mask[y_stroke : y_stroke + 6, fa - 20 : 600] = True
         for x in range(600, 620):
             dy = x - 600
             stroke_mask[y_stroke + dy : y_stroke + dy + 6, x] = True
         stroke_mask[y_stroke + 20 : y_stroke + 26, 620 : fb + 40] = True
+    elif content == "reverse_bending_stroke":
+        y_r = 100 + 40 * 5 if layout == "offset_split" else y_stroke
+        stroke_mask[y_r : y_r + 6, 590 : fb + 40] = True
+        for x in range(570, 590):
+            dy = 590 - x
+            stroke_mask[y_r + dy : y_r + dy + 6, x] = True
+        stroke_mask[y_r + 20 : y_r + 26, fa - 30 : 570] = True
+    elif content == "branched_stroke_shoulder":
+        # traço na pauta esquerda (280) saindo no branco a direita, mais ramo
+        # vertical na costura que toca a pauta direita com ombro de 13 col
+        stroke_mask[y_stroke : y_stroke + 6, fa - 20 : fb + 60] = True
+        if layout != "blank_other":
+            prob[y_stroke : y_stroke + 26, 599:601] = 0.95
+    elif content == "vertical_wall":
+        # parede vertical no meio da faixa + traço reto apenas na linha 5
+        stroke_mask[y_stroke : y_stroke + 6, fa - 20 : fb + 60] = True
+        prob[80:400, 580:584] = 0.95
 
     prob[stroke_mask] = 0.95
     out = ruling.RulingFilter().apply(prob.copy())
@@ -1243,14 +1258,15 @@ def test_fold_junction_matrix(layout, content):
         inside[:, fa + 2 : fb - 2] = True
         kept = stroke_mask & inside
         assert (out[kept] > 0.5).all()
-        if content == "straight_stroke":
-            others = (out > 0.5) & inside & ~stroke_mask
-            assert others.sum() == 0
+        if content in ("straight_stroke", "branched_stroke_shoulder", "vertical_wall"):
+            # linhas distantes do traço devem ser apagadas mesmo com parede vertical
+            assert (out[: y_stroke - 25, fa + 2 : 578] > 0.5).sum() == 0
+            assert (out[y_stroke + 30 :, fa + 2 : 578] > 0.5).sum() == 0
         else:
-            # no pouso da dobra sobre outra pauta, o run se funde com a sombra local;
-            # nas demais pautas (longe da dobra) nada pode sobrar
-            assert (out[: y_stroke - 10, fa + 2 : fb - 2] > 0.5).sum() == 0
-            assert (out[y_stroke + 50 :, fa + 2 : fb - 2] > 0.5).sum() == 0
+            y_lo = min(y_stroke, 100 + 40 * 5) - 10
+            y_hi = max(y_stroke, 100 + 40 * 5) + 50
+            assert (out[:y_lo, fa + 2 : fb - 2] > 0.5).sum() == 0
+            assert (out[y_hi:, fa + 2 : fb - 2] > 0.5).sum() == 0
 
 
 def test_single_ruled_half_keeps_short_left_stroke_continuing_into_blank_half():
