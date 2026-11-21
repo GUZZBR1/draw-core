@@ -247,9 +247,11 @@ types in `contracts.py`.
 - `draw/ink.py`: still imported by `ink_layers`, `loop`, `app`, `view`, but
   mostly for `render_canvas`. `extract_ink`, `InkAccumulator` and
   `SessionBaselineInk` serve only the `--legacy-ink` / `--markers` paths.
-  Migrate only `render_canvas` + paper constants; drop the legacy ink stack,
-  `--legacy-ink`, `--markers`, `--ink-model` (the `ink_model` module does not
-  even exist).
+  Migrate only `render_canvas` + paper constants; drop the legacy ink stack
+  and `--ink-model` (the `ink_model` module does not even exist).
+  What survived, revising the original decision: `--legacy-ink` stays as a
+  compat preset that turns off gain and detect-wake (kept by 2e3c1cf), and
+  `--markers` stays as a live mode that kept evolving (PRs #50, #84, #91).
 
 ## Intentional deviations from legacy
 
