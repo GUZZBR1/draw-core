@@ -188,6 +188,37 @@ def test_sustained_shadow_recovers_toward_the_safe_ceiling():
     assert out[0, 40, 0] > 80  # papel escuro subiu: ~84, não ~66
 
 
+def test_ceiling_clip_guard_measures_the_observation_not_the_retained_gain():
+    """Devin Review PR #140: a referência do clip era o ganho retido —
+    pixels já saturados viravam isentos e um clarão breve na faixa
+    prendia o ganho acima do ponto de clip para sempre. Com a
+    observação crua (referência 1x) o ganho desce ao limite seguro e
+    volta quando a faixa clareia de novo."""
+    visible = np.ones((120, 120), dtype=bool)
+    page = np.full((120, 120, 3), 66, np.uint8)
+    page[:, 112:] = 199  # faixa ~7% amostrado: p90 fica 66 -> teto
+
+    smoother = exposure.PaperGainSmoother()
+    smoother.update(1.0, 0.0)
+    target = exposure.paper_gain(page, visible)
+    for index in range(1, 6):
+        smoother.update(target, index * 0.15, image=page, mask=visible)
+
+    # Clarão breve só na faixa: 199 -> 202 por duas passadas
+    flash = page.copy()
+    flash[:, 112:] = 202
+    for index in range(6, 8):
+        smoother.update(target, index * 0.15, image=flash, mask=visible)
+
+    # Faixa de volta a 199: o ganho retorna ao nível que a preserva
+    for index in range(8, 14):
+        gain = smoother.update(target, index * 0.15, image=page, mask=visible)
+
+    out = exposure.apply_gain(page, gain)
+    assert gain == pytest.approx(255 / 199, rel=0.02)
+    assert out[0, 112, 0] < 255  # contraste da faixa restaurado
+
+
 def test_static_scene_converges_to_the_target():
     """Invariante: cena estática converge à banda morta do alvo em
     poucas passadas — nenhum caminho pode travar o ganho num platô."""

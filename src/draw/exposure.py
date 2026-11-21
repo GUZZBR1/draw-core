@@ -129,12 +129,19 @@ class PaperGainSmoother:
         now = float(timestamp)
         if not math.isfinite(now):
             raise ValueError(f"timestamp precisa ser finito: {timestamp!r}")
-        sample = sample_mask = None
+        sample = sample_mask = clip_sample = None
+        clip_is_color = False
         p90_full = None
         if image is not None:
             sample, sample_mask = _sampled_grid(image, mask)
             if sample_mask.any():
                 p90_full = float(np.percentile(sample[sample_mask], 90))
+            clip_is_color = image.ndim == 3
+            clip_sample = image[::_SAMPLE_STRIDE, ::_SAMPLE_STRIDE]
+            if mask is not None:
+                clip_mask = np.asarray(mask)[::_SAMPLE_STRIDE, ::_SAMPLE_STRIDE] > 0
+                if clip_mask.any():
+                    clip_sample = clip_sample[clip_mask]
         if self._gain is None or self._updated_at is None:
             self._gain = target
             self._updated_at = now
@@ -177,36 +184,39 @@ class PaperGainSmoother:
         current_log = math.log(self._gain)
         target_log = math.log(target)
         error = target_log - current_log
+        alpha = -math.expm1(-elapsed / _GAIN_TIME_CONSTANT_SECONDS)
+
+        if target >= _MAX_GAIN:
+            # Alvo travado no teto não mede a cena: o limite real é o
+            # maior ganho que não satura a observação — referência 1x,
+            # não o ganho retido. Pixels já clipados pelo retido saíam
+            # da janela do predicado e um clarão breve os apagava para
+            # sempre (Devin Review PR #140). O limite seguro pode ficar
+            # ABAIXO do retido — é o que desfaz a catraca.
+            proposed = math.exp(current_log + alpha * error)
+            if self._saturates_newly(clip_sample, clip_is_color, proposed, 1.0):
+                lo, hi = 1.0, proposed
+                for _ in range(10):
+                    mid = math.sqrt(lo * hi)
+                    if self._saturates_newly(clip_sample, clip_is_color, mid, 1.0):
+                        hi = mid
+                    else:
+                        lo = mid
+                self._gain = lo
+                return self._gain
+            self._gain = proposed
+            return self._gain
+
         if abs(error) <= _GAIN_DEADBAND_LOG:
             if error >= 0.0 or not self._saturates_newly(
-                image, mask, self._gain, target
+                clip_sample, clip_is_color, self._gain, target
             ):
                 return self._gain
             # O decréscimo fura a banda morta: segurar o ganho retido
             # cliparia pixels que o alvo novo manteria distintos
             # (Devin Review PR #140).
 
-        alpha = -math.expm1(-elapsed / _GAIN_TIME_CONSTANT_SECONDS)
-        proposed = math.exp(current_log + alpha * error)
-        if target >= _MAX_GAIN and self._saturates_newly(
-            image, mask, proposed, self._gain
-        ):
-            # Alvo no teto não mede a cena: a subida só vale sem clipar
-            # papel. Descartar o passo inteiro congelava o ganho — a
-            # mesma proposta é rejeitada a cada passada e a folha fica
-            # escura mesmo com ganho intermediário seguro (Devin Review
-            # PR #140). O predicado é monotônico no ganho: bisseção em
-            # log acha o maior passo seguro em (atual, proposto].
-            lo, hi = self._gain, proposed
-            for _ in range(10):
-                mid = math.sqrt(lo * hi)
-                if self._saturates_newly(image, mask, mid, self._gain):
-                    hi = mid
-                else:
-                    lo = mid
-            self._gain = lo
-            return self._gain
-        self._gain = proposed
+        self._gain = math.exp(current_log + alpha * error)
         return self._gain
 
     def _shared_exposure_shift(self, sample, sample_mask, p90_full):
@@ -264,23 +274,20 @@ class PaperGainSmoother:
             return p90_cur / p90_prev, target_reliable
         return None
 
-    def _saturates_newly(self, image, mask, high_gain, low_gain):
+    def _saturates_newly(self, clip_sample, is_color, high_gain, low_gain):
         """Fração do papel que `high_gain` satura e `low_gain` preserva.
 
-        Um pixel conta quando algum canal cai em [255/high_gain,
-        255/low_gain): vai a 255 com o ganho maior mas segue distinto
-        com o menor. Retorna True se a fração passa o limite.
+        `clip_sample` é a amostra esparsa da imagem já restrita à
+        máscara, computada uma vez por update. Um pixel conta quando
+        algum canal cai em [255/high_gain, 255/low_gain): vai a 255 com
+        o ganho maior mas segue distinto com o menor. Retorna True se a
+        fração passa o limite.
         """
-        if image is None or high_gain <= low_gain:
+        if clip_sample is None or clip_sample.size == 0 or high_gain <= low_gain:
             return False
-        sample = image[::_SAMPLE_STRIDE, ::_SAMPLE_STRIDE]
-        if mask is not None:
-            sampled_mask = np.asarray(mask)[::_SAMPLE_STRIDE, ::_SAMPLE_STRIDE] > 0
-            if sampled_mask.any():
-                sample = sample[sampled_mask]
-        if sample.size == 0:
-            return False
-        newly_saturated = (sample >= 255.0 / high_gain) & (sample < 255.0 / low_gain)
-        if image.ndim == 3:
+        newly_saturated = (clip_sample >= 255.0 / high_gain) & (
+            clip_sample < 255.0 / low_gain
+        )
+        if is_color:
             newly_saturated = newly_saturated.any(axis=-1)
         return float(newly_saturated.mean()) > _CLIP_RELEASE_FRACTION
