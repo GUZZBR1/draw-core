@@ -575,6 +575,94 @@ def test_saved_ink_under_guard_does_not_time_out_page_recovery():
     assert int(np.count_nonzero(snap.confirmed[100:1100, 9:13])) > 0
 
 
+def test_occluded_replacement_sheet_does_not_keep_old_ink():
+    """Match "vazio" com a mao sobre a folha nova adia: o dominio
+    inspecionado pode esconder a tinta do candidato dentro da
+    guarda. Revelada, a troca e reconhecida — e a tinta da folha
+    velha nao carrega para o canvas novo."""
+    quad_wide = np.array(
+        [[200, 100], [560, 100], [560, 600], [200, 600]], dtype=np.float32
+    )
+    quad_narrow = np.array(
+        [[270, 120], [500, 120], [500, 580], [270, 580]], dtype=np.float32
+    )
+    img_old = np.full((1200, 850, 3), 215, np.uint8)
+    img_old[100:1100, 9:13] = 25  # traco da folha velha (sob a guarda nova)
+
+    clock = _Clock()
+    cfg = InkConfig.strict_vote(0.85, border_guard_px=None)
+    worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
+    for _ in range(5):
+        clock.now += 1.1
+        worker.submit(
+            contracts.WarpedPage(img_old, 0, quad_wide, captured_at=clock.now)
+        )
+        worker.pump()
+    worker._anchor_corners = quad_narrow.copy()
+    gen = worker.new_generation(preserve_identity=True)
+
+    img_new = np.full((1200, 850, 3), 215, np.uint8)
+    img_new[400:600, 500:800] = 25  # sketch da folha nova
+    hand = np.ones(img_new.shape[:2], bool)
+    hand[:, 350:] = False  # mao esconde a metade direita na camera
+    for _ in range(2):
+        clock.now += 1.1
+        worker.submit(
+            contracts.WarpedPage(img_new, gen, quad_narrow, hand, captured_at=clock.now)
+        )
+        worker.pump()
+    all_clear = np.ones(img_new.shape[:2], bool)
+    for _ in range(6):
+        clock.now += 1.1
+        worker.submit(
+            contracts.WarpedPage(
+                img_new, gen, quad_narrow, all_clear, captured_at=clock.now
+            )
+        )
+        worker.pump()
+    snap = worker.poll(gen, 0)
+    assert snap is not None
+    assert int(np.count_nonzero(snap.confirmed[100:1100, 9:13])) == 0
+
+
+def test_cropped_provisional_clears_with_visibility_mask():
+    """Provisorio na faixa que o registro deixa de amostrar sai do
+    dominio valido mesmo com mascara de visibilidade presente —
+    nao pode ficar congelado como "coberto pela mao". Controle:
+    provisorio genuinamente ocluido permanece no preview."""
+    quad_wide = np.array(
+        [[200, 100], [560, 100], [560, 600], [200, 600]], dtype=np.float32
+    )
+    quad_in = np.array(
+        [[206, 100], [560, 100], [560, 600], [206, 600]], dtype=np.float32
+    )
+
+    img = np.full((1200, 850, 3), 215, np.uint8)
+    img[100:1100, 10:14] = 25  # provisorio na faixa que vai ser cortada
+    img[100:1100, 300:340] = 25  # provisorio interior (sera ocluido)
+
+    clock = _Clock()
+    cfg = InkConfig.strict_vote(0.85, border_guard_px=None)
+    worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
+    for _ in range(2):
+        clock.now += 1.1
+        worker.submit(contracts.WarpedPage(img, 0, quad_wide, captured_at=clock.now))
+        worker.pump()
+
+    hand = np.ones(img.shape[:2], bool)
+    hand[:, 300:400] = False  # mao cobre o traco interior na camera
+    for _ in range(10):
+        clock.now += 1.1
+        worker.submit(
+            contracts.WarpedPage(img, 0, quad_in, hand, captured_at=clock.now)
+        )
+        worker.pump()
+    snap = worker.poll_display(0, 0)
+    assert snap is not None
+    assert int(np.count_nonzero(snap.provisional[100:1100, 10:14])) == 0
+    assert int(np.count_nonzero(snap.provisional[100:1100, 300:340])) > 0
+
+
 def test_stale_provisional_ink_clears_when_reanchor_widens_guard():
     """Marcas provisorias antigas que caem na nova faixa da guarda apos
     reancoragem nao ficam congeladas indefinidamente."""
