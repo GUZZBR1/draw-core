@@ -668,6 +668,14 @@ def _require_gui_backend():
 
 _WINDOW = "Draw"
 _window_sized = set()
+# Posicao de abertura. O WM escolhe sozinho e pode mapear a janela
+# fora da area visivel: sob WSLg ela nasceu em x=2237 num desktop de
+# 2944 px ("abre mas nao aparece"). O Qt so honra moveWindow com a
+# janela ja realizada, entao o pedido vai nas primeiras exibicoes —
+# algumas dezenas de frames cobrem a latencia; depois o usuario posiciona livre.
+_window_placed = []
+_WINDOW_PLACE_MAX = 30
+_WINDOW_PLACE_X, _WINDOW_PLACE_Y = 96, 48
 
 
 _mouse = {}
@@ -1046,6 +1054,7 @@ def _open_window(fullscreen):
         cv2.WINDOW_NORMAL | cv2.WINDOW_GUI_NORMAL | cv2.WINDOW_FREERATIO,
     )
     _window_sized.clear()
+    _window_placed.clear()
     _settings["on"]["fullscreen"] = fullscreen
     _fullscreen_applied[0] = False
     cv2.setMouseCallback(_WINDOW, _on_mouse)
@@ -1121,6 +1130,12 @@ def _show(image):
     if not _window_sized:
         cv2.resizeWindow(_WINDOW, iw, ih)
         _window_sized.add(True)
+    elif len(_window_placed) < _WINDOW_PLACE_MAX:
+        _window_placed.append(0)
+        try:
+            cv2.moveWindow(_WINDOW, _WINDOW_PLACE_X, _WINDOW_PLACE_Y)
+        except cv2.error:
+            _window_placed.extend([0] * _WINDOW_PLACE_MAX)
     w, h = _window_rect() or (0, 0)
     _view_map.update(scale=1.0, offset=(0, 0))
     if w > 0 and h > 0 and (w, h) != (iw, ih):
