@@ -459,6 +459,27 @@ def test_global_dimming_preserves_a_simultaneous_local_shadow():
         assert not assessment.paper_exposed[100:110, 100:110].any()
 
 
+def test_global_dimming_flattens_the_former_bright_region():
+    """A lâmpada direcional apaga e a página nivela no brilho do lado
+    escuro: a razão mediana escalava junto o gradiente antigo e a
+    faixa antes mais clara virava veto permanente — residual pequeno
+    demais para reabrir a absorção e fora do alcance do refresh, que
+    só corrige tiles sem anomalia. O nivelamento reancora esses tiles
+    no nível medido e solta a página (Devin Review do PR #144)."""
+    guard = occlusion_mod.PaperExposureGuard()
+    lit = np.full((120, 160, 3), 190, dtype=np.uint8)
+    lit[24:96, 24:96] = 250  # faixa sob a lâmpada (bloco 3x3 tiles)
+    visible = np.ones(lit.shape[:2], dtype=bool)
+    assert guard.observe(lit, visible).paper_exposed is True
+    assert guard.observe(lit, visible).paper_exposed is True
+
+    dim = np.full((120, 160, 3), 140, dtype=np.uint8)  # lâmpada apagada
+    for _ in range(2):
+        assessment = guard.observe(dim, visible)
+        assert assessment.visible is None
+        assert assessment.paper_exposed is True
+
+
 def test_fill_recovery_exempts_supported_pixels_across_tile_borders():
     """Um preenchimento deslocado da grade recupera também pixels
     fortes das tiles de borda e sobrevive à dilatação dos vizinhos."""

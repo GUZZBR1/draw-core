@@ -254,6 +254,29 @@ class PaperExposureGuard:
                 )
             anomalous = darkened | color_anomaly
 
+            # A lâmpada direcional apaga e a página nivela no brilho
+            # do lado escuro: a razão mediana escala junto o gradiente
+            # antigo e a faixa antes mais clara continuava "escura"
+            # para sempre — área residual pequena demais para reabrir
+            # a absorção e excluída do refresh, que só corrige tiles
+            # sem anomalia. O tile à vista que já combina com o nível
+            # NOVO da página não é oclusor: reancora a referência no
+            # medido e limpa a anomalia. Um oclusor real segue abaixo
+            # do nível da página e permanece vetado, assim como o tile
+            # marcado só pelo croma (Devin Review do PR #144).
+            page_drop = max(_MIN_DARKENING, page_reference * _DARKENING_FRACTION)
+            flattened = (
+                updateable
+                & anomalous
+                & ~color_anomaly
+                & (current >= page_reference - page_drop)
+            )
+            if np.any(flattened):
+                self._reference[flattened] = current[flattened]
+                if self._color_reference is not None:
+                    self._color_reference[flattened] = chroma[flattened]
+                anomalous &= ~flattened
+
         # Recuperação por preenchimento: o streak conta as passadas
         # seguidas em que o tile anômalo, à vista, é lido como tinta
         # pelo modelo. A mão sobre o tile (updateable False) não
