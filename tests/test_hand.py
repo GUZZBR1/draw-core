@@ -428,12 +428,20 @@ def test_observe_keeps_image_mask_and_capture_identity(monkeypatch, tmp_path):
     assert result.present is None
 
 
-def test_observe_resets_retention_when_the_source_changes(monkeypatch, tmp_path):
-    _install_fake_mediapipe(monkeypatch)
+def test_observe_resets_retention_when_the_source_changes(monkeypatch):
     frame = np.zeros((100, 150, 3), dtype=np.uint8)
-    with hand_module.HandMasker(_model(tmp_path), verify=None) as masker:
-        masker.observe(FramePacket(frame, 1.0, 1), source_id=1)
-        assert masker._held_hands is not None
-        masker.observe(FramePacket(frame, 2.0, 2), source_id=2)
-        # A deteccao do stub devolve mao e repopula; o reset ocorreu antes.
-        assert masker._held_misses == 0
+    masker = _bare_masker()
+    masker._lock = threading.RLock()
+    masker.last_detection_held = False
+    masker._observed_source_id = None
+    sequence = iter([[np.zeros((21, 2), np.float32)], [], [], []])
+    monkeypatch.setattr(masker, "_landmarks", lambda *_a, **_k: next(sequence))
+    # mask() usa _landmarks sem retencao aqui; o que importa e o reset.
+    masker._held_hands = [np.zeros((21, 2), np.float32)]
+    masker._held_shape = frame.shape[:2]
+    masker.observe(FramePacket(frame, 1.0, 1), source_id=1)
+    masker._held_hands = [np.zeros((21, 2), np.float32)]
+    masker.observe(FramePacket(frame, 2.0, 2), source_id=1)
+    assert masker._held_hands is not None  # mesma fonte: mantem
+    masker.observe(FramePacket(frame, 3.0, 3), source_id=2)
+    assert masker._held_hands is None  # outra fonte: descartada
