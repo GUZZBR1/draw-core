@@ -143,6 +143,30 @@ def test_hand_bridge_does_not_pull_false_paper_into_the_union():
     assert with_hand > 0.8
 
 
+def test_filled_gap_still_bridges_known_limitation():
+    """LIMITAÇÃO conhecida: o vão preenchido reconecta a mancha.
+
+    A cobertura do pipeline é a máscara de voto — buracos internos
+    já preenchidos. Um anel de dedos ao redor do vão entre folha e
+    mancha faz o preenchimento marcar o vão como não-fundo: os
+    pixels remendados não são classe mão e sobrevivem à remoção —
+    a mancha volta a contar (fixar o comportamento residual, não
+    o ideal; o mapa cru não atravessa o contrato DetectionResult).
+    """
+    sheet = _mask_block(100, 400, 100, 500)
+    gap = _mask_block(150, 350, 500, 560)  # vão que a mão cerrou e o fill marcou
+    false_paper = _mask_block(150, 350, 560, 800)
+    # Dedos em faixas acima e abaixo do vão: fecham o anel com a
+    # folha à esquerda e a mancha à direita SEM sobrepor o vão nem a
+    # mancha — os pixels remendados do vão não são classe mão e
+    # seguem ligando a mancha à folha depois da remoção.
+    hand = _mask_block(140, 150, 495, 575) | _mask_block(350, 360, 495, 575)
+    coverage = ((sheet | gap | false_paper | hand) > 0).astype(np.uint8) * 255
+    bridged = _coverage_iou(QUAD, coverage, hand)
+    assert bridged < _coverage_iou(QUAD, sheet, hand)
+    assert bridged < 0.7  # a mancha voltou a pesar — resíduo medido
+
+
 def test_ink_pass_vetoed_when_distant_hand_fills_the_scene():
     """Ponta a ponta: o fantasma com mão desconectada não sobe.
 

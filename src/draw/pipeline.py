@@ -138,6 +138,14 @@ def _coverage_iou(corners, coverage_mask, hand_mask=None):
     atraves de pixels de mao fica fora — a mao nao pode virar ponte
     para um blob espurio. Sem mascara de mao (contrato de dois
     canais), o nao-fundo inteiro e o melhor proxy da folha.
+
+    LIMITACAO: a cobertura que chega aqui e a mascara de VOTO, com
+    os buracos internos ja preenchidos (perception.last_coverage_mask
+    — o mapa cru fica em last_coverage_raw e nao atravessa o contrato
+    DetectionResult). Se os dedos fecham um anel ao redor do va
+    entre a folha e a mancha, o preenchimento marca o va como
+    nao-fundo e a mancha volta a contar contra a folha mesmo depois
+    da classe mao removida.
     """
     quad = np.zeros(coverage_mask.shape, np.uint8)
     cv2.fillConvexPoly(quad, np.round(corners).astype(np.int32), 1)

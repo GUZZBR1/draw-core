@@ -52,7 +52,10 @@ class PipelineConfig:
       IoU (draw.pipeline._coverage_iou) conta os componentes não-mão
       que tocam o quad dilatado pelo anel de rasterização mais TODA a
       mão prevista: a mancha de papel falsa disjunta da issue #106
-      sai da conta sem levar a proteção do fantasma junto.
+      sai da conta sem levar a proteção do fantasma junto — salvo
+      quando a mão fecha um anel ao redor do vão e o preenchimento
+      de buracos da máscara de voto o reconecta à folha (resíduo
+      conhecido; o mapa cru não atravessa o contrato de detecção).
       LIMITAÇÃO CONHECIDA (não medida): a classe mão segue contando
       inteira na união do IoU — mão ou antebraço FORA da folha incham
       o denominador. Folha pequena com um antebraço grande em cena
