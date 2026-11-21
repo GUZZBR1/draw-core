@@ -218,6 +218,9 @@ def test_stroke_scale_mm_per_px_diagonal_matches_axis_on_uniform_grid():
     assert ev.stroke_scale_mm_per_px(np.array([[0, 0], [0, 10]]), 2, 4) == 2
     uni = ev.stroke_scale_mm_per_px(np.array([[0, 0], [10, 10]]), 3, 3)
     assert uni == pytest.approx(3.0)
+    # Diagonal anisotropica: hypot(0,5.2, 0,5.4) = raiz de 10
+    aniso = ev.stroke_scale_mm_per_px(np.array([[0, 0], [10, 10]]), 2, 4)
+    assert aniso == pytest.approx(np.sqrt(10.0))
 
 
 def test_lines_without_width_px_keep_the_uniform_fallback(tmp_path):

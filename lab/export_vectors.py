@@ -294,16 +294,30 @@ def main(argv=None):
     ink = result["ink"]
 
     def _rasterize_weighted(parsed, widths, **kw):
-        # Uma varredura de página por arquivo: a espessura de cada
-        # entidade vai em thicknesses_px (medida na perpendicular do
-        # traço — a média sx/sy distorce sob escala anisotrópica).
-        ths = [
-            thickness
-            if w_mm is None
-            else max(1, int(round(w_mm / stroke_scale_mm_per_px(pts, sx, sy))))
-            for (pts, _), w_mm in zip(parsed, widths, strict=True)
-        ]
-        return rasterize(parsed, ink.shape, sx, sy, thickness, thicknesses_px=ths, **kw)
+        # Uma varredura de página por arquivo; sob escala anisotrópica
+        # cada SEGMENTO leva a espessura da sua perpendicular — um
+        # cotovelo com espessura única distorceria uma das pernas.
+        parts, ths = [], []
+        for (pts, closed), w_mm in zip(parsed, widths, strict=True):
+            if w_mm is None or len(pts) < 2:
+                scale = 0.5 * (sx + sy)
+                parts.append((pts, closed))
+                ths.append(
+                    thickness if w_mm is None else max(1, int(round(w_mm / scale)))
+                )
+                continue
+            for i in range(len(pts) if closed else len(pts) - 1):
+                seg = np.array([pts[i], pts[(i + 1) % len(pts)]])
+                if np.allclose(seg[0], seg[1]):
+                    continue
+                parts.append((seg, False))
+                ths.append(
+                    max(
+                        1,
+                        int(round(w_mm / stroke_scale_mm_per_px(seg, sx, sy))),
+                    )
+                )
+        return rasterize(parts, ink.shape, sx, sy, thickness, thicknesses_px=ths, **kw)
 
     widths_svg, widths_dxf = [], []
     raster_svg = _rasterize_weighted(parse_svg_paths(svg_path, widths_svg), widths_svg)
