@@ -133,8 +133,30 @@ def test_global_exposure_shift_detected_at_gain_ceiling():
 
     target = exposure.paper_gain(brighter, visible)
     gain = smoother.update(target, 0.1, image=brighter, mask=visible)
-    # correção pela razão (~2,82) + resíduo já convergindo ao alvo
-    assert first * 64 / 68 <= gain <= target < first
+    # mistura pretendida: passou da correção pura (~2,82) rumo ao alvo
+    # sem saltar direto a ele (Devin Review PR #140)
+    assert first * 64 / 68 < gain < target < first
+
+
+def test_ceiling_ratio_correction_not_undone_by_smoothing():
+    """Devin Review PR #140: alvo travado no teto 3x nos dois níveis
+    (p90 60 <-> 65). Convergir para o alvo limitado desfaz a correção
+    pela razão e clipa os realces a cada clarão."""
+    visible = np.ones((120, 120), dtype=bool)
+    dark = np.full((120, 120, 3), 60, np.uint8)
+    bright = np.full((120, 120, 3), 65, np.uint8)
+    bright[8, 8] = 90
+    bright[8, 16] = 91
+
+    smoother = exposure.PaperGainSmoother()
+    gains = []
+    for index, page in enumerate([dark, bright, dark, bright]):
+        target = exposure.paper_gain(page, visible)  # 3,0 sempre
+        gains.append(smoother.update(target, index * 0.15, image=page, mask=visible))
+
+    out = exposure.apply_gain(bright, gains[-1])
+    # 65 * (3 / (65/60)) ~= 180: realces 90/91 ficam 249/252 distintos
+    assert out[8, 8, 0] < out[8, 16, 0] < 255
 
 
 def test_exposure_shift_correction_uses_shared_ratio_over_new_mask_target():
@@ -203,6 +225,33 @@ def test_exposure_shift_correction_converges_during_stationary_occlusion():
 
     assert gains[1] < first  # compensação inicial na direção certa
     assert gains[-1] > 2.1  # convergiu ao alvo, não travou em ~2,0
+
+
+def test_exposure_shift_correction_converges_with_border_jitter():
+    """Devin Review PR #140: a borda da máscara oscila uma célula
+    amostrada por quadro (quad/seg/mão reais) — a estabilidade usa
+    tolerância, e o resíduo segue convergindo ao alvo."""
+    margin = np.full((120, 120, 3), 80, np.uint8)
+    margin[:, 100:] = 90
+    full = np.ones((120, 120), dtype=bool)
+    hand = full.copy()
+    hand[:, 100:] = False
+
+    smoother = exposure.PaperGainSmoother()
+    first = smoother.update(
+        exposure.paper_gain(margin, full), 0.0, image=margin, mask=full
+    )
+    gains = [first]
+    for index, level in enumerate([88, 90, 88, 90, 88, 90, 88]):
+        mask = hand.copy()
+        if index % 2:
+            mask[40:48, 96:104] = False  # 1 célula amostrada a mais de mão
+        page = np.full((120, 120, 3), level, np.uint8)
+        target = exposure.paper_gain(page, mask)
+        gains.append(smoother.update(target, (index + 1) / 10.0, image=page, mask=mask))
+
+    assert gains[1] < first
+    assert gains[-1] > 2.1  # borda tremendo não trava a convergência
 
 
 def _dark_paper_with_bright_desk(desk_fraction=0.14, shape=(1200, 850)):

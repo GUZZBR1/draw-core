@@ -156,12 +156,16 @@ class PaperGainSmoother:
             # não do alvo: uma mão cobrindo a margem clara neste quadro
             # mudaria o p90 da máscara nova e o alvo iria na direção
             # contrária à exposição (Devin Review PR #140).
-            ratio, same_mask = shift
+            ratio, mask_stable = shift
             corrected = self._gain / ratio
-            if not same_mask:
+            if not mask_stable or target >= _MAX_GAIN:
+                # Máscara mexeu: o alvo do quadro pode ter enviesado.
+                # Alvo no teto: ele não mede a cena — convergir para ele
+                # desfaria a correção e re-injetaria overshoot a cada
+                # clarão (Devin Review PR #140).
                 self._gain = float(np.clip(corrected, 1.0, _MAX_GAIN))
                 return self._gain
-            # Máscara estável, o alvo é confiável: a correção não pode
+            # Máscara estável e alvo confiável: a correção não pode
             # segurar brilho acima dele — sair do bypass 1,0 restaurando
             # o nível anterior cliparia realces (Devin Review PR #140).
             # Sem retorno aqui, o resíduo converge ao alvo pela
@@ -221,9 +225,12 @@ class PaperGainSmoother:
             and abs(p90_delta) >= _GLOBAL_EXPOSURE_LOG_TOLERANCE
             and abs(p90_delta - median_delta) <= _GLOBAL_EXPOSURE_LOG_TOLERANCE
         ):
-            return p90_cur / p90_prev, bool(
-                np.array_equal(sample_mask, self._prev_mask)
-            )
+            # Bordas de quad/seg/mão oscilam umas células por quadro:
+            # a estabilidade usa fração de diferença, não igualdade
+            # exata (Devin Review PR #140).
+            diff = np.count_nonzero(sample_mask != self._prev_mask)
+            mask_stable = diff <= max(2, sample_mask.sum() // 50)
+            return p90_cur / p90_prev, mask_stable
         return None
 
     def _newly_saturates(self, image, mask, target):
