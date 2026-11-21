@@ -350,7 +350,10 @@ def simplify(points, epsilon, closed):
     arc2 = np.vstack([points[hi:], points[: lo + 1]])
     s1 = _dp_open(arc1, epsilon)
     s2 = _dp_open(arc2, epsilon)
-    return np.vstack([s1, s2[1:-1] if len(s2) > 2 else s2[1:]])
+    # s2 termina na âncora inicial de s1: descarta as duas pontas sempre.
+    # Com o arco colapsado (len 2) o miolo é vazio; `s2[1:]` repetia a
+    # âncora e um segmento virava 3 entradas [p, q, p].
+    return np.vstack([s1, s2[1:-1]])
 
 
 def simplify_polylines(polylines, epsilon):

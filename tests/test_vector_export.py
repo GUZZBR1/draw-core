@@ -94,6 +94,24 @@ def test_simplify_polylines_keeps_small_closed_loop():
     assert (simplified[0]["points"] == diamond).all()
 
 
+def test_simplify_closed_collapse_does_not_repeat_anchor():
+    """Com os dois arcos colapsados o laço fechado tem 2 vértices
+    distintos e 2 entradas — não [p, q, p]."""
+    diamond = np.array([[0, 1], [1, 0], [2, 1], [1, 2]], dtype=np.float64)
+    out = ev.simplify(diamond, 2.5, True)
+    assert len(out) == len(np.unique(out, axis=0)) == 2
+
+
+def test_simplify_closed_keeps_vertices_when_one_arc_collapses():
+    """Só um arco colapsado: nenhum vértice duplicado nem perdido."""
+    pts = np.array([[0, 0], [5, 0.2], [10, 0], [10, 10], [0, 10]], dtype=np.float64)
+    out = ev.simplify(pts, 1.0, True)
+    assert len(out) == len(np.unique(out, axis=0))
+    assert {tuple(p) for p in [(0, 0), (10, 0), (10, 10), (0, 10)]} <= {
+        tuple(p) for p in out.tolist()
+    }
+
+
 def test_two_by_two_dot_survives_thinning_and_exports(tmp_path):
     # Um ponto 2x2 passa por filter_microfragments (area=4) mas o
     # Zhang-Suen o apagava inteiro: o export omitia o ponto.
