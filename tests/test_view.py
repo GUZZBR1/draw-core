@@ -44,8 +44,8 @@ def test_blank_sheet_cache_survives_composition():
     view_module.compose_view(_camera(), blank)
     assert np.array_equal(view_module._BLANK_SHEET, view_module.blank_sheet())
     assert view_module.blank_sheet().shape == (
-        config.PAPER_H,
-        config.PAPER_W,
+        config.current().height,
+        config.current().width,
         3,
     )
 

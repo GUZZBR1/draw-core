@@ -59,7 +59,7 @@ def quad_aspect(corners):
 
 def aspect_grid(corners, long_side=None):
     """(largura, altura) com a proporção do quad e o lado maior da grade."""
-    long_side = long_side or max(config.PAPER_W, config.PAPER_H)
+    long_side = long_side or max(config.current().width, config.current().height)
     aspect = quad_aspect(corners)
     if aspect >= 1.0:
         return long_side, max(1, int(round(long_side / aspect)))
@@ -151,7 +151,7 @@ def diagnose_frame(frame, detector, page_clean, out_dir, idx):
         return record
     record["quad_aspect"] = quad_aspect(corners)
     grids = {
-        "warp": (config.PAPER_W, config.PAPER_H),
+        "warp": (config.current().width, config.current().height),
         "warp_aspect": aspect_grid(corners),
     }
     record["grids"] = {k: list(v) for k, v in grids.items()}

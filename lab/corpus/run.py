@@ -199,13 +199,7 @@ def run_bundle(
     from lab import bench_ink
 
     clip_dir = Path(clip_dir)
-    saved = (
-        config.PAPER_FORMAT,
-        config.PAPER_ORIENTATION,
-        config.PAPER_W,
-        config.PAPER_H,
-        config.MARKER_CENTERS,
-    )
+    saved = config.current()
     conditions = {}
     try:
         clip = load_clip(clip_dir)
@@ -251,13 +245,7 @@ def run_bundle(
             conditions=conditions,
         )
     finally:
-        (
-            config.PAPER_FORMAT,
-            config.PAPER_ORIENTATION,
-            config.PAPER_W,
-            config.PAPER_H,
-            config.MARKER_CENTERS,
-        ) = saved
+        config._set_current(saved)
 
 
 def run_corpus(

@@ -287,7 +287,7 @@ def run_pipeline(
         "status": "ok" if mask is not None else "no_canvas",
         "mode": "page_clean",
         "sheet_detector": "neural+classic" if neural is not None else "classic",
-        "canvas_shape": [config.PAPER_H, config.PAPER_W],
+        "canvas_shape": [config.current().height, config.current().width],
         "scheduler": "synchronous_video_clock",
         "hand_visibility_configured": visibility_configured,
         "hand_presence_samples": (

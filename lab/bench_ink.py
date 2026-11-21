@@ -525,7 +525,7 @@ def run_clip(
 
         regions = parse_regions(
             json.loads(regions_path.read_text()),
-            size=(config.PAPER_W, config.PAPER_H),
+            size=(config.current().width, config.current().height),
         )
     series = []
     retracted = {"carry": 0, "last": 0}
@@ -595,7 +595,7 @@ def run_clip(
     cpu = time.process_time() - cpu0
     loop = holder["loop"]
     mask = (
-        np.zeros((config.PAPER_H, config.PAPER_W), bool)
+        np.zeros((config.current().height, config.current().width), bool)
         if loop.clean_mask is None
         else np.asarray(loop.clean_mask) > 0
     )
