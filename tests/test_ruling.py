@@ -621,3 +621,24 @@ def test_the_partial_tail_window_counts_only_when_it_has_ink():
     # e o resto de 24 colunas tem de existir: sem ele (janelas inteiras so) a
     # tinta do resto seria ignorada e frac_tail seria 1/2
     assert frac_tail[0] > frac_blank[0]
+
+
+def test_the_inked_partial_tail_is_what_keeps_a_tilted_extrapolated_line():
+    """O mesmo cenario, ponta a ponta pelo filtro de linhas: a prevista so
+    entra na vista nas ultimas 168 colunas (3 janelas inteiras + resto de
+    24). Tinta na primeira janela inteira: 1/3 < 35% e ela cai. Com tinta
+    tambem no resto: 2/4 e ela fica — so a cauda parcial a salva (review
+    #139)."""
+    x = np.arange(600)
+    seg = _two_line_segment(600, 599.0 + (432.0 - x) * 0.5)
+    prob = np.zeros((600, 600), np.float32)
+    prob[99:101, :] = 0.95
+    for c in range(432, 480):  # primeira janela inteira visivel
+        r = int(round(seg.paths[1, c]))
+        prob[r : r + 2, c] = 0.95
+    assert ruling._drop_unsupported(prob, seg).paths.shape[0] == 1
+    with_tail = prob.copy()
+    for c in range(576, 600):  # e o resto parcial
+        r = int(round(seg.paths[1, c]))
+        with_tail[r : r + 2, c] = 0.95
+    assert ruling._drop_unsupported(with_tail, seg).paths.shape[0] == 2
