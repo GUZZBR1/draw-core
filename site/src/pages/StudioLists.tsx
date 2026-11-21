@@ -74,8 +74,7 @@ export function NewProject() {
       setError(true);
       return;
     }
-    const drawing = createDrawing(project.id, studioNames(tr));
-    navigate(drawing ? `/app/p/${project.id}/d/${drawing.id}` : `/app/p/${project.id}`);
+    navigate(`/app/p/${project.id}`);
   };
   return (
     <Page title={tr('Novo projeto', 'New project')} back={{ to: '/app', label: tr('início', 'home') }} center>
