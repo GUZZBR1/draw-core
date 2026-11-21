@@ -1336,6 +1336,26 @@ def _provision_official_models(neural_model, page_clean_model, hand_model):
             print(f"Aviso: download automatico de {official_name} falhou ({error}).")
 
 
+def _ink_baseline_status_text(baseline):
+    """Texto curto que não promete tinta segura enquanto há áreas pendentes."""
+    phase = baseline.phase
+    if phase == "stabilizing":
+        return "Estabilizando para capturar referencia", (0, 255, 255)
+    if phase == "recapturing":
+        return "Recapturando referencia", (0, 255, 255)
+    if phase == "waiting_visibility":
+        return "Capturando referencia inicial", (0, 255, 255)
+    if phase == "ready_partial":
+        fraction = 100 * baseline.fraction
+        return (
+            f"Referencia parcial ({fraction:.0f}%); aguarde antes de desenhar",
+            (0, 255, 255),
+        )
+    if baseline.ready:
+        return "Pronto para desenhar", (0, 255, 0)
+    return "Aguardando referencia", (0, 255, 255)
+
+
 def run(
     source=0,
     save_dir="captures",
@@ -2005,29 +2025,9 @@ def run(
                     )
                     if pipeline_config is not None and pipeline_config.ink.baseline:
                         baseline = pipeline.ink_baseline_state()
-                        phase = baseline.get("phase")
-                        if phase == "stabilizing":
-                            baseline_text = "Estabilizando para capturar referencia"
-                            baseline_color = (0, 255, 255)
-                        elif phase == "recapturing":
-                            baseline_text = "Recapturando referencia"
-                            baseline_color = (0, 255, 255)
-                        elif phase == "waiting_visibility":
-                            baseline_text = "Capturando referencia inicial"
-                            baseline_color = (0, 255, 255)
-                        elif phase == "ready_partial":
-                            fraction = 100 * baseline.get("fraction", 0.0)
-                            baseline_text = (
-                                f"Pronto para desenhar; referencia visivel "
-                                f"({fraction:.0f}%)"
-                            )
-                            baseline_color = (0, 255, 255)
-                        elif baseline.get("ready"):
-                            baseline_text = "Pronto para desenhar"
-                            baseline_color = (0, 255, 0)
-                        else:
-                            baseline_text = "Aguardando referencia"
-                            baseline_color = (0, 255, 255)
+                        baseline_text, baseline_color = _ink_baseline_status_text(
+                            baseline
+                        )
                         cv2.putText(
                             status,
                             baseline_text,

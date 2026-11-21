@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from draw import app as app_module  # noqa: E402
 from draw import config  # noqa: E402
 from draw import paper as paper_module  # noqa: E402
+from draw.contracts import InkBaselineState  # noqa: E402
 from draw.infra import manifest as manifest_module  # noqa: E402
 from draw.perception import PRESENCE_VETO_LOGIT  # noqa: E402
 
@@ -1149,6 +1150,24 @@ def test_main_ink_baseline_coexiste_com_legacy_e_preset(monkeypatch):
     ]
     assert legacy.ink == app_module.InkConfig(baseline=True)
     assert ruled.ink == app_module.InkConfig.production(baseline=True)
+
+
+def test_baseline_parcial_nao_promete_que_todas_as_areas_estao_prontas():
+    state = InkBaselineState(
+        True,
+        True,
+        True,
+        False,
+        50,
+        100,
+        50,
+        0.5,
+        "ready_partial",
+    )
+    text, color = app_module._ink_baseline_status_text(state)
+    assert text == "Referencia parcial (50%); aguarde antes de desenhar"
+    assert color == (0, 255, 255)
+    assert "Pronto" not in text
 
 
 def test_main_spread_mode_entra_na_pipeline_config(monkeypatch):

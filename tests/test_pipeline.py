@@ -21,6 +21,7 @@ from draw.contracts import (
     HandOcclusion,
     HandPresenceResult,
     HandSample,
+    InkBaselineState,
     InkDisplaySnapshot,
 )
 from draw.ink import registration as registration_mod
@@ -244,6 +245,49 @@ def test_pipeline_marks_baseline_stable_after_corner_history_settles():
     assert ink.pages
     assert ink.pages[0].baseline_stable is False
     assert any(page.baseline_stable for page in ink.pages)
+
+
+def test_pipeline_stabilizes_baseline_from_fresh_detections_without_hand():
+    results = [
+        HandPresenceResult(index, (index - 1) * 0.1, 0, HandSample(False, False))
+        for index in range(1, 40)
+    ]
+    hp = _FakeHandPresenceWorker(results=results)
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None),
+        config=PipelineConfig(ink=InkConfig(baseline=True), **_BASE),
+        hand_presence=hp,
+    )
+
+    _drive(loop, 20)
+
+    assert loop.clean_hand_present is False
+    assert len(loop.corner_history) == 1  # normal ink geometry stays frozen
+    assert any(page.baseline_stable for page in ink.pages)
+
+
+def test_baseline_status_always_uses_the_same_frozen_contract():
+    disabled_loop, _det, _ink = _make_loop(lambda _i: (None, None, None))
+    disabled = disabled_loop.ink_baseline_state()
+    waiting_loop, _det, _ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None),
+        config=PipelineConfig(ink=InkConfig(baseline=True), **_BASE),
+    )
+    waiting = waiting_loop.ink_baseline_state()
+    _drive(waiting_loop, 10)
+    active = waiting_loop.ink_baseline_state()
+
+    assert all(
+        isinstance(state, InkBaselineState) for state in (disabled, waiting, active)
+    )
+    fields = tuple(InkBaselineState.__dataclass_fields__)
+    assert all(
+        tuple(state.__dataclass_fields__) == fields
+        for state in (disabled, waiting, active)
+    )
+    assert disabled.phase == "disabled"
+    assert waiting.phase == "waiting_page"
+    assert active.phase == "stabilizing"
 
 
 def test_pipeline_waits_for_moving_quad_to_settle_before_baseline_capture():

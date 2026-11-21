@@ -308,6 +308,7 @@ class Pipeline:
         self._hand_exit_at = None
         self._stale_hand_woke = False
         self.corner_history = deque(maxlen=_INK_CORNER_HISTORY)
+        self._baseline_corner_history = deque(maxlen=_INK_CORNER_HISTORY)
         self.ink_session_open = False
         self.accumulated_canvas = None
         # Canvas do caminho pagina->limpa: a mascara acumulada e a
@@ -406,7 +407,8 @@ class Pipeline:
     def _baseline_quad_is_stable(self, median_corners):
         """Only start/reference-capture after the page geometry has settled."""
         if (
-            len(self.corner_history) < _INK_CORNER_HISTORY
+            not self._config.ink.baseline
+            or len(self._baseline_corner_history) < _INK_CORNER_HISTORY
             or self.tracker.missed
             or self.tracker.has_pending
         ):
@@ -416,9 +418,14 @@ class Pipeline:
         stable_px = (
             self._detect_wake.stable_corner_px if self._detect_wake is not None else 4.0
         )
+        baseline_median = np.median(
+            np.stack(self._baseline_corner_history), axis=0
+        ).astype(np.float32)
+        if tracker.corner_distance(median_corners, baseline_median) > stable_px:
+            return False
         return all(
-            tracker.corner_distance(median_corners, corners) <= stable_px
-            for corners in self.corner_history
+            tracker.corner_distance(baseline_median, corners) <= stable_px
+            for corners in self._baseline_corner_history
         )
 
     def _warp_and_submit_ink(self, packet, warp_corners, baseline_stable=False):
@@ -688,6 +695,7 @@ class Pipeline:
         self._hand_exit_at = None
         self._stale_hand_woke = False
         self.corner_history.clear()
+        self._baseline_corner_history.clear()
         self.display_corners = None
         self.display_gray = None
         self._coverage_mask = None
@@ -1035,7 +1043,13 @@ class Pipeline:
                 self.clean_display_version = 0
                 self.clean_provisional_mask = None
                 self.corner_history.clear()
+                self._baseline_corner_history.clear()
                 self.ink_session_open = True
+            if self._config.ink.baseline:
+                if self.tracker.missed or self.tracker.has_pending:
+                    self._baseline_corner_history.clear()
+                else:
+                    self._baseline_corner_history.append(self.tracker.corners.copy())
             # Sem mao, a geometria da tinta congela na
             # ultima mediana: a pagina esta assentada e a
             # mediana viva seguiria andando com o balanco
@@ -1067,6 +1081,8 @@ class Pipeline:
             self._warp_and_submit_ink(
                 packet, ink_corners, baseline_stable=baseline_stable
             )
+        elif ran_detection and self._config.ink.baseline:
+            self._baseline_corner_history.clear()
         elif (
             self._detect_wake is not None
             and (
@@ -1125,14 +1141,20 @@ class Pipeline:
     def ink_baseline_state(self):
         """Prontidao da referencia para a interface."""
         if not self._config.ink.baseline:
-            return {"enabled": False, "ready": False, "phase": "disabled"}
+            return contracts.InkBaselineState(
+                False, False, False, False, 0, 0, 0, 0.0, "disabled"
+            )
         if not self.sheet_present or not self.ink_session_open:
-            return {"enabled": True, "ready": False, "phase": "waiting_page"}
+            return contracts.InkBaselineState(
+                True, False, False, False, 0, 0, 0, 0.0, "waiting_page"
+            )
         state = getattr(self.ink_worker, "baseline_state", None)
         return (
             state()
             if state is not None
-            else {"enabled": True, "ready": False, "phase": "stabilizing"}
+            else contracts.InkBaselineState(
+                True, False, False, False, 0, 0, 0, 0.0, "stabilizing"
+            )
         )
 
     def collect_ink(self):

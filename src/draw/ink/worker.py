@@ -3,6 +3,7 @@
 import threading
 import time
 from collections import deque
+from dataclasses import replace
 
 import cv2
 import numpy as np
@@ -441,9 +442,26 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._previous_corners = None
             if preserve_identity:
                 reference = self._accumulator._confirmed
-                self._identity_reference = (
-                    None if reference is None else reference.copy()
-                )
+                baseline_reference = self._accumulator._baseline_guard
+                if reference is None and baseline_reference is None:
+                    self._identity_reference = None
+                else:
+                    shape = (
+                        reference.shape
+                        if reference is not None
+                        else baseline_reference.shape
+                    )
+                    identity_marks = np.zeros(shape, dtype=bool)
+                    if reference is not None:
+                        np.logical_or(reference > 0, identity_marks, out=identity_marks)
+                    if (
+                        baseline_reference is not None
+                        and baseline_reference.shape == shape
+                    ):
+                        np.logical_or(
+                            identity_marks, baseline_reference, out=identity_marks
+                        )
+                    self._identity_reference = identity_marks.astype(np.uint8) * 255
                 self._identity_reference_corners = (
                     None
                     if self._anchor_corners is None
@@ -454,7 +472,11 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 self._identity_reference_corners = None
             self._generation += 1
             self._baseline_session_active = self._config.baseline
-            self._baseline_reset_requested = self._config.baseline
+            # During sheet recovery, keep the old page-clean evidence until
+            # the registered identity check decides same page vs. replacement.
+            self._baseline_reset_requested = (
+                self._config.baseline and not preserve_identity
+            )
             self._baseline_rezero_requested = False
             self._anchor_samples = []
             self._reg_frozen_corners = None
@@ -515,8 +537,9 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         """Prontidao e cobertura observada da referencia atual."""
         with self._condition:
             state = self._accumulator.baseline_state()
-            if state["enabled"] and not self._baseline_session_active:
-                state.update(
+            if state.enabled and not self._baseline_session_active:
+                state = replace(
+                    state,
                     ready=False,
                     complete=False,
                     captured_px=0,
@@ -524,7 +547,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     phase="waiting_page",
                 )
             elif self._baseline_rezero_requested:
-                state.update(
+                state = replace(
+                    state,
                     ready=False,
                     complete=False,
                     captured_px=0,
@@ -532,7 +556,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     phase="recapturing",
                 )
             elif self._baseline_reset_requested:
-                state.update(
+                state = replace(
+                    state,
                     ready=False,
                     complete=False,
                     captured_px=0,
@@ -766,7 +791,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         if self._baseline_reset_requested or self._baseline_rezero_requested:
             return False
         if self._config.baseline and self._baseline_session_active:
-            if not self._accumulator.baseline_state()["started"]:
+            if not self._accumulator.baseline_state().started:
                 return False
         if (
             self._config.removal
@@ -1194,16 +1219,13 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             if generation != self._generation:
                 self._telemetry_skipped_stale += 1
                 return True
-            baseline_reset = self._baseline_reset_requested
-            baseline_rezero = self._baseline_rezero_requested
-            self._baseline_reset_requested = False
-            self._baseline_rezero_requested = False
+            baseline_rezero = False
+            baseline_reset = (
+                self._baseline_reset_requested and not self._baseline_rezero_requested
+            )
             if baseline_reset:
-                if baseline_rezero:
-                    self._accumulator.reset()
-                    self._canvas_epoch += 1
-                else:
-                    self._accumulator.reset_baseline()
+                self._baseline_reset_requested = False
+                self._accumulator.reset_baseline()
         # Uma excecao do modelo (shape errado, sessao morta, ONNX
         # sem memoria) matava esta thread em silencio: o canvas
         # congelava no ultimo quadro e nada era impresso. O erro
@@ -1224,7 +1246,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         reg_deadband = self._config.reg_deadband
         anchor_arbitration = self._config.anchor_arbitration
         anchor_follow = self._config.anchor_follow
-        force_publish = baseline_rezero
+        force_publish = False
         reg_info = {}
         baseline_coverage = None
         try:
@@ -2016,6 +2038,30 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 and not identity_switch_pending
                 and pass_voted
             )
+            if baseline_capture:
+                visible_for_baseline = (
+                    np.ones(prob.shape, dtype=bool) if visible is None else visible
+                )
+                coverage_for_baseline = (
+                    np.ones(prob.shape, dtype=bool)
+                    if baseline_coverage is None
+                    else np.asarray(baseline_coverage, dtype=bool)
+                )
+                if coverage_for_baseline.shape != prob.shape:
+                    coverage_for_baseline = np.ones(prob.shape, dtype=bool)
+                can_capture = bool(np.any(visible_for_baseline & coverage_for_baseline))
+                if can_capture:
+                    with self._condition:
+                        baseline_rezero = (
+                            generation == self._generation
+                            and self._baseline_rezero_requested
+                        )
+                        if baseline_rezero:
+                            self._accumulator.reset()
+                            self._canvas_epoch += 1
+                            self._baseline_reset_requested = False
+                            self._baseline_rezero_requested = False
+                            force_publish = True
             result = self._accumulator.add(
                 prob,
                 visible,

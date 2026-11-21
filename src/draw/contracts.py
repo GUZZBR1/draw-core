@@ -250,6 +250,21 @@ class WarpedPage:
 
 
 @dataclass(frozen=True, slots=True)
+class InkBaselineState:
+    """Immutable readiness snapshot for the optional page-clean baseline."""
+
+    enabled: bool
+    started: bool
+    ready: bool
+    complete: bool
+    captured_px: int
+    target_px: int
+    pending_px: int
+    fraction: float
+    phase: str
+
+
+@dataclass(frozen=True, slots=True)
 class InkSnapshot:
     """Uma publicação do canvas de tinta confirmada.
 

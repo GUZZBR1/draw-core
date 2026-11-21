@@ -450,6 +450,7 @@ def test_reset_source_publishes_clear():
     pipe.ink_worker = type("I", (), {"set_hand_presence": lambda *_: None})()
     pipe.tracker = type("T", (), {"reset": lambda self: None})()
     pipe.corner_history = type("C", (), {"clear": lambda self: None})()
+    pipe._baseline_corner_history = type("C", (), {"clear": lambda self: None})()
     pipe.reset_source(1.0)
     assert len(calls) == 1 and calls[0].confirmed is None
 
