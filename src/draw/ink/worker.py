@@ -2164,14 +2164,23 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 self._motion_unregistered_total += 1
             elif motion_decision == "fail_open" and prob is registered_prob:
                 self._motion_fail_open_total += 1
+            # Passada adiada por "no_overlap" nao vota: o adiamento
+            # de oclusao e sobre a MESMA folha escondida pela mao e
+            # a evidencia amostrada segue valida; o de sobreposicao
+            # e sobre OUTRA folha — a tinta nova registrada na
+            # regiao parcial confirmaria no canvas velho antes do
+            # timeout misturar os dois desenhos.
+            identity_abstain = identity_switch_pending or (
+                identity_deferred
+                and (identity_timed_out or quarantine_reason == "no_overlap")
+            )
             pass_voted = not (
-                identity_switch_pending
-                or (identity_deferred and identity_timed_out)
+                identity_abstain
                 or arbitration_abstain
                 or follow_abstain
                 or motion_abstain
             )
-            if identity_switch_pending or (identity_deferred and identity_timed_out):
+            if identity_abstain:
                 visible = np.zeros(prob.shape, dtype=bool)
             if arbitration_abstain:
                 # Evento de arbitragem aberto: a passada e

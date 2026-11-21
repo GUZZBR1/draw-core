@@ -687,7 +687,10 @@ def test_disjoint_replacement_sheet_does_not_keep_old_ink():
     nao e "match vazio" (aceitaria mesma pagina e carregaria a
     tinta velha), e ausencia de evidencia. A referencia fica
     pendente, a quarentena estoura o limite de adiamentos e o
-    canvas reseta — a folha de substituicao herda nada."""
+    canvas reseta — a folha de substituicao herda nada. Sem
+    mascara de visibilidade vale o mesmo: com a guarda ativa a
+    pegada vazia dispara o adiamento por "no_overlap"; sem ela a
+    troca resolve pelo consenso de virada."""
     quad_wide = np.array(
         [[200, 100], [560, 100], [560, 600], [200, 600]], dtype=np.float32
     )
@@ -700,7 +703,7 @@ def test_disjoint_replacement_sheet_does_not_keep_old_ink():
     img_blank = np.full((1200, 850, 3), 215, np.uint8)
     all_clear = np.ones(img_old.shape[:2], bool)
 
-    def run_case(border_guard_px):
+    def run_case(border_guard_px, visible):
         clock = _Clock()
         cfg = InkConfig.strict_vote(0.85, border_guard_px=border_guard_px)
         worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
@@ -717,12 +720,75 @@ def test_disjoint_replacement_sheet_does_not_keep_old_ink():
             clock.now += 1.1
             worker.submit(
                 contracts.WarpedPage(
-                    img_blank, gen, quad_far, all_clear, captured_at=clock.now
+                    img_blank, gen, quad_far, visible, captured_at=clock.now
                 )
             )
             worker.pump()
         snap = worker.poll(gen, 0)
         assert snap is not None
+        return int(np.count_nonzero(snap.confirmed[100:1100, 9:13]))
+
+    assert run_case(None, all_clear) == 0
+    assert run_case(0, all_clear) == 0
+    assert run_case(None, None) == 0
+    assert run_case(0, None) == 0
+
+
+def test_deferred_partial_overlap_does_not_mix_ink():
+    """Folha nova MARCADA com sobreposicao parcial da pegada (< 25%
+    da regiao usavel da ancora): a recuperacao adia por "no_overlap"
+    e a passada adiada nao vota — a tinta nova registrada na faixa
+    amostrada nao pode confirmar sobre o canvas velho enquanto a
+    identidade esta pendente (a quarentena misturando tinta de duas
+    folhas). Estourada a quarentena o canvas reseta e a tinta velha
+    nao carrega para a folha de substituicao."""
+    quad_wide = np.array(
+        [[200, 100], [560, 100], [560, 600], [200, 600]], dtype=np.float32
+    )
+    # Sobreposicao parcial a direita: a pegada amostrada cobre ~19%
+    # da regiao usavel da ancora (cols ~685-849 da grade) — abaixo
+    # do piso de evidencia, a decisao adia por "no_overlap". O
+    # traco novo deste quad registra nessa faixa (cols ~684-781) e
+    # confirmaria ali em ~3 passadas sob strict_vote se votasse.
+    quad_part = np.array(
+        [[490, 100], [840, 100], [840, 600], [490, 600]], dtype=np.float32
+    )
+    img_old = np.full((1200, 850, 3), 215, np.uint8)
+    img_old[100:1100, 9:13] = 25  # traco da folha velha
+    img_marked = np.full((1200, 850, 3), 215, np.uint8)
+    img_marked[100:1100, 0:100] = 25  # traco novo, cai na faixa amostrada
+    all_clear = np.ones(img_old.shape[:2], bool)
+
+    def run_case(border_guard_px):
+        clock = _Clock()
+        cfg = InkConfig.strict_vote(0.85, border_guard_px=border_guard_px)
+        worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
+        for _ in range(5):
+            clock.now += 1.1
+            worker.submit(
+                contracts.WarpedPage(img_old, 0, quad_wide, captured_at=clock.now)
+            )
+            worker.pump()
+        worker._anchor_corners = quad_wide.copy()
+        gen = worker.new_generation(preserve_identity=True)
+
+        snap = None
+        for _ in range(8):
+            clock.now += 1.1
+            worker.submit(
+                contracts.WarpedPage(
+                    img_marked, gen, quad_part, all_clear, captured_at=clock.now
+                )
+            )
+            worker.pump()
+            snap = worker.poll(gen, 0)
+            assert snap is not None
+            # Toda mascara publicada conta, nao so a final: a tinta
+            # da folha nova nunca pode aparecer confirmada na faixa
+            # amostrada do canvas velho enquanto a decisao adia.
+            assert int(np.count_nonzero(snap.confirmed[:, 685:810])) == 0
+        # Timeout da quarentena resetou o canvas: a tinta velha
+        # nao carrega para a folha de substituicao.
         return int(np.count_nonzero(snap.confirmed[100:1100, 9:13]))
 
     assert run_case(None) == 0
