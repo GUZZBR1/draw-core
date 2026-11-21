@@ -156,14 +156,29 @@ def render_markdown(results, baseline: str, title="Corpus") -> str:
         lines.append("")
         for label in sorted(cond_groups):
             group = cond_groups[label]
-            clips = sorted({r.clip for r in group})
+            bundles = {r.bundle for r in group}
+            measured = {(r.clip, r.bundle) for r in group}
+            # So entram na soma os clipes que TODOS os bundles do grupo
+            # mediram: um clipe com erro ou ausencia em qualquer bundle
+            # sai da fatia, senao o delta conta tinta que a base nunca
+            # mediu (mesma regua do "-" por clipe).
+            common = sorted(
+                clip
+                for clip in {r.clip for r in group}
+                if all((clip, b) in measured for b in bundles)
+            )
             lines.append(f"### {label}")
-            lines.append(f"clipes: {', '.join(clips)}")
+            lines.append(f"clipes: {', '.join(common) or '—'}")
             lines.append("")
+            if not common:
+                continue
+            common_set = set(common)
             lines.append("| bundle | canvas_px | retratado | passadas | Δ vs base |")
             lines.append("|---|---:|---:|---:|---:|")
             by_bundle = {}
             for res in group:
+                if res.clip not in common_set:
+                    continue
                 acc = by_bundle.setdefault(res.bundle, [0, 0, 0])
                 acc[0] += res.canvas_px
                 acc[1] += res.retracted_px_total
