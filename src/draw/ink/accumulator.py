@@ -38,7 +38,7 @@ class LayeredInkAccumulator:
         self._config = config if config is not None else InkConfig()
         self.reset()
 
-    def reset(self):
+    def reset(self, *, preserve_hold=False):
         self._window = deque(maxlen=votes._INK_VOTE_WINDOW)
         self._removal_streak = None
         self._confirmed = None
@@ -50,7 +50,8 @@ class LayeredInkAccumulator:
         self._score_buf = None
         self._hits_buf = None
         self._seen_buf = None
-        self._hold = None
+        if not preserve_hold:
+            self._hold = None
         self.reset_baseline()
 
     def reset_baseline(self):
@@ -59,6 +60,7 @@ class LayeredInkAccumulator:
         self._baseline_guard = None
         self._baseline_allowed = None
         self._baseline_not_guard = None
+        self._baseline_exact_max = None
         self._baseline_reference_max = None
         self._baseline_change_threshold = None
         self._baseline_changed = None
@@ -123,6 +125,7 @@ class LayeredInkAccumulator:
             self._baseline_guard = np.zeros(shape, dtype=bool)
             self._baseline_allowed = np.zeros(shape, dtype=bool)
             self._baseline_not_guard = np.ones(shape, dtype=bool)
+            self._baseline_exact_max = np.zeros(shape, dtype=np.float32)
             self._baseline_reference_max = np.zeros(shape, dtype=np.float32)
             self._baseline_change_threshold = np.full(shape, np.inf, dtype=np.float32)
             self._baseline_changed = np.zeros(shape, dtype=bool)
@@ -192,6 +195,11 @@ class LayeredInkAccumulator:
                 else:
                     neighborhood = self._baseline_capture_scratch
                 np.maximum(
+                    self._baseline_exact_max,
+                    self._baseline_capture_scratch,
+                    out=self._baseline_exact_max,
+                )
+                np.maximum(
                     self._baseline_reference_max,
                     neighborhood,
                     out=self._baseline_reference_max,
@@ -211,6 +219,15 @@ class LayeredInkAccumulator:
                 np.add(
                     self._baseline_reference_max,
                     _BASELINE_CHANGE_THRESHOLD,
+                    out=self._baseline_change_threshold,
+                    where=self._baseline_changed,
+                )
+                # Evita veto permanente em pixels vizinhos a impressao escura:
+                # o teto cai para 0.99 exceto onde o proprio pixel ja bateu isso.
+                threshold_cap = np.maximum(self._baseline_exact_max, np.float32(0.99))
+                np.minimum(
+                    self._baseline_change_threshold,
+                    threshold_cap,
                     out=self._baseline_change_threshold,
                     where=self._baseline_changed,
                 )
@@ -271,6 +288,21 @@ class LayeredInkAccumulator:
         for item in window[1:]:
             np.logical_or(seen, item > self.threshold, out=seen)
         return score, hits, seen
+
+    def would_freeze(self, paper_ok, shape=None):
+        """Mascara booleana de pixels congelados por paper_ok/hold sem mutar estado."""
+        if paper_ok is None:
+            return None
+        paper_ok = np.asarray(paper_ok, dtype=bool)
+        if shape is not None and paper_ok.shape != shape:
+            return None
+        if self._hold is None or self._hold.shape != paper_ok.shape:
+            hold = np.zeros(paper_ok.shape, dtype=np.uint8)
+        else:
+            hold = self._hold.copy()
+            np.subtract(hold, 1, out=hold, where=hold > 0)
+        hold[~paper_ok] = self._config.occlusion_hold_passes + 1
+        return ~paper_ok | (hold > 0)
 
     def add(
         self,
@@ -424,14 +456,19 @@ class LayeredInkAccumulator:
                 and canvas_before
                 and removal_allowed
             ):
-                np.logical_and(
-                    physical_visible,
-                    self._baseline_seen,
+                np.logical_or(
+                    self._baseline_current_coverage,
+                    confirmed_before,
                     out=self._baseline_removal_visible,
                 )
                 np.logical_and(
                     self._baseline_removal_visible,
-                    self._baseline_current_coverage,
+                    physical_visible,
+                    out=self._baseline_removal_visible,
+                )
+                np.logical_and(
+                    self._baseline_removal_visible,
+                    self._baseline_seen,
                     out=self._baseline_removal_visible,
                 )
                 removal_visible = self._baseline_removal_visible

@@ -89,6 +89,7 @@ class _FakeInkWorker:
         self.baseline_invalidations = 0
         self.pages = []
         self._display = display
+        self._baseline_state = None
 
     def new_generation(self, preserve_identity=False):
         self.generation += 1
@@ -119,6 +120,9 @@ class _FakeInkWorker:
 
     def invalidate_baseline(self):
         self.baseline_invalidations += 1
+
+    def baseline_state(self):
+        return self._baseline_state
 
 
 class _FakeHandPresenceWorker:
@@ -264,6 +268,36 @@ def test_pipeline_stabilizes_baseline_from_fresh_detections_without_hand():
     assert loop.clean_hand_present is False
     assert len(loop.corner_history) == 1  # normal ink geometry stays frozen
     assert any(page.baseline_stable for page in ink.pages)
+
+
+def test_pipeline_recaptures_baseline_after_small_shift_without_hand():
+    results = [
+        HandPresenceResult(index, (index - 1) * 0.1, 0, HandSample(False, False))
+        for index in range(1, 50)
+    ]
+    hp = _FakeHandPresenceWorker(results=results)
+    shifted_quad = QUAD + np.float32([10.0, 0.0])
+
+    def detect(i):
+        return (QUAD.copy() if i < 6 else shifted_quad.copy()), "paper", None
+
+    loop, _det, ink = _make_loop(
+        detect,
+        config=PipelineConfig(ink=InkConfig(baseline=True), **_BASE),
+        hand_presence=hp,
+    )
+    ink._baseline_state = InkBaselineState(
+        True, True, True, True, 100, 100, 0, 1.0, "ready"
+    )
+    _drive(loop, 20)
+    ink._baseline_state = InkBaselineState(
+        True, False, False, False, 0, 0, 0, 0.0, "recapturing"
+    )
+    before = len(ink.pages)
+    _drive(loop, 40)
+    recapture_pages = [p for p in ink.pages[before:] if p.baseline_stable]
+    assert recapture_pages
+    assert recapture_pages[-1].corners[0, 0] > QUAD[0, 0] + 4.0
 
 
 def test_baseline_status_always_uses_the_same_frozen_contract():

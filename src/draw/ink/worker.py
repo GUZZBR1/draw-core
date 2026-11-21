@@ -355,6 +355,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         # deixam de descrever o canvas (eval descarta).
         self._canvas_epoch = 0
         self._identity_reference = None
+        self._identity_baseline_reference = None
         self._identity_reference_corners = None
         self._identity_recovery_requested = False
         self._identity_defer_count = 0
@@ -449,25 +450,14 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             if preserve_identity:
                 reference = self._accumulator._confirmed
                 baseline_reference = self._accumulator._baseline_guard
-                if reference is None and baseline_reference is None:
-                    self._identity_reference = None
-                else:
-                    shape = (
-                        reference.shape
-                        if reference is not None
-                        else baseline_reference.shape
-                    )
-                    identity_marks = np.zeros(shape, dtype=bool)
-                    if reference is not None:
-                        np.logical_or(reference > 0, identity_marks, out=identity_marks)
-                    if (
-                        baseline_reference is not None
-                        and baseline_reference.shape == shape
-                    ):
-                        np.logical_or(
-                            identity_marks, baseline_reference, out=identity_marks
-                        )
-                    self._identity_reference = identity_marks.astype(np.uint8) * 255
+                self._identity_reference = (
+                    None if reference is None else reference.copy()
+                )
+                self._identity_baseline_reference = (
+                    None
+                    if baseline_reference is None or not self._config.baseline
+                    else baseline_reference.copy()
+                )
                 self._identity_reference_corners = (
                     None
                     if self._anchor_corners is None
@@ -475,6 +465,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 )
             else:
                 self._identity_reference = None
+                self._identity_baseline_reference = None
                 self._identity_reference_corners = None
             self._generation += 1
             self._baseline_session_active = self._config.baseline
@@ -797,7 +788,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         if self._baseline_reset_requested or self._baseline_rezero_requested:
             return False
         if self._config.baseline and self._baseline_session_active:
-            if not self._accumulator.baseline_state().started:
+            if not self._accumulator.baseline_state().ready:
                 return False
         if (
             self._config.removal
@@ -805,7 +796,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             and np.any(self._accumulator._removal_streak)
         ):
             return False
-        if self._identity_recovery_requested and self._identity_reference is not None:
+        if self._identity_recovery_requested and (
+            self._identity_reference is not None
+            or self._identity_baseline_reference is not None
+        ):
             return False
         if (
             self._generation_passes < _REST_MIN_GENERATION_PASSES
@@ -1355,9 +1349,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 if generation != self._generation:
                     return True
                 first_pass = generation != self._worker_generation
-                recovering = self._identity_reference is not None and (
-                    first_pass or self._identity_recovery_requested
-                )
+                recovering = (
+                    self._identity_reference is not None
+                    or self._identity_baseline_reference is not None
+                ) and (first_pass or self._identity_recovery_requested)
                 anchor = (
                     self._identity_reference_corners
                     if recovering
@@ -1691,22 +1686,38 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # A decisao de identidade roda na primeira passada e,
             # enquanto estiver em quarentena, nas seguintes
             # — a referencia so e consumida quando a decisao sai.
-            identity_pending = (
-                self._identity_recovery_requested
-                and self._identity_reference is not None
+            identity_pending = self._identity_recovery_requested and (
+                self._identity_reference is not None
+                or self._identity_baseline_reference is not None
             )
             if first_pass or identity_pending:
                 identity_reference = self._identity_reference
+                identity_baseline_reference = self._identity_baseline_reference
+                has_identity_ref = (
+                    identity_reference is not None
+                    or identity_baseline_reference is not None
+                )
                 identity_corners = self._identity_reference_corners
                 identity_recovery_requested = self._identity_recovery_requested
                 keep_page = False
-                if identity_reference is not None:
+                if has_identity_ref:
                     candidate = registered_prob
                     identity_visible = registered_visible
                     if identity_corners is not None and corners is not None:
                         identity_geometry_registered = True
-                    prior = identity_reference > 0
-                    prior_px = int(np.count_nonzero(prior))
+                    prior_hw = (
+                        np.zeros(candidate.shape, dtype=bool)
+                        if identity_reference is None
+                        else (identity_reference > 0)
+                    )
+                    prior_bl = (
+                        np.zeros(candidate.shape, dtype=bool)
+                        if identity_baseline_reference is None
+                        else (identity_baseline_reference > 0)
+                    )
+                    prior_hw_px = int(np.count_nonzero(prior_hw))
+                    prior_all = prior_hw | prior_bl
+                    prior_px = int(np.count_nonzero(prior_all))
                     identity_reference_px = prior_px
                     if prior_px == 0:
                         seen_any = candidate > self._accumulator.threshold
@@ -1720,56 +1731,69 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                             (identity._IDENTITY_DILATION_KERNEL,) * 2, np.uint8
                         )
                         seen_d = cv2.dilate(seen.astype(np.uint8), kernel) > 0
+                        seen_px = int(np.count_nonzero(seen))
                         if identity_visible is not None:
-                            prior_visible = prior & identity_visible
-                            prior_visible_px = int(np.count_nonzero(prior_visible))
-                            identity_visible_reference_px = prior_visible_px
-                            if prior_visible_px < max(
-                                identity._IDENTITY_MIN_VISIBLE_PX,
-                                int(identity._IDENTITY_MIN_VISIBLE_FRACTION * prior_px),
-                            ):
-                                # Tinta anterior quase toda
-                                # coberta: decidir agora seria
-                                # condenar a pagina pela mao.
-                                # Adia; a referencia fica para a
-                                # proxima passada.
-                                identity_deferred = True
-                                quarantine_reason = "occlusion"
-                            else:
-                                prior_d = (
-                                    cv2.dilate(
-                                        prior_visible.astype(np.uint8),
-                                        kernel,
-                                    )
-                                    > 0
-                                )
-                                identity_recall = (
-                                    np.count_nonzero(prior_visible & seen_d)
-                                    / prior_visible_px
-                                )
-                                seen_px = int(np.count_nonzero(seen))
-                                identity_containment = (
-                                    0.0
-                                    if seen_px == 0
-                                    else (np.count_nonzero(seen & prior_d) / seen_px)
-                                )
-                                keep_page = (
-                                    identity_recall
-                                    >= identity._PAGE_IDENTITY_MIN_RECALL
-                                    and identity_containment
-                                    >= identity._PAGE_IDENTITY_MIN_CONTAINMENT
-                                )
-                        else:
-                            prior_d = cv2.dilate(prior.astype(np.uint8), kernel) > 0
-                            identity_recall = (
-                                np.count_nonzero(prior & seen_d) / prior_px
+                            all_visible = prior_all & identity_visible
+                            all_visible_px = int(np.count_nonzero(all_visible))
+                            all_occluded = all_visible_px < min(
+                                prior_px,
+                                max(
+                                    identity._IDENTITY_MIN_VISIBLE_PX,
+                                    int(
+                                        identity._IDENTITY_MIN_VISIBLE_FRACTION
+                                        * prior_px
+                                    ),
+                                ),
                             )
-                            seen_px = int(np.count_nonzero(seen))
+                            if prior_hw_px > 0:
+                                hw_visible = prior_hw & identity_visible
+                                hw_visible_px = int(np.count_nonzero(hw_visible))
+                                hw_occluded = hw_visible_px < min(
+                                    prior_hw_px,
+                                    max(
+                                        identity._IDENTITY_MIN_VISIBLE_PX,
+                                        int(
+                                            identity._IDENTITY_MIN_VISIBLE_FRACTION
+                                            * prior_hw_px
+                                        ),
+                                    ),
+                                )
+                            else:
+                                hw_visible = prior_hw
+                                hw_visible_px = 0
+                                hw_occluded = False
+                        else:
+                            all_visible = prior_all
+                            all_visible_px = prior_px
+                            all_occluded = False
+                            hw_visible = prior_hw
+                            hw_visible_px = prior_hw_px
+                            hw_occluded = False
+                        if all_occluded or (prior_hw_px > 0 and hw_occluded):
+                            identity_deferred = True
+                            quarantine_reason = "occlusion"
+                            identity_visible_reference_px = (
+                                hw_visible_px if prior_hw_px > 0 else all_visible_px
+                            )
+                        else:
+                            all_d = cv2.dilate(all_visible.astype(np.uint8), kernel) > 0
                             identity_containment = (
                                 0.0
                                 if seen_px == 0
-                                else (np.count_nonzero(seen & prior_d) / seen_px)
+                                else (np.count_nonzero(seen & all_d) / seen_px)
                             )
+                            if prior_hw_px > 0:
+                                identity_visible_reference_px = hw_visible_px
+                                identity_recall = (
+                                    np.count_nonzero(hw_visible & seen_d)
+                                    / hw_visible_px
+                                )
+                            else:
+                                identity_visible_reference_px = all_visible_px
+                                identity_recall = (
+                                    np.count_nonzero(all_visible & seen_d)
+                                    / all_visible_px
+                                )
                             keep_page = (
                                 identity_recall >= identity._PAGE_IDENTITY_MIN_RECALL
                                 and identity_containment
@@ -1783,7 +1807,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     )
                 if identity_deferred:
                     self._identity_switch_votes = 0
-                elif identity_reference is not None and not keep_page:
+                elif has_identity_ref and not keep_page:
                     self._identity_switch_votes += 1
                     identity_switch_pending = (
                         self._identity_switch_votes
@@ -1830,6 +1854,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         # Perda de lock, nao voto de pagina nova.
                         # A proxima passada estabelece outra ancora.
                         self._accumulator.reset()
+                        self._baseline_reset_requested = False
+                        self._baseline_rezero_requested = False
                         self._canvas_epoch += 1
                         self._anchor_corners = None
                         self._anchor_samples = []
@@ -1849,6 +1875,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         self._still_passes = 0
                     elif not keep_page:
                         self._accumulator.reset()
+                        self._baseline_reset_requested = False
+                        self._baseline_rezero_requested = False
                         self._canvas_epoch += 1
                         self._anchor_corners = corners
                         self._anchor_samples = (
@@ -1859,6 +1887,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     # Keep the old anchor when identity matched: all future
                     # observations remain registered into the same canvas.
                     self._identity_reference = None
+                    self._identity_baseline_reference = None
                     self._identity_reference_corners = None
                     self._identity_recovery_requested = False
                     self._identity_defer_count = 0
@@ -2054,37 +2083,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 # None para o avaliador nao projetar GT por uma
                 # geometria que nunca chegou ao canvas.
                 self._last_registration = None
-            baseline_capture = (
-                baseline_stable
-                and self._baseline_session_active
-                and not identity_deferred
-                and not identity_switch_pending
-                and pass_voted
-            )
-            if baseline_capture:
-                visible_for_baseline = (
-                    np.ones(prob.shape, dtype=bool) if visible is None else visible
-                )
-                coverage_for_baseline = (
-                    np.ones(prob.shape, dtype=bool)
-                    if baseline_coverage is None
-                    else np.asarray(baseline_coverage, dtype=bool)
-                )
-                if coverage_for_baseline.shape != prob.shape:
-                    coverage_for_baseline = np.ones(prob.shape, dtype=bool)
-                can_capture = bool(np.any(visible_for_baseline & coverage_for_baseline))
-                if can_capture:
-                    with self._condition:
-                        baseline_rezero = (
-                            generation == self._generation
-                            and self._baseline_rezero_requested
-                        )
-                        if baseline_rezero:
-                            self._accumulator.reset()
-                            self._canvas_epoch += 1
-                            self._baseline_reset_requested = False
-                            self._baseline_rezero_requested = False
-                            force_publish = True
             paper_ok = paper_ok_page
             registration_used = self._last_registration
             if (
@@ -2111,6 +2109,42 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         motion_fix.warp_back(paper_ok.astype(np.uint8), nearest=True)
                         > 0
                     )
+            baseline_capture = (
+                baseline_stable
+                and self._baseline_session_active
+                and not identity_deferred
+                and not identity_switch_pending
+                and pass_voted
+            )
+            if baseline_capture:
+                visible_for_baseline = (
+                    np.ones(prob.shape, dtype=bool) if visible is None else visible
+                )
+                frozen_for_baseline = self._accumulator.would_freeze(
+                    paper_ok, prob.shape
+                )
+                if frozen_for_baseline is not None:
+                    visible_for_baseline = visible_for_baseline & ~frozen_for_baseline
+                coverage_for_baseline = (
+                    np.ones(prob.shape, dtype=bool)
+                    if baseline_coverage is None
+                    else np.asarray(baseline_coverage, dtype=bool)
+                )
+                if coverage_for_baseline.shape != prob.shape:
+                    coverage_for_baseline = np.ones(prob.shape, dtype=bool)
+                can_capture = bool(np.any(visible_for_baseline & coverage_for_baseline))
+                if can_capture:
+                    with self._condition:
+                        baseline_rezero = (
+                            generation == self._generation
+                            and self._baseline_rezero_requested
+                        )
+                        if baseline_rezero:
+                            self._accumulator.reset(preserve_hold=True)
+                            self._canvas_epoch += 1
+                            self._baseline_reset_requested = False
+                            self._baseline_rezero_requested = False
+                            force_publish = True
             result = self._accumulator.add(
                 prob,
                 visible,

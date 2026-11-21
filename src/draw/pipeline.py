@@ -401,29 +401,39 @@ class Pipeline:
             return None
         return _coverage_iou(warp_corners, self._coverage_mask, self._hand_mask_det)
 
-    def _baseline_quad_is_stable(self, median_corners):
-        """Only start/reference-capture after the page geometry has settled."""
+    def _baseline_settled_median(self):
+        """Median quad from fresh baseline detections once settled, or None."""
         if (
             not self._config.ink.baseline
             or len(self._baseline_corner_history) < _INK_CORNER_HISTORY
             or self.tracker.missed
             or self.tracker.has_pending
         ):
-            return False
+            return None
         if self._detect_wake is not None and not self._detect_wake.settled:
-            return False
+            return None
         stable_px = (
             self._detect_wake.stable_corner_px if self._detect_wake is not None else 4.0
         )
         baseline_median = np.median(
             np.stack(self._baseline_corner_history), axis=0
         ).astype(np.float32)
-        if tracker.corner_distance(median_corners, baseline_median) > stable_px:
-            return False
-        return all(
+        if not all(
             tracker.corner_distance(baseline_median, corners) <= stable_px
             for corners in self._baseline_corner_history
+        ):
+            return None
+        return baseline_median
+
+    def _baseline_quad_is_stable(self, median_corners):
+        """Only start/reference-capture after the page geometry has settled."""
+        baseline_median = self._baseline_settled_median()
+        if baseline_median is None:
+            return False
+        stable_px = (
+            self._detect_wake.stable_corner_px if self._detect_wake is not None else 4.0
         )
+        return tracker.corner_distance(median_corners, baseline_median) <= stable_px
 
     def _warp_and_submit_ink(self, packet, warp_corners, baseline_stable=False):
         """Warp + visibilidade + submissao a trabalhadora de tinta.
@@ -1074,9 +1084,22 @@ class Pipeline:
                 np.float32
             )
             self._last_ink_submit_at = packet.captured_at
+            warp_corners = ink_corners
             baseline_stable = self._baseline_quad_is_stable(ink_corners)
+            if not baseline_stable and self._config.ink.baseline:
+                baseline_median = self._baseline_settled_median()
+                if baseline_median is not None:
+                    state_fn = getattr(self.ink_worker, "baseline_state", None)
+                    state = None if state_fn is None else state_fn()
+                    if state is not None and (
+                        not state.ready or state.phase == "recapturing"
+                    ):
+                        warp_corners = baseline_median
+                        baseline_stable = True
+                        self.corner_history.clear()
+                        self.corner_history.append(baseline_median.copy())
             self._warp_and_submit_ink(
-                packet, ink_corners, baseline_stable=baseline_stable
+                packet, warp_corners, baseline_stable=baseline_stable
             )
         elif ran_detection and self._config.ink.baseline:
             self._baseline_corner_history.clear()
@@ -1145,9 +1168,10 @@ class Pipeline:
             return contracts.InkBaselineState(
                 True, False, False, False, 0, 0, 0, 0.0, "waiting_page"
             )
-        state = getattr(self.ink_worker, "baseline_state", None)
+        state_fn = getattr(self.ink_worker, "baseline_state", None)
+        state = None if state_fn is None else state_fn()
         return (
-            state()
+            state
             if state is not None
             else contracts.InkBaselineState(
                 True, False, False, False, 0, 0, 0, 0.0, "stabilizing"
