@@ -2005,11 +2005,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 guard_corners,
                 min_auto_side=200,
             )
-            if guard_mask is not None:
-                visible = guard_mask if visible is None else (visible & guard_mask)
             result = self._accumulator.add(
                 prob,
                 visible,
+                valid_mask=guard_mask,
                 removal_allowed=(
                     not identity_owned
                     and not arbitration_abstain

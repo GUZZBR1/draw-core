@@ -342,38 +342,92 @@ def test_trapezoid_guard_suppresses_jitter_and_preserves_less_magnified_edge():
 
 def test_confirmed_stroke_survives_reanchor_that_widens_guard():
     """Quando a mesma folha reancora mais longe na camera e a guarda alarga,
-    tracos ja confirmados dentro da nova faixa nao sao apagados."""
-    clock = _Clock()
-    cfg = InkConfig.production()
-    worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
-    # Folha grande (700x1000 -> guarda ~7 px): traco em x=11..15 confirma.
+    tracos ja confirmados dentro da nova faixa nao sao apagados (com controle
+    mostrando que a remocao os apagaria sem a guarda)."""
     near_quad = np.array(
         [[100, 50], [800, 50], [800, 1050], [100, 1050]], dtype=np.float32
     )
     far_quad = np.array(
         [[100, 50], [320, 50], [320, 350], [100, 350]], dtype=np.float32
     )
-    img = np.full((1200, 850, 3), 215, np.uint8)
-    img[200:500, 11:16] = 25  # traco perto da borda (fora da guarda de 7 px)
-    img[300:700, 300:500] = 25  # escrita no miolo para testemunha de remocao
+    img_with_edge = np.full((1200, 850, 3), 215, np.uint8)
+    img_with_edge[200:500, 11:16] = 25
+    img_with_edge[300:700, 300:500] = 25  # testemunha no miolo
+    img_no_edge = np.full((1200, 850, 3), 215, np.uint8)
+    img_no_edge[300:700, 300:500] = 25
+    full_visible = np.ones((1200, 850), dtype=bool)
 
-    for _ in range(5):
-        clock.now += 0.2
-        worker.submit(contracts.WarpedPage(img, 0, near_quad, captured_at=clock.now))
-        worker.pump()
+    def run_case(border_guard_px):
+        clock = _Clock()
+        cfg = InkConfig.strict_vote(0.85, border_guard_px=border_guard_px)
+        worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
+        for _ in range(5):
+            clock.now += 1.1
+            worker.submit(
+                contracts.WarpedPage(
+                    img_with_edge,
+                    0,
+                    near_quad,
+                    visible=full_visible,
+                    captured_at=clock.now,
+                )
+            )
+            worker.pump()
+        snap = worker.poll_display(0, 0)
+        assert snap is not None
+        assert int(np.count_nonzero(snap.confirmed[:, 11:16])) > 0
+
+        worker._anchor_corners = far_quad.copy()
+        for _ in range(10):
+            clock.now += 1.1
+            worker.submit(
+                contracts.WarpedPage(
+                    img_no_edge,
+                    0,
+                    far_quad,
+                    visible=full_visible,
+                    captured_at=clock.now,
+                )
+            )
+            worker.pump()
+        snap_after = worker.poll_display(0, 0)
+        assert snap_after is not None
+        return int(np.count_nonzero(snap_after.confirmed[:, 11:16]))
+
+    assert run_case(None) > 0
+    assert run_case(0) == 0
+
+
+def test_stale_provisional_ink_clears_when_reanchor_widens_guard():
+    """Marcas provisorias antigas que caem na nova faixa da guarda apos
+    reancoragem nao ficam congeladas indefinidamente."""
+    clock = _Clock()
+    cfg = InkConfig.production()
+    worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
+    near_quad = np.array(
+        [[100, 50], [800, 50], [800, 1050], [100, 1050]], dtype=np.float32
+    )
+    far_quad = np.array(
+        [[100, 50], [320, 50], [320, 350], [100, 350]], dtype=np.float32
+    )
+    img_prov = np.full((1200, 850, 3), 215, np.uint8)
+    img_prov[200:500, 11:16] = 25
+    img_clean = np.full((1200, 850, 3), 215, np.uint8)
+
+    clock.now += 0.2
+    worker.submit(contracts.WarpedPage(img_prov, 0, near_quad, captured_at=clock.now))
+    worker.pump()
     snap = worker.poll_display(0, 0)
     assert snap is not None
-    assert int(np.count_nonzero(snap.confirmed[:, 11:16])) > 0
+    assert int(np.count_nonzero(snap.provisional[:, 11:16])) > 0
 
-    # Simula reancoragem com a folha mais longe (guarda > 13 px) e 10 passadas estaveis
     worker._anchor_corners = far_quad.copy()
-    for _ in range(10):
-        clock.now += 0.2
-        worker.submit(contracts.WarpedPage(img, 0, far_quad, captured_at=clock.now))
-        worker.pump()
+    clock.now += 0.2
+    worker.submit(contracts.WarpedPage(img_clean, 0, far_quad, captured_at=clock.now))
+    worker.pump()
     snap_after = worker.poll_display(0, 0)
     assert snap_after is not None
-    assert int(np.count_nonzero(snap_after.confirmed[:, 11:16])) > 0
+    assert int(np.count_nonzero(snap_after.provisional[:, 11:16])) == 0
 
 
 def test_sim_writer_rejects_none_for_non_nullable_flags():

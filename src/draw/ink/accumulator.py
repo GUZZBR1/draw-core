@@ -82,12 +82,16 @@ class LayeredInkAccumulator:
             np.logical_or(seen, item > self.threshold, out=seen)
         return score, hits, seen
 
-    def add(self, prob, visible=None, *, removal_allowed=True):
+    def add(self, prob, visible=None, *, removal_allowed=True, valid_mask=None):
         prob = np.asarray(prob, dtype=np.float32)
         if visible is not None:
             visible = np.asarray(visible, dtype=bool)
             if visible.shape != prob.shape:
                 visible = None
+        if valid_mask is not None:
+            valid_mask = np.asarray(valid_mask, dtype=bool)
+            if valid_mask.shape != prob.shape:
+                valid_mask = None
         if self._confirmed is None or self._confirmed.shape != prob.shape:
             self._removal_streak = None
             self._confirmed = np.zeros(prob.shape, dtype=np.uint8)
@@ -108,6 +112,8 @@ class LayeredInkAccumulator:
         # coberto: mao segurando a pagina nao e pagina trocada) e a
         # camada provisoria congela onde nao ha visao (ver abaixo).
         evidence = prob if visible is None else np.where(visible, prob, np.float32(0.0))
+        if valid_mask is not None:
+            evidence = np.where(valid_mask, evidence, np.float32(0.0))
         mask_now = evidence > self.threshold
         turn = False
         if canvas_before >= identity._INK_TURN_MIN_CANVAS_PX and not self._turn_fired:
@@ -192,6 +198,7 @@ class LayeredInkAccumulator:
                 missing = (
                     confirmed_before
                     & visible
+                    & (True if valid_mask is None else valid_mask)
                     & np.isfinite(prob)
                     & (prob <= registration._REMOVAL_LOW_PROB)
                 )
@@ -244,7 +251,12 @@ class LayeredInkAccumulator:
             # tinta sumiu — e quem esta sobre ela e a mao, nao o
             # apagador; sem este congelamento, toda oclusao virava
             # retracao na regua e a tinta piscava ao reaparecer.
-            provisional_now = provisional_now | (previous_provisional & ~visible)
+            # Pixels fora de valid_mask (guarda de borda) nao congelam
+            # provisorio velho quando a guarda alarga.
+            occluded = ~visible if valid_mask is None else (~visible & valid_mask)
+            provisional_now = provisional_now | (previous_provisional & occluded)
+        if valid_mask is not None:
+            provisional_now = provisional_now & valid_mask
         retracted = previous_provisional & ~provisional_now & ~confirmed_now
         if np.any(retracted):
             self._retracted_ever |= retracted
