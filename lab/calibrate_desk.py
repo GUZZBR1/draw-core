@@ -21,6 +21,11 @@ próprio limiar medido — os anéis de IoU são censurados por ele
 e uma folha perdida contaminaria o lado vazio: é a contaminação
 que o rótulo elimina.
 
+A SessionTelemetry faz APPEND no telemetry.jsonl do save-dir:
+grave cada cena num --save-dir novo — um arquivo com duas sessões
+é recusado, porque o rótulo se aplica ao arquivo inteiro e
+sessões misturadas misturariam os lados da calibração.
+
 Uso:
   python -m lab.calibrate_desk --empty cap_mesa_vazia/ --sheet cap_folha/
 """
@@ -46,25 +51,43 @@ _VETOABLE_SOURCES = {"classic", "presence_only", "veto", "none"}
 _CONTOUR_AREA_REASONS = {"min_area", "unsupported", "fit_failed", "implausible"}
 
 
+class MixedSessionError(RuntimeError):
+    """telemetry.jsonl com mais de uma sessão gravada.
+
+    A SessionTelemetry faz append: regravar no mesmo save-dir junta
+    duas cenas num arquivo só. O rótulo --empty/--sheet vale para o
+    arquivo inteiro — sessões misturadas misturariam os lados da
+    calibração. Grave cada cena num --save-dir novo.
+    """
+
+
 def _iter_records(paths):
     """Abre cada telemetry.jsonl e devolve os dicts na ordem.
 
     Diretórios também valem: procura <dir>/telemetry.jsonl. Linha
-    quebrada não derruba a leitura — só é pulada.
+    quebrada não derruba a leitura — só é pulada. Um segundo
+    `session_open` no mesmo arquivo significa sessão misturada:
+    sobe MixedSessionError em vez de calibrar com cena errada.
     """
     for raw in paths:
         path = Path(raw)
         if path.is_dir():
             path = path / "telemetry.jsonl"
+        sessions = 0
         with path.open(encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
                 if not line:
                     continue
                 try:
-                    yield json.loads(line)
+                    rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if rec.get("event") == "session_open":
+                    sessions += 1
+                    if sessions > 1:
+                        raise MixedSessionError(str(path))
+                yield rec
 
 
 def _summarize_side(paths, *, sheet):
@@ -281,7 +304,15 @@ def main(argv=None):
     if not args.empty and not args.sheet:
         parser.error("rotule as capturas: --empty e/ou --sheet são obrigatórios")
 
-    summary = summarize(args.empty, args.sheet)
+    try:
+        summary = summarize(args.empty, args.sheet)
+    except MixedSessionError as exc:
+        print(
+            f"erro: {exc} contém mais de uma sessão — grave cada "
+            f"cena num --save-dir novo (a SessionTelemetry faz append)",
+            file=sys.stderr,
+        )
+        return 2
     report = {
         "inputs": {
             "empty": [str(p) for p in args.empty],

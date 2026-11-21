@@ -233,6 +233,39 @@ def test_main_exige_rotulos(capsys):
         cd.main([])
 
 
+def test_arquivo_com_duas_sessoes_e_recusado(tmp_path):
+    """A SessionTelemetry faz APPEND: regravar no mesmo save-dir
+    junta mesa vazia + folha num arquivo só. O rótulo vale para o
+    arquivo inteiro — o segundo session_open recusa a captura."""
+    path = tmp_path / "telemetry.jsonl"
+    path.write_text(
+        json.dumps({"event": "session_open"})
+        + "\n"
+        + json.dumps(_acq("veto", -6.0))
+        + "\n"
+        + json.dumps({"event": "session_open"})
+        + "\n"
+        + json.dumps(_acq("classic", 1.5))
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(cd.MixedSessionError):
+        cd.summarize([path], [])
+
+
+def test_main_recusa_sessao_mista_com_erro_claro(tmp_path, capsys):
+    path = tmp_path / "telemetry.jsonl"
+    path.write_text(
+        json.dumps({"event": "session_open"})
+        + "\n"
+        + json.dumps({"event": "session_open"})
+        + "\n",
+        encoding="utf-8",
+    )
+    assert cd.main(["--empty", str(path)]) == 2
+    assert "--save-dir" in capsys.readouterr().err
+
+
 def test_linhas_quebradas_nao_derrubam(tmp_path):
     path = tmp_path / "telemetry.jsonl"
     path.write_text(
