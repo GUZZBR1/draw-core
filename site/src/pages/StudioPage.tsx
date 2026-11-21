@@ -442,7 +442,7 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
         <figure className={`studio-pane${focusPane === 'paper' ? '' : ' is-small'}`}>
           <figcaption>
             <span>{tr('papel', 'paper')}</span>
-            <button type="button" className="studio-pane-focus" aria-label={tr('Focar painel do papel', 'Focus the paper pane')} aria-pressed={focusPane === 'paper'} onClick={() => setFocusPane('paper')}>
+            <button type="button" className="studio-pane-focus" aria-pressed={focusPane === 'paper'} onClick={() => setFocusPane('paper')}>
               {focusPane === 'paper' ? tr('em foco', 'focused') : tr('ampliar', 'enlarge')}
             </button>
           </figcaption>
@@ -452,7 +452,7 @@ function StudioEditor({ projectName, drawing }: { projectName: string; drawing: 
         <figure className={`studio-pane is-digital${focusPane === 'digital' ? '' : ' is-small'}`}>
           <figcaption>
             <span>{tr('digital', 'digital')} · <span ref={countRef}>00</span> {tr('traços', 'strokes')}</span>
-            <button type="button" className="studio-pane-focus" aria-label={tr('Focar painel digital', 'Focus the digital pane')} aria-pressed={focusPane === 'digital'} onClick={() => setFocusPane('digital')}>
+            <button type="button" className="studio-pane-focus" aria-pressed={focusPane === 'digital'} onClick={() => setFocusPane('digital')}>
               {focusPane === 'digital' ? tr('em foco', 'focused') : tr('ampliar', 'enlarge')}
             </button>
           </figcaption>

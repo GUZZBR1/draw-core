@@ -769,7 +769,6 @@ body.is-falling::before {
 .studio-pane figcaption { position: absolute; z-index: 1; top: 12px; left: 16px; right: 16px; display: flex; align-items: center; justify-content: space-between; gap: 10px; font: 400 10px 'DM Mono', monospace; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); pointer-events: none; }
 .studio-pane-focus { padding: 5px 9px; border: 1px solid color-mix(in srgb, var(--ink) 20%, transparent); border-radius: 999px; background: color-mix(in srgb, var(--paper) 85%, transparent); color: var(--ink); font: inherit; letter-spacing: 0; text-transform: none; cursor: pointer; pointer-events: auto; }
 .studio-pane-focus:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.studio-pane.is-small .studio-canvas { pointer-events: none; }
 .studio-canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
 .is-digital .studio-canvas { touch-action: pan-y; cursor: default; }
 .studio-canvas.is-cam { touch-action: pan-y; cursor: default; }
@@ -1146,7 +1145,7 @@ body:not(.dark) .papers-detail { border: 1.5px solid color-mix(in srgb, var(--in
 .lang-anchor:hover .lang-menu,
 .lang-anchor:focus-within .lang-menu { opacity: 1; pointer-events: auto; }
 @media (max-width: 640px) {
-  .lang-menu { z-index: 40; top: calc(100% + 6px); right: 0; left: auto; transform: none; flex-direction: column; align-items: flex-end; gap: 4px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--ink) 18%, transparent); border-radius: 12px; background: var(--paper); font-size: 12px; }
+  .lang-menu { z-index: 40; top: 100%; right: 0; left: auto; transform: none; flex-direction: column; align-items: flex-end; gap: 4px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--ink) 18%, transparent); border-radius: 12px; background: var(--paper); font-size: 12px; }
 }
 .lang-menu button { background: none; border: 0; padding: 2px 0; color: var(--muted, inherit); cursor: pointer; }
 .lang-menu button:hover, .lang-menu button:focus-visible { color: var(--ink, inherit); outline: none; text-decoration: underline; }
