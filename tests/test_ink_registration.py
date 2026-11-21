@@ -500,3 +500,37 @@ def test_off_crop_occlusion_lets_the_post_exit_countdown_advance():
         f"contador {worker._confirm_passes} — a oclusao fora do "
         "recorte rearmou a janela em vez de deixa-la avancar"
     )
+
+
+def test_reused_sampled_footprint_clips_like_the_internal_one():
+    """Pegada reutilizada produz o mesmo recorte que a interna; o
+    parametro e aplicado, nao recomputado."""
+    shape = (100, 140)
+    prob = np.ones(shape, np.float32)
+    anchor = np.array([[120, 60], [500, 60], [500, 300], [120, 300]], np.float32)
+    corners = anchor + np.array([[6, 0], [0, 0], [0, 0], [6, 0]], np.float32)
+    camera = np.ones((480, 640), bool)
+    _prob, internal = registration_mod._register_ink_probability(
+        prob,
+        anchor,
+        corners,
+        visible_cam=camera,
+        sampled=None,
+    )
+    _prob, reused = registration_mod._register_ink_probability(
+        prob,
+        anchor,
+        corners,
+        visible_cam=camera,
+        sampled=registration_mod._sampled_footprint(anchor, corners, shape),
+    )
+    assert internal.any() and not internal.all()
+    assert np.array_equal(reused, internal)
+    _prob, blanked = registration_mod._register_ink_probability(
+        prob,
+        anchor,
+        corners,
+        visible_cam=camera,
+        sampled=np.zeros(shape, bool),
+    )
+    assert not blanked.any()

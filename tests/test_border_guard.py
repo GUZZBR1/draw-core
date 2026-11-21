@@ -681,6 +681,54 @@ def test_allclear_unsampled_strip_does_not_erase_saved_ink():
     assert run_case(0, img_blank, quad_left) > 0
 
 
+def test_disjoint_replacement_sheet_does_not_keep_old_ink():
+    """Folha nova em quad disjunto do salvo na camera: a pegada do
+    registro nao toca a regiao usavel da ancora — zero sobreposicao
+    nao e "match vazio" (aceitaria mesma pagina e carregaria a
+    tinta velha), e ausencia de evidencia. A referencia fica
+    pendente, a quarentena estoura o limite de adiamentos e o
+    canvas reseta — a folha de substituicao herda nada."""
+    quad_wide = np.array(
+        [[200, 100], [560, 100], [560, 600], [200, 600]], dtype=np.float32
+    )
+    # Disjunto a direita: nenhum pixel da grade da ancora e amostrado.
+    quad_far = np.array(
+        [[620, 100], [840, 100], [840, 600], [620, 600]], dtype=np.float32
+    )
+    img_old = np.full((1200, 850, 3), 215, np.uint8)
+    img_old[100:1100, 9:13] = 25  # traco da folha velha
+    img_blank = np.full((1200, 850, 3), 215, np.uint8)
+    all_clear = np.ones(img_old.shape[:2], bool)
+
+    def run_case(border_guard_px):
+        clock = _Clock()
+        cfg = InkConfig.strict_vote(0.85, border_guard_px=border_guard_px)
+        worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
+        for _ in range(5):
+            clock.now += 1.1
+            worker.submit(
+                contracts.WarpedPage(img_old, 0, quad_wide, captured_at=clock.now)
+            )
+            worker.pump()
+        worker._anchor_corners = quad_wide.copy()
+        gen = worker.new_generation(preserve_identity=True)
+
+        for _ in range(8):
+            clock.now += 1.1
+            worker.submit(
+                contracts.WarpedPage(
+                    img_blank, gen, quad_far, all_clear, captured_at=clock.now
+                )
+            )
+            worker.pump()
+        snap = worker.poll(gen, 0)
+        assert snap is not None
+        return int(np.count_nonzero(snap.confirmed[100:1100, 9:13]))
+
+    assert run_case(None) == 0
+    assert run_case(0) == 0
+
+
 def test_cropped_provisional_clears_with_visibility_mask():
     """Provisorio na faixa que o registro deixa de amostrar sai do
     dominio valido mesmo com mascara de visibilidade presente —

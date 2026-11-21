@@ -1776,6 +1776,25 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                                 > 0
                             )
                         )
+                    # Sobreposicao quase nula da pegada com a regiao
+                    # usavel da ancora nao e evidencia — distinta de
+                    # uma regiao amostrada que veio vazia: aqui nada
+                    # (ou quase nada) do quad salvo foi observado
+                    # nesta passada. Quando a pegada e a grade
+                    # inteira (sampled None) nao ha o que medir.
+                    usable_total_px = (
+                        prob.shape[0] * prob.shape[1]
+                        if identity_guard is None
+                        else int(np.count_nonzero(identity_guard))
+                    )
+                    usable_px = usable_total_px
+                    if identity_sampled is not None:
+                        usable_domain = (
+                            identity_sampled
+                            if identity_guard is None
+                            else (identity_sampled & identity_guard)
+                        )
+                        usable_px = int(np.count_nonzero(usable_domain))
                     prior_domain = (
                         prior_guard
                         if identity_sampled is None
@@ -1788,7 +1807,22 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         else (prior_domain & identity_visible)
                     )
                     prior_eval_px = int(np.count_nonzero(prior_eval))
-                    if (
+                    if identity_sampled is not None and usable_px < max(
+                        identity._IDENTITY_MIN_VISIBLE_PX,
+                        int(identity._IDENTITY_MIN_VISIBLE_FRACTION * usable_total_px),
+                    ):
+                        # Pegada fora (ou quase fora) da regiao
+                        # usavel da ancora: comparar seria decidir
+                        # sem evidencia — o "match vazio" de uma
+                        # folha disjunta nao prova mesma pagina.
+                        # A referencia fica pendente e a quarentena
+                        # segue o caminho limitado ate o timeout,
+                        # que reseta o canvas: a tinta velha nao
+                        # carrega para a folha nova.
+                        identity_visible_reference_px = 0
+                        identity_deferred = True
+                        quarantine_reason = "no_overlap"
+                    elif (
                         identity_visible is not None
                         and prior_domain_px > 0
                         and prior_eval_px
