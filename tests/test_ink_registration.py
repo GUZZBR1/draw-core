@@ -474,3 +474,29 @@ def test_off_crop_occlusion_does_not_hold_the_post_exit_window():
     inside = visible.copy()
     inside[200, 200] = False  # oclusao DENTRO do quad mascara a passada
     assert not worker_mod._crop_all_visible(inside, quad)
+
+
+def test_off_crop_occlusion_lets_the_post_exit_countdown_advance():
+    """A janela pos-saida tem de AVANCAR com a passada clara: com a
+    mascara de camera, o is_masked so conta oclusao dentro do quad —
+    oclusao na mesa nao pode rearmar o contador a cada passada
+    (review do PR #118)."""
+    from draw.ink.config import InkConfig
+
+    ink = _WanderingInk()
+    worker = worker_mod.PageCleanWorker(ink, config=InkConfig.production())
+    generation = worker.new_generation()
+    worker.set_hand_presence(True)
+    worker.set_hand_presence(False)
+    quad = np.array([[100, 100], [400, 100], [400, 400], [100, 400]], np.float32)
+    visible = np.ones((480, 640), bool)
+    visible[430:, 550:] = False  # mao na mesa, fora do quad
+    passes = worker._post_exit_confirm_passes()
+    worker.submit(
+        WarpedPage(np.zeros((60, 80, 3), np.uint8), generation, quad, visible)
+    )
+    assert worker.pump()
+    assert worker._confirm_passes == passes - 1, (
+        f"contador {worker._confirm_passes} — a oclusao fora do "
+        "recorte rearmou a janela em vez de deixa-la avancar"
+    )

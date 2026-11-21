@@ -296,13 +296,15 @@ def test_coverage_fill_uses_the_paper_mean_bgr():
     expected = pipeline_module._paper_mean_bgr(frame, paper_cam)
     # O anel fronteiriço mistura fill e papel no warp LINEAR da
     # imagem (a máscara comparada é NEAREST) — a comparação exata
-    # vale no miolo claramente fora da folha.
+    # vale no miolo claramente fora da folha; igualdade por pixel,
+    # porque a média esconderia uma faixa estreita de cor errada
+    # (review do PR #118).
     inside = page.image[coverage_page]
     outside = page.image[
         cv2.dilate(coverage_page.astype(np.uint8), np.ones((9, 9), np.uint8)) == 0
     ]
     assert outside.size, "o teste precisa de região fora da folha"
-    np.testing.assert_allclose(outside.mean(axis=0), expected.astype(float), atol=1.5)
+    assert (outside == expected).all()
     # Não-vacuo: papel sombreado + quad trapezoidal fazem a média
     # pós-warp diferir da de câmera — um fill no domínio da página
     # sairia ~6 níveis mais claro no azul e no vermelho.

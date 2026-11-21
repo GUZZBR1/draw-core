@@ -544,8 +544,16 @@ class Pipeline:
                 paper = coverage & quad_mask
                 if paper.any():
                     fill_color = _paper_mean_bgr(frame, paper)
+                    # fillConvexPoly sub-cobre a aresta do quad: sem a
+                    # dilatação, uma faixa de ~2 px junto à borda da
+                    # página não é preenchida e sobe com cor de mesa
+                    # (review do PR #118). Pintar além do quad não
+                    # custa nada — o warp só amostra o interior.
+                    fill_region = cv2.dilate(
+                        quad_mask.astype(np.uint8), np.ones((7, 7), np.uint8)
+                    ).astype(bool)
                     filled = frame.copy()
-                    filled[quad_mask & ~coverage] = fill_color
+                    filled[fill_region & ~coverage] = fill_color
                     frame = filled
             ink_submit = self._warp_sheet(frame, warp_corners)
             if fill_color is not None:
