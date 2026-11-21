@@ -22,6 +22,13 @@ _TEXTURE_CHANGE = 0.015
 # (Devin Review do PR #144).
 _GLOBAL_SHIFT_FRACTION = 0.8
 _GLOBAL_SHIFT_MIN_TILES = 4
+# O croma medido é canal / grayscale (máx. 255/20), não canal /
+# canal-máximo: iluminação colorida legítima passa de 2 — papel
+# neutro sob luz azul marca ~2.5 no canal B. Um teto de 2 na
+# referência deixava um resíduo >= _CHROMA_CHANGE e a página
+# inteira ficava vetada enquanto a luz durasse (Devin Review do
+# PR #144).
+_CHROMA_REFERENCE_MAX = 255.0 / 20.0
 # Recuperação por preenchimento: um bloco escuro que o modelo lê como
 # tinta, passada após passada e com a mão fora do tile, é conteúdo da
 # página — não oclusor. Até _FILL_RECOVERY_PASSES seguidas o veto de
@@ -221,7 +228,9 @@ class PaperExposureGuard:
                         chroma[color_tiles] - self._color_reference[color_tiles], axis=0
                     )
                     self._color_reference[known] = np.clip(
-                        self._color_reference[known] + color_shift, 0.0, 2.0
+                        self._color_reference[known] + color_shift,
+                        0.0,
+                        _CHROMA_REFERENCE_MAX,
                     )
                 self._page_color_reference = np.median(
                     chroma[updateable], axis=0

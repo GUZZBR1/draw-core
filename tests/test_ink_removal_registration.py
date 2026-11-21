@@ -404,6 +404,46 @@ def test_global_dimming_is_absorbed_not_blocked():
     assert not assessment.visible[60, 60]
 
 
+def test_global_color_shift_is_absorbed_not_blocked():
+    """Mudança global de temperatura de cor (luz azul sobre papel
+    neutro): o croma é canal/grayscale e passa de 2 — com o teto
+    antigo na referência de cor sobrava um resíduo permanente e a
+    página inteira ficava vetada enquanto a luz durasse (Devin
+    Review do PR #144)."""
+    guard = occlusion_mod.PaperExposureGuard()
+    neutral = np.full((120, 160, 3), 220, dtype=np.uint8)
+    visible = np.ones(neutral.shape[:2], dtype=bool)
+    assert guard.observe(neutral, visible).paper_exposed is True
+
+    # BGR (190, 65, 55): grayscale ~76, croma do canal B ~2.5.
+    blue_lit = np.full((120, 160, 3), (190, 65, 55), dtype=np.uint8)
+    for _ in range(2):
+        assessment = guard.observe(blue_lit, visible)
+        assert assessment.visible is None
+        assert assessment.paper_exposed is True
+
+    # Sob a luz nova, um recorte que foge do ambiente — papel no tom
+    # neutro antigo — segue bloqueado: a absorção não anestesia a
+    # guarda.
+    pale = blue_lit.copy()
+    pale[24:96, 24:96] = (220, 220, 220)
+    assessment = guard.observe(pale, visible)
+    assert assessment.visible is not None
+    assert not assessment.visible[60, 60]
+    assert not assessment.paper_exposed[60, 60]
+
+    # E o tom azulado num recorte local sobre papel neutro continua
+    # sendo anomalia — nunca vira referência global.
+    local = occlusion_mod.PaperExposureGuard()
+    assert local.observe(neutral, visible).paper_exposed is True
+    patch = neutral.copy()
+    patch[24:96, 24:96] = (190, 65, 55)
+    assessment = local.observe(patch, visible)
+    assert assessment.visible is not None
+    assert not assessment.visible[60, 60]
+    assert not assessment.paper_exposed[60, 60]
+
+
 def test_global_dimming_preserves_a_simultaneous_local_shadow():
     """O fator global da sala não pode ensinar junto uma sombra
     local: papel_exposed fica falso durante toda a janela de remoção."""
