@@ -33,8 +33,22 @@ def launcher(tmp_path):
         "    for name in ('cv2', 'onnxruntime', 'draw', 'draw.app'):\n"
         "        sys.modules[name] = types.ModuleType(name)\n"
         "    sys.modules['draw.app']._gui_backend_compiled = lambda: not (prefix / 'gui-broken').exists()\n"
+        "    site = prefix / 'site'\n"
+        "    def _dists():\n"
+        "        out = []\n"
+        "        for p in site.glob('*.dist-info'):\n"
+        "            meta_file = p / 'METADATA'\n"
+        "            name = p.name.rsplit('-', 1)[0]\n"
+        "            if meta_file.exists():\n"
+        "                name = next(\n"
+        "                    line.split(':', 1)[1].strip()\n"
+        "                    for line in meta_file.read_text().splitlines()\n"
+        "                    if line.startswith('Name:')\n"
+        "                )\n"
+        "            out.append(types.SimpleNamespace(metadata={'Name': name}, _path=p))\n"
+        "        return out\n"
         "    meta = types.ModuleType('importlib.metadata')\n"
-        "    meta.distributions = lambda: []\n"
+        "    meta.distributions = _dists\n"
         "    sys.modules['importlib.metadata'] = meta\n"
         "    if (prefix / 'hand-installed').exists():\n"
         "        sys.modules['mediapipe'] = types.ModuleType('mediapipe')\n"
@@ -42,6 +56,7 @@ def launcher(tmp_path):
         "        sys.modules['mediapipe'] = None\n"
         "    exec(sys.argv[2])\n"
         "else:\n"
+        "    site = prefix / 'site'\n"
         "    with open('commands', 'a') as log:\n"
         "        print(' '.join(sys.argv[1:]), file=log)\n"
         "    if sys.argv[-1] == '.[gui,hand]':\n"
@@ -50,6 +65,11 @@ def launcher(tmp_path):
         "        (prefix / 'hand-installed').touch()\n"
         "    elif sys.argv[-1] != 'pip' and not Path('gui-available').exists():\n"
         "        sys.exit(7)\n"
+        "    if '-e' in sys.argv:\n"
+        "        for pkg in ('opencv-contrib-python-headless', 'opencv-contrib-python'):\n"
+        "            dist = site / (pkg.replace('-', '_') + '-5.0.0.93.dist-info')\n"
+        "            dist.mkdir(parents=True, exist_ok=True)\n"
+        "            (dist / 'METADATA').write_text('Name: ' + pkg + '\\n')\n"
         "    if '-e' in sys.argv or sys.argv[-1].startswith('opencv-contrib-python'):\n"
         "        (prefix / 'gui-broken').unlink(missing_ok=True)\n"
         "    if '-e' in sys.argv and (prefix.parent / 'gui-stubborn').exists():\n"
@@ -159,16 +179,10 @@ def test_expired_hand_fallback_still_launches_offline(tmp_path, launcher, use_uv
 
 FAKE_UV = """#!/bin/sh
 printf "%s\\n" "$*" >> commands
-if [ "$1" = "pip" ] && [ "$2" = "uninstall" ]; then
-    target=""
-    prev=""
-    for arg in "$@"; do
-        [ "$prev" = "--python" ] && target=${arg%/bin/python}
-        prev="$arg"
-    done
-    rm -f "${target:-.venv}/gui-broken"
-    exit 0
-fi
+add_dist() {
+    dir="$1/site/$(echo "$2" | tr - _)-5.0.0.93.dist-info"
+    mkdir -p "$dir" && printf "Name: %s\\n" "$2" > "$dir/METADATA"
+}
 if [ "$1" = "sync" ]; then
     [ -n "$UV_PROJECT_ENVIRONMENT" ] || exit 1
     case " $* " in
@@ -177,12 +191,30 @@ if [ "$1" = "sync" ]; then
     case " $* " in
         *" --offline "*) [ -f wheel-cached ] || exit 1 ;;
     esac
-    if [ "$UV_PROJECT_ENVIRONMENT" != .venv ]; then
-        mkdir -p "$UV_PROJECT_ENVIRONMENT/bin"
-        cp .venv/bin/python .venv/bin/draw "$UV_PROJECT_ENVIRONMENT/bin/"
+    prefix="$UV_PROJECT_ENVIRONMENT"
+    if [ "$prefix" != .venv ]; then
+        mkdir -p "$prefix/bin"
+        cp .venv/bin/python .venv/bin/draw "$prefix/bin/"
     fi
     case " $* " in
-        *" --extra hand "*) touch "$UV_PROJECT_ENVIRONMENT/hand-installed" ;;
+        *" --extra hand "*) touch "$prefix/hand-installed" ;;
+    esac
+    case " $* " in
+        *" --no-install-package opencv-contrib-python-headless "*) ;;
+        *)
+            if [ ! -d "$prefix/site/opencv_contrib_python_headless-5.0.0.93.dist-info" ]; then
+                add_dist "$prefix" opencv-contrib-python-headless
+                touch "$prefix/gui-broken"
+            fi ;;
+    esac
+    case " $* " in
+        *" --reinstall-package opencv-contrib-python "*)
+            add_dist "$prefix" opencv-contrib-python
+            rm -f "$prefix/gui-broken" ;;
+        *" --extra gui "*)
+            add_dist "$prefix" opencv-contrib-python
+            [ -e "$prefix/site/opencv_contrib_python_headless-5.0.0.93.dist-info" ] ||
+                rm -f "$prefix/gui-broken" ;;
     esac
     exit 0
 fi
@@ -210,6 +242,23 @@ _CV2_GUI_CHECK = (
     "else 1)\n"
 )
 
+# Mesmo script do _drop_extra_cv2_providers no run.sh.
+_CV2_DROP_EXTRAS = (
+    "import shutil\n"
+    "from importlib.metadata import distributions\n"
+    "names = {d.metadata['Name'].lower() for d in distributions()}\n"
+    "if 'opencv-contrib-python' in names:\n"
+    "    for d in distributions():\n"
+    "        if d.metadata['Name'].lower() in {\n"
+    "            'opencv-contrib-python-headless',\n"
+    "            'opencv-python',\n"
+    "            'opencv-python-headless',\n"
+    "        }:\n"
+    "            path = getattr(d, '_path', None)\n"
+    "            if path is not None:\n"
+    "                shutil.rmtree(path, ignore_errors=True)\n"
+)
+
 
 def _fake_uv(launcher):
     uv = launcher / "uv"
@@ -221,12 +270,6 @@ def _commands(tmp_path):
     return (tmp_path / "commands").read_text().splitlines()
 
 
-_UNINSTALL_ALL = (
-    "pip uninstall --python .venv/bin/python opencv-python "
-    "opencv-python-headless opencv-contrib-python "
-    "opencv-contrib-python-headless"
-)
-
 _INSTALL_SYNC_GUI = (
     "sync --inexact --extra gui --no-install-package opencv-contrib-python-headless"
 )
@@ -235,14 +278,55 @@ _INSTALL_SYNC_HAND = _INSTALL_SYNC_GUI + " --extra hand"
 
 _REPAIR_SYNC = (
     "sync --locked --offline --inexact --extra gui "
+    "--reinstall-package opencv-contrib-python "
+    "--no-install-package opencv-contrib-python-headless"
+)
+
+_REPAIR_SYNC_FALLBACK = (
+    "sync --inexact --extra gui --reinstall-package opencv-contrib-python "
     "--no-install-package opencv-contrib-python-headless"
 )
 
 
+def _add_provider(venv, name):
+    dist_info = venv / "site" / f"{name.replace('-', '_')}-5.0.0.93.dist-info"
+    dist_info.mkdir(parents=True, exist_ok=True)
+    (dist_info / "METADATA").write_text(f"Name: {name}\n")
+    return dist_info
+
+
+def test_armed_env_collapses_providers_offline(tmp_path, launcher):
+    """Par de providers registrado + GUI funcionando + uv quebrado:
+    o launcher remove so o dist-info extra e lanca — sem sync, sem
+    uninstall e sem wheel algum. Regressao do review: o repair antigo
+    desinstalava os providers antes de saber se havia wheel."""
+    contrib = _add_provider(tmp_path / ".venv", "opencv-contrib-python")
+    headless = _add_provider(tmp_path / ".venv", "opencv-contrib-python-headless")
+    (tmp_path / ".venv" / "hand-installed").touch()
+    uv = launcher / "uv"
+    uv.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> commands\nexit 7\n")
+    uv.chmod(0o755)
+
+    subprocess.run(
+        [BASH, "run.sh", "--check"],
+        cwd=tmp_path,
+        env={"PATH": str(launcher)},
+        check=True,
+        timeout=10,
+    )
+    assert not headless.exists()
+    assert contrib.exists()
+    assert not (tmp_path / "commands").exists()
+    launched = (tmp_path / "launches").read_text().strip()
+    assert tmp_path / launched == tmp_path / ".venv/bin/draw"
+
+
 def test_uv_repair_prefers_locked_offline_sync(tmp_path, launcher):
-    """Headless por cima + cache quente: o repair derruba os 4 provedores
-    e reinstala o contrib travado via `uv sync --locked --offline` —
-    resolve pelo uv.lock, sem listagem de PyPI e sem rede."""
+    """Headless por cima + cache quente: o repair reinstala o contrib
+    travado por cima via `uv sync --locked --offline` e derruba o
+    dist-info extra — resolve pelo uv.lock, sem listagem, sem rede e
+    sem uninstall."""
+    headless = _add_provider(tmp_path / ".venv", "opencv-contrib-python-headless")
     (tmp_path / ".venv" / "gui-broken").touch()
     (tmp_path / "wheel-cached").touch()
     (tmp_path / "uv.lock").touch()
@@ -260,13 +344,15 @@ def test_uv_repair_prefers_locked_offline_sync(tmp_path, launcher):
         _INSTALL_SYNC_HAND,
         _REPAIR_SYNC,
     ]
-    assert [c for c in commands if c.startswith("pip uninstall")] == [_UNINSTALL_ALL]
+    assert all("uninstall" not in c for c in commands)
+    assert not headless.exists()
     launched = (tmp_path / "launches").read_text().strip()
     assert tmp_path / launched == tmp_path / ".venv/bin/draw"
 
 
 def test_uv_repair_falls_back_to_network_without_cache(tmp_path, launcher):
     """Sem o wheel no cache: `sync --offline` falha e so entao vai a rede."""
+    _add_provider(tmp_path / ".venv", "opencv-contrib-python-headless")
     (tmp_path / ".venv" / "gui-broken").touch()
     (tmp_path / "uv.lock").touch()
     _fake_uv(launcher)
@@ -279,7 +365,7 @@ def test_uv_repair_falls_back_to_network_without_cache(tmp_path, launcher):
         timeout=10,
     )
     syncs = [c for c in _commands(tmp_path) if c.startswith("sync")]
-    assert syncs == [_INSTALL_SYNC_HAND, _REPAIR_SYNC, _INSTALL_SYNC_GUI]
+    assert syncs == [_INSTALL_SYNC_HAND, _REPAIR_SYNC, _REPAIR_SYNC_FALLBACK]
     launched = (tmp_path / "launches").read_text().strip()
     assert tmp_path / launched == tmp_path / ".venv/bin/draw"
 
@@ -290,7 +376,8 @@ def test_uv_hand_retry_syncs_inexact_and_repairs_hand_env(tmp_path, launcher):
     marker = tmp_path / ".venv" / ".no_hand"
     marker.touch()
     os.utime(marker, (1, 1))
-    (tmp_path / ".venv-hand").mkdir()
+    (tmp_path / ".venv-hand" / "bin").mkdir(parents=True)
+    headless = _add_provider(tmp_path / ".venv-hand", "opencv-contrib-python-headless")
     (tmp_path / ".venv-hand" / "gui-broken").touch()
     (tmp_path / "wheel-cached").touch()
     (tmp_path / "uv.lock").touch()
@@ -306,20 +393,16 @@ def test_uv_hand_retry_syncs_inexact_and_repairs_hand_env(tmp_path, launcher):
     commands = _commands(tmp_path)
     syncs = [c for c in commands if c.startswith("sync")]
     assert syncs == [_INSTALL_SYNC_HAND, _REPAIR_SYNC]
-    uninstalls = [c for c in commands if c.startswith("pip uninstall")]
-    assert uninstalls == [
-        "pip uninstall --python .venv-hand/bin/python opencv-python "
-        "opencv-python-headless opencv-contrib-python "
-        "opencv-contrib-python-headless"
-    ]
+    assert all("uninstall" not in c for c in commands)
+    assert not headless.exists()
     assert (tmp_path / ".venv-hand" / "hand-installed").is_file()
     launched = (tmp_path / "launches").read_text().strip()
     assert tmp_path / launched == tmp_path / ".venv-hand/bin/draw"
 
 
 def test_pip_repair_keeps_single_cv2_provider(tmp_path, launcher):
-    """Fallback pip: remove os 4 provedores e forca-reinstala so o
-    contrib com --no-deps — um unico dono de cv2/ registrado."""
+    """Fallback pip: forca-reinstala o contrib por cima e derruba o
+    dist-info extra — um unico dono de cv2/ registrado, sem uninstall."""
     (tmp_path / "gui-available").touch()
     (tmp_path / "hand-available").touch()
     (tmp_path / "gui-stubborn").touch()
@@ -332,26 +415,25 @@ def test_pip_repair_keeps_single_cv2_provider(tmp_path, launcher):
         check=True,
         timeout=10,
     )
-    assert _commands(tmp_path)[-2:] == [
-        "-m pip uninstall -y opencv-python opencv-python-headless "
-        "opencv-contrib-python opencv-contrib-python-headless",
-        "-m pip install --no-deps --force-reinstall opencv-contrib-python>=4.8,<5.1",
-    ]
+    commands = _commands(tmp_path)
+    assert all("uninstall" not in c for c in commands)
+    assert commands[-1] == (
+        "-m pip install --no-deps --force-reinstall opencv-contrib-python>=4.8,<5.1"
+    )
+    venv = tmp_path / ".venv"
+    providers = [p.name for p in (venv / "site").glob("*.dist-info")]
+    assert providers == ["opencv_contrib_python-5.0.0.93.dist-info"]
     launched = (tmp_path / "launches").read_text().strip()
     assert tmp_path / launched == tmp_path / ".venv/bin/draw"
 
 
 @pytest.mark.slow
 def test_real_uv_plain_sync_keeps_cv2_importable(tmp_path):
-    """Com um cache real populado so por `uv sync` travado: o repair
-    offline instala o contrib pelo uv.lock (sem listagem de PyPI), deixa
-    um unico provedor cv2 registrado, e syncs posteriores trocam o
-    provedor sem matar `import cv2` — com dois dists registrados o
-    sync exato removia o contrib e os arquivos cv2 junto. Inexact
-    syncs que recriam o par (o do launcher via --extra gui, ou um
-    manual que instala o headless por cima) sao cobertos aqui: o
-    estado de "janela abre" e de "provedor unico" e o que a sonda e
-    o repair garantem."""
+    """Cache real populado so por `uv sync` travado (sem listagem de
+    indice): o par contrib+headless armado e desarmado so por
+    metadados, o repair offline reinstala o contrib pelo uv.lock por
+    cima de um headless ativo, e syncs posteriores trocam o provedor
+    sem matar `import cv2` nem a janela — tudo sem uninstall."""
     uv = shutil.which("uv")
     if uv is None:
         pytest.skip("uv nao esta no PATH")
@@ -382,21 +464,12 @@ def test_real_uv_plain_sync_keeps_cv2_importable(tmp_path):
     # sem listagem de indice — o cenario em que `uv pip install` falha.
     shutil.rmtree(tmp_path / "uvcache" / "simple-v21", ignore_errors=True)
 
+    def drop_extras():
+        run([str(python), "-c", _CV2_DROP_EXTRAS])
+
     def repair():
-        # A sequencia real do _repair_opencv.
-        run(
-            [
-                uv,
-                "pip",
-                "uninstall",
-                "--python",
-                str(python),
-                "opencv-python",
-                "opencv-python-headless",
-                "opencv-contrib-python",
-                "opencv-contrib-python-headless",
-            ]
-        )
+        # A sequencia real do _repair_opencv: reinstala o contrib por
+        # cima e derruba os dist-infos extras — nunca desinstala.
         run(
             [
                 uv,
@@ -406,10 +479,13 @@ def test_real_uv_plain_sync_keeps_cv2_importable(tmp_path):
                 "--inexact",
                 "--extra",
                 "gui",
+                "--reinstall-package",
+                "opencv-contrib-python",
                 "--no-install-package",
                 "opencv-contrib-python-headless",
             ]
         )
+        drop_extras()
 
     def providers():
         return subprocess.run(
@@ -437,19 +513,27 @@ def test_real_uv_plain_sync_keeps_cv2_importable(tmp_path):
             )
         )
 
-    repair()
+    # Apos `uv sync --extra gui` o env ja esta armado: os dois dists
+    # registrados, contrib por cima. O colapso so-metadados do launcher
+    # desarma sem wheel e sem rede — mesmo com o cache frio.
+    assert gui_opens()
+    assert not only_contrib()
+    drop_extras()
     assert gui_opens()
     assert only_contrib()
 
-    # `uv sync` exato manual depois do repair: troca o provedor para o
-    # headless travado, mas o cv2 segue importavel.
+    # `uv sync` exato manual: troca o provedor para o headless travado,
+    # mas o cv2 segue importavel — provedor unico sai limpo.
     run([uv, "sync"])
     run([str(python), "-c", "import cv2"])
+    assert not gui_opens()
+    assert "opencv-contrib-python-headless" in providers()
+    assert "opencv-contrib-python " not in providers()
 
     # O sync do proprio launcher (--inexact --extra gui
     # --no-install-package) reinstala o contrib por cima sem
-    # desregistrar o headless — a janela abre, mas o par fica armado e
-    # a sonda o manda para o repair.
+    # desregistrar o headless — a janela abre, o par fica armado de
+    # novo e o launcher o desarma no lancamento seguinte.
     run(
         [
             uv,
@@ -463,13 +547,13 @@ def test_real_uv_plain_sync_keeps_cv2_importable(tmp_path):
     )
     assert gui_opens()
     assert not only_contrib()
-    repair()
+    drop_extras()
     assert gui_opens()
     assert only_contrib()
 
     # `uv sync --inexact` manual (sem extra gui): mantem o contrib e
     # instala o headless por cima — a janela nao abre, o cv2 importa, e
-    # o repair restaura o provedor unico com janela.
+    # o repair offline restaura o provedor unico com janela.
     run([uv, "sync", "--inexact"])
     assert not gui_opens()
     run([str(python), "-c", "import cv2"])

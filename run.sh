@@ -47,22 +47,36 @@ _resolve_venv_paths() {
 
 _gui_ready() {
     _resolve_venv_paths
-    # A second registered cv2 provider is a time bomb: the next exact
-    # `uv sync` uninstalls the contrib dist and deletes the shared cv2/
-    # files — collapse it through the repair instead of launching.
     [ -n "$VENV_DRAW" ] && [ -x "$VENV_DRAW" ] && "$VENV_PYTHON" -c '
 import cv2, onnxruntime, draw
 from draw.app import _gui_backend_compiled
 assert _gui_backend_compiled(), "headless opencv"
-from importlib.metadata import distributions
-names = {dist.metadata["Name"] for dist in distributions()}
-if "opencv-contrib-python" in names:
-    assert not {
-        "opencv-contrib-python-headless",
-        "opencv-python",
-        "opencv-python-headless",
-    } & names, "segundo provedor de cv2 registrado"
 ' >/dev/null 2>&1
+}
+
+_drop_extra_cv2_providers() {
+    # A second registered cv2 provider is a time bomb: the next exact
+    # `uv sync` uninstalls one dist and deletes the shared cv2 files.
+    # When the GUI works the files are already the contrib ones — only
+    # the extra dist-info registration needs to go. Pure metadata
+    # removal: no wheel, no network, and nothing is ever uninstalled,
+    # so a working env stays launchable even offline on a cold cache.
+    _resolve_venv_paths
+    [ -n "$VENV_PYTHON" ] && "$VENV_PYTHON" -c '
+import shutil
+from importlib.metadata import distributions
+names = {d.metadata["Name"].lower() for d in distributions()}
+if "opencv-contrib-python" in names:
+    for d in distributions():
+        if d.metadata["Name"].lower() in {
+            "opencv-contrib-python-headless",
+            "opencv-python",
+            "opencv-python-headless",
+        }:
+            path = getattr(d, "_path", None)
+            if path is not None:
+                shutil.rmtree(path, ignore_errors=True)
+' >/dev/null 2>&1 || true
 }
 
 _hand_ready() {
@@ -110,36 +124,34 @@ _prepare_pip() {
 }
 
 _repair_opencv() {
-    # Exactly one cv2 provider per env: drop every OpenCV dist, then let
-    # the project sync reinstall the locked contrib wheel. --locked
-    # --offline resolves from uv.lock alone, so it works on a warm cache
-    # without network; fall back online only for a missing wheel.
+    # Force the locked contrib wheel back on top without uninstalling:
+    # --reinstall-package rewrites its files in place, so a working GUI
+    # survives a failed attempt, and the extra cv2 dist registrations
+    # are dropped metadata-only at the end. --locked --offline resolves
+    # from uv.lock alone and reinstalls straight from the wheel cache;
+    # go online only for a missing wheel.
     if [ "$USE_UV" = 1 ]; then
-        uv pip uninstall --python "$VENV_PYTHON" \
-            opencv-python opencv-python-headless \
-            opencv-contrib-python opencv-contrib-python-headless \
-            >/dev/null 2>&1 || true
         UV_PROJECT_ENVIRONMENT="$VENV_DIR" uv sync --locked --offline \
-            --inexact --extra gui \
+            --inexact --extra gui --reinstall-package opencv-contrib-python \
             --no-install-package opencv-contrib-python-headless ||
             UV_PROJECT_ENVIRONMENT="$VENV_DIR" uv sync --inexact \
-                --extra gui \
-                --no-install-package opencv-contrib-python-headless
+                --extra gui --reinstall-package opencv-contrib-python \
+                --no-install-package opencv-contrib-python-headless ||
+            return "$?"
     else
-        "$VENV_PYTHON" -m pip uninstall -y \
-            opencv-python opencv-python-headless \
-            opencv-contrib-python opencv-contrib-python-headless \
-            >/dev/null 2>&1 || true
         "$VENV_PYTHON" -m pip install --no-deps --force-reinstall \
-            "opencv-contrib-python>=4.8,<5.1"
+            "opencv-contrib-python>=4.8,<5.1" || return "$?"
     fi
+    _drop_extra_cv2_providers
 }
 
 if _gui_ready; then
+    _drop_extra_cv2_providers
     if ! _hand_ready; then
         BASE_VENV_DIR="$VENV_DIR"
         VENV_DIR="$BASE_VENV_DIR-hand"
         if _gui_ready && _hand_ready; then
+            _drop_extra_cv2_providers
             exec "$VENV_DRAW" "$@"
         fi
         VENV_DIR="$BASE_VENV_DIR"
@@ -178,4 +190,5 @@ else
 fi
 
 _resolve_venv_paths
+_drop_extra_cv2_providers
 exec "$VENV_DRAW" "$@"
