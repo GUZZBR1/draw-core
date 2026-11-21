@@ -511,6 +511,33 @@ def _support(prob, seg, has=None):
     return min(frac, span / _MIN_SPAN * _MIN_SUPPORT)
 
 
+def _window_support(has, inside):
+    """(frac, span) por linha: fração das janelas de _SUPPORT_W px com tinta e
+    extensão da tinta, só nas colunas em que o caminho está na imagem.
+
+    Inclui a última janela, parcial, pela largura real: uma linha inclinada que
+    só entra no fim da trilha tem o suporte justamente ali. Esse resto só entra
+    na conta quando tem tinta; vazio, não dilui o suporte das janelas inteiras
+    (a metade não é múltipla de _SUPPORT_W).
+    """
+    k, x = has.shape
+    n = -(-x // _SUPPORT_W)
+    pad = ((0, 0), (0, n * _SUPPORT_W - x))
+    win_has = np.pad(has, pad).reshape(k, n, _SUPPORT_W).any(axis=2)
+    cnt_in = np.pad(inside, pad).reshape(k, n, _SUPPORT_W).sum(axis=2)
+    width = np.minimum(_SUPPORT_W, x - np.arange(n) * _SUPPORT_W)  # largura real
+    win_in = cnt_in >= 0.5 * width[None, :]
+    partial = width < _SUPPORT_W
+    counted = win_in & (win_has | ~partial[None, :])
+    frac = (win_has & win_in).sum(axis=1) / np.maximum(counted.sum(axis=1), 1)
+    first = has.argmax(axis=1)
+    last = x - 1 - has[:, ::-1].argmax(axis=1)
+    span = np.where(has.any(axis=1), last - first + 1, 0) / np.maximum(
+        inside.sum(axis=1), 1
+    )
+    return frac, span
+
+
 def _drop_unsupported(prob, seg, has=None):
     """Tira as linhas extrapoladas sem suporte próprio ao longo da folha.
 
@@ -525,28 +552,7 @@ def _drop_unsupported(prob, seg, has=None):
     if has is None:
         has = _ink_on_path(prob, seg)
     inside = (seg.paths >= 0) & (seg.paths <= h - 1)
-    has = has & inside
-    k, x = has.shape
-    # janelas de _SUPPORT_W px incluindo a última, parcial: uma linha inclinada
-    # que só entra no fim da trilha tem o suporte justamente ali
-    n = -(-x // _SUPPORT_W)
-    pad = ((0, 0), (0, n * _SUPPORT_W - x))
-    win_has = np.pad(has, pad).reshape(k, n, _SUPPORT_W).any(axis=2)
-    cnt_in = np.pad(inside, pad).reshape(k, n, _SUPPORT_W).sum(axis=2)
-    width = np.minimum(_SUPPORT_W, x - np.arange(n) * _SUPPORT_W)  # largura real
-    win_in = cnt_in >= 0.5 * width[None, :]
-    # A janela parcial final só entra na conta quando tem tinta: um resto vazio
-    # (a metade não é múltipla de _SUPPORT_W) não pode diluir o suporte das
-    # janelas inteiras.
-    partial = width < _SUPPORT_W
-    counted = win_in & (win_has | ~partial[None, :])
-    n_in = np.maximum(counted.sum(axis=1), 1)
-    frac = (win_has & win_in).sum(axis=1) / n_in
-    first = has.argmax(axis=1)
-    last = x - 1 - has[:, ::-1].argmax(axis=1)
-    span = np.where(has.any(axis=1), last - first + 1, 0) / np.maximum(
-        inside.sum(axis=1), 1
-    )
+    frac, span = _window_support(has & inside, inside)
     ok = np.minimum(frac, span / _MIN_SPAN * _MIN_SUPPORT) >= _MIN_SUPPORT
     # Um trecho visível curto não se distingue de uma marca de caneta alinhada:
     # sem pelo menos duas janelas de vista, a linha prevista não autoriza apagar.

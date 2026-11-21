@@ -604,14 +604,20 @@ def test_a_blank_partial_window_does_not_dilute_the_support_of_a_gapped_rule():
     assert ruling._drop_unsupported(prob, seg).paths.shape[0] == 2
 
 
-def test_a_tilted_line_visible_over_three_windows_counts_its_partial_tail():
-    """Linha inclinada que entra a meio da trilha (120 colunas visiveis), com
-    tinta na janela inteira final e no resto parcial."""
-    xs = np.arange(600)
-    seg = _two_line_segment(600, 599.0 - (xs - 480.0))
-    prob = np.zeros((600, 600), np.float32)
-    prob[99:101, :] = 0.95
-    for c in range(528, 600):
-        r = int(round(seg.paths[1, c]))
-        prob[r : r + 2, c] = 0.95
-    assert ruling._drop_unsupported(prob, seg).paths.shape[0] == 2
+def test_the_partial_tail_window_counts_only_when_it_has_ink():
+    """Linha que entra a meio da trilha (120 colunas visiveis: duas janelas
+    inteiras e um resto de 24). Tinta so na janela inteira final: 1/2. Com
+    tinta tambem no resto: 2/3. Resto vazio nao dilui (review #139)."""
+    inside = np.zeros((1, 600), bool)
+    inside[0, 480:] = True
+    base = np.zeros((1, 600), bool)
+    base[0, 528:576] = True  # janela inteira final
+    frac_blank, _ = ruling._window_support(base, inside)
+    tail = base.copy()
+    tail[0, 576:] = True  # e o resto parcial
+    frac_tail, _ = ruling._window_support(tail, inside)
+    assert frac_blank[0] == pytest.approx(1 / 2)
+    assert frac_tail[0] == pytest.approx(2 / 3)
+    # e o resto de 24 colunas tem de existir: sem ele (janelas inteiras so) a
+    # tinta do resto seria ignorada e frac_tail seria 1/2
+    assert frac_tail[0] > frac_blank[0]
