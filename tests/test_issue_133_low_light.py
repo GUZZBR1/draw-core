@@ -12,17 +12,39 @@ SHADOW = (slice(10, 28), slice(40, 80))
 STROKE = (slice(40, 44), slice(20, 90))
 STROKE_ANCHOR = (slice(40, 44), slice(20, 25))
 HAND_MARGIN = (slice(8, 72), slice(104, 120))
+# ~13% da folha num brilho acima do gradiente: o p90 mora aqui (duas
+# colunas do passo de 8), então o jitter desta faixa é jitter da
+# ESTIMATIVA — a cena física (sombra, traço) não muda com ele.
+GLINT = (slice(0, H), slice(88, 104))
+DELTAS = (0, 1, -1, 1, 0, -1, 0)
+GLINT_LEVELS = (80, 86, 77, 85, 79, 84, 80)
 
 
-def _low_light_page(delta, hand_at_margin):
+def _low_light_page(delta, glint, hand_at_margin):
     gradient = np.linspace(42, 76, W, dtype=np.float32)
     page = np.repeat(gradient[None, :], H, axis=0)
     page = np.repeat(page[..., None], 3, axis=2)
     page[SHADOW] -= 10.0
     page[STROKE] = 28.0
+    page[GLINT] = float(glint)
     if hand_at_margin:
         page[HAND_MARGIN] = 235.0
     return np.clip(page + delta, 0, 255).astype(np.uint8)
+
+
+def _ink_prob(ink_input, reference):
+    """Proxy determinístico do page-clean sobre os pixels efetivamente
+    entregues à inferência (a LUT do ganho já entrou). A sombra responde
+    mais à variação de brilho que o traço, cuja crista ancora a camada."""
+    prob = np.zeros((H, W), dtype=np.float32)
+    prob[SHADOW] = np.clip(
+        0.84 + (float(ink_input[SHADOW].mean()) - reference[0]) * 0.02, 0, 1
+    )
+    prob[STROKE] = np.clip(
+        0.75 + (reference[1] - float(ink_input[STROKE].mean())) * 0.01, 0, 1
+    )
+    prob[STROKE_ANCHOR] = 0.96
+    return prob
 
 
 @pytest.mark.parametrize("hand_at_margin", [False, True])
@@ -31,6 +53,7 @@ def test_low_light_shadow_replay_keeps_weak_stroke_without_shadow_flicker(
 ):
     smoother = exposure.PaperGainSmoother()
     accumulator = LayeredInkAccumulator(config=InkConfig.production())
+    raw_accumulator = LayeredInkAccumulator(config=InkConfig.production())
     visible = np.ones((H, W), dtype=bool)
     if hand_at_margin:
         visible[HAND_MARGIN] = False
@@ -38,35 +61,43 @@ def test_low_light_shadow_replay_keeps_weak_stroke_without_shadow_flicker(
     target_gains = []
     stable_gains = []
     outputs = []
-    shadow_reference = None
-    stroke_reference = None
+    raw_outputs = []
+    smooth_ref = raw_ref = None
     # Pequena oscilação temporal de exposição sobre gradiente e sombra
-    # fixos; a mão branca ocupa a margem, mas não participa do p90.
-    for index, delta in enumerate((0, 1, -1, 1, 0, -1, 0)):
-        page = _low_light_page(delta, hand_at_margin)
+    # fixos; a faixa de brilho faz o p90 oscilar ±6% em cena parada, e a
+    # mão branca ocupa a margem sem participar do p90.
+    for index, (delta, glint) in enumerate(zip(DELTAS, GLINT_LEVELS, strict=True)):
+        page = _low_light_page(delta, glint, hand_at_margin)
         target = exposure.paper_gain(page, visible)
         gain = smoother.update(target, index / 10.0)
         target_gains.append(target)
         stable_gains.append(gain)
-        ink_input = exposure.apply_gain(page, gain)
-        shadow_level = float(ink_input[SHADOW].mean())
-        stroke_level = float(ink_input[STROKE].mean())
-        if shadow_reference is None:
-            shadow_reference = shadow_level
-            stroke_reference = stroke_level
 
-        # Proxy determinístico do page-clean construído a partir dos pixels
-        # efetivamente entregues à inferência, incluindo o ganho aplicado.
-        prob = np.zeros((H, W), dtype=np.float32)
-        prob[SHADOW] = np.clip(0.84 + (shadow_level - shadow_reference) * 0.02, 0, 1)
-        prob[STROKE] = np.clip(0.75 + (stroke_reference - stroke_level) * 0.01, 0, 1)
-        prob[STROKE_ANCHOR] = 0.96
-        outputs.append(accumulator.add(prob, visible))
+        smooth_input = exposure.apply_gain(page, gain)
+        raw_input = exposure.apply_gain(page, target)  # baseline sem suavizar
+        if smooth_ref is None:
+            smooth_ref = (
+                float(smooth_input[SHADOW].mean()),
+                float(smooth_input[STROKE].mean()),
+            )
+            raw_ref = (
+                float(raw_input[SHADOW].mean()),
+                float(raw_input[STROKE].mean()),
+            )
+        outputs.append(accumulator.add(_ink_prob(smooth_input, smooth_ref), visible))
+        raw_outputs.append(raw_accumulator.add(_ink_prob(raw_input, raw_ref), visible))
 
     assert max(stable_gains) - min(stable_gains) < max(target_gains) - min(target_gains)
     for output in outputs:
         assert not output["confirmed"][SHADOW].any()
         assert not output["provisional"][SHADOW].any()
+    # Baseline sem suavização: o jitter do p90 vira jitter de LUT e a
+    # sombra pisca como tinta provisória — o flicker do issue #133. O
+    # ganho suavizado zera esse evento (verificado acima, quadro a quadro).
+    raw_shadow_frames = sum(
+        1 for output in raw_outputs if output["provisional"][SHADOW].any()
+    )
+    assert raw_shadow_frames > 0
     assert outputs[0]["provisional"][STROKE].all()
     assert outputs[2]["confirmed"][STROKE].all()
     if hand_at_margin:

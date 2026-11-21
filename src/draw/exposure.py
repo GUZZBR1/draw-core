@@ -32,6 +32,18 @@ _MAX_GAIN = 3.0
 _SAMPLE_STRIDE = 8
 _GAIN_TIME_CONSTANT_SECONDS = 0.35
 _GAIN_DEADBAND_LOG = math.log1p(0.03)
+_CLIP_RELEASE_FRACTION = 1e-4
+
+
+def _sampled_gray(image, mask):
+    """Amostra cinza esparsa (passo _SAMPLE_STRIDE) restrita à máscara."""
+    sample = image[::_SAMPLE_STRIDE, ::_SAMPLE_STRIDE]
+    gray = sample.mean(axis=2) if sample.ndim == 3 else sample
+    if mask is not None:
+        sampled = np.asarray(mask)[::_SAMPLE_STRIDE, ::_SAMPLE_STRIDE] > 0
+        if sampled.any():
+            gray = gray[sampled]
+    return gray
 
 
 def paper_gain(image, mask=None):
@@ -40,13 +52,7 @@ def paper_gain(image, mask=None):
     mask (bool, forma da imagem): pixels da folha. Vazia ou None, vale a
     imagem inteira.
     """
-    sample = image[::_SAMPLE_STRIDE, ::_SAMPLE_STRIDE]
-    gray = sample.mean(axis=2) if sample.ndim == 3 else sample
-    if mask is not None:
-        sampled = np.asarray(mask)[::_SAMPLE_STRIDE, ::_SAMPLE_STRIDE] > 0
-        if sampled.any():
-            gray = gray[sampled]
-    p90 = float(np.percentile(gray, 90))
+    p90 = float(np.percentile(_sampled_gray(image, mask), 90))
     if p90 <= 0:
         return _MAX_GAIN
     return float(np.clip(_TARGET_P90 / p90, 1.0, _MAX_GAIN))
@@ -75,7 +81,9 @@ class PaperGainSmoother:
     curta para não prender a exposição quando a iluminação realmente muda.
     Alvo 1,0 é bypass, não amortecimento: papel já bem exposto não pode
     esperar a banda morta liberar o resíduo — cada passada ganhada clipa
-    o traço claro junto do papel.
+    o traço claro junto do papel. Pela mesma razão, um decréscimo dentro
+    da banda também a fura quando o ganho retido saturaria pixels do
+    papel que o alvo preservaria: contraste perdido não é jitter.
     """
 
     def __init__(self):
@@ -85,8 +93,13 @@ class PaperGainSmoother:
         self._gain = None
         self._updated_at = None
 
-    def update(self, target_gain, timestamp):
-        """Retorna o ganho temporalmente estabilizado para `timestamp` (s)."""
+    def update(self, target_gain, timestamp, *, image=None, mask=None):
+        """Retorna o ganho temporalmente estabilizado para `timestamp` (s).
+
+        `image`/`mask` são o quadro e a máscara da estimativa (opcionais):
+        com eles um decréscimo dentro da banda morta sai da banda quando
+        o ganho retido saturaria pixels do papel que o alvo preserva.
+        """
         target = float(np.clip(target_gain, 1.0, _MAX_GAIN))
         now = float(timestamp)
         if not math.isfinite(now):
@@ -109,8 +122,27 @@ class PaperGainSmoother:
         target_log = math.log(target)
         error = target_log - current_log
         if abs(error) <= _GAIN_DEADBAND_LOG:
-            return self._gain
+            if error >= 0.0 or not self._newly_saturates(image, mask, target):
+                return self._gain
+            # O decréscimo fura a banda morta: segurar o ganho retido
+            # cliparia pixels que o alvo novo manteria distintos
+            # (Devin Review PR #140).
 
         alpha = -math.expm1(-elapsed / _GAIN_TIME_CONSTANT_SECONDS)
         self._gain = math.exp(current_log + alpha * error)
         return self._gain
+
+    def _newly_saturates(self, image, mask, target):
+        """Fração do papel que o ganho retido satura e o alvo preserva.
+
+        Banda (255/ganho retido, 255/alvo]: pixels nela vão a 255 com o
+        ganho atual mas seguiriam distintos com o alvo. Retorna True se
+        a banda cobre mais que _CLIP_RELEASE_FRACTION do papel amostrado.
+        """
+        if image is None:
+            return False
+        gray = _sampled_gray(image, mask)
+        if gray.size == 0:
+            return False
+        band = (gray > 255.0 / self._gain) & (gray <= 255.0 / target)
+        return float(band.mean()) > _CLIP_RELEASE_FRACTION

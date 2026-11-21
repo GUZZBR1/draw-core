@@ -68,6 +68,28 @@ def test_unity_gain_clears_a_previous_boost_without_clipping_bright_strokes():
     np.testing.assert_array_equal(out, bright_paper)
 
 
+def test_deadband_releases_a_decrease_that_clips_paper_pixels():
+    """Devin Review PR #140: p90 194→199 mantém o alvo (1,005) dentro da
+    banda morta sobre o ganho retido (1,031) — mas o resíduo clipa a faixa
+    clara junto do traço fraco, então o decréscimo fura a banda."""
+    brighter = _page(199, ink=248)
+    brighter[20:60, 20:70] = 252  # faixa clara: 1,031 satura, 1,005 preserva
+
+    smoother = exposure.PaperGainSmoother()
+    first = smoother.update(200 / 194, 0.0)
+    held = smoother.update(200 / 199, 0.1)  # sem imagem a banda segura
+    assert held == first
+
+    gain = smoother.update(200 / 199, 0.2, image=brighter)
+    assert gain < first  # o decréscimo saiu da banda morta
+
+    for index in range(3, 15):
+        gain = smoother.update(200 / 199, index * 0.1, image=brighter)
+    out = exposure.apply_gain(brighter, gain)
+    assert out[30, 30, 0] < 255  # faixa clara recupera nível próprio
+    assert out[30, 30, 0] > out[45, 15, 0]  # e segue acima do traço
+
+
 def _dark_paper_with_bright_desk(desk_fraction=0.14, shape=(1200, 850)):
     h, w = shape
     img = np.full((h, w, 3), 80, np.uint8)

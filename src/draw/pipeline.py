@@ -531,7 +531,7 @@ class Pipeline:
                 target_gain = exposure.paper_gain(frame, gain_mask)
                 gain_at = self._clock() if captured_at is None else captured_at
                 self.last_ink_gain = self._paper_gain_smoother.update(
-                    target_gain, gain_at
+                    target_gain, gain_at, image=frame, mask=gain_mask
                 )
                 frame = exposure.apply_gain(frame, self.last_ink_gain)
             fill_color = None

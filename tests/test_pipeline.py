@@ -589,6 +589,44 @@ def test_ink_auto_gain_smoothing_reaches_the_page_clean_input():
     assert max(shadow_samples) - min(shadow_samples) <= 1.0
 
 
+def test_ink_auto_gain_deadband_releases_when_gain_clips_faint_stroke():
+    """Devin Review PR #140: a folha clareia de p90 194 para 199 e o alvo
+    novo (1,005) cai dentro da banda morta — mas o ganho retido (1,031)
+    clipa a faixa clara junto do traço fraco. A banda cede e a página
+    entregue à tinta recupera o contraste nas passadas seguintes."""
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None),
+        config=PipelineConfig(ink_auto_gain=True),
+    )
+
+    def scene(p90):
+        frame = np.full((720, 1280, 3), 225, np.uint8)
+        frame[100:400, 100:500] = p90
+        frame[150:200, 230:280] = 252  # faixa: clipa com 1,031, não com 1,005
+        frame[170:175, 240:270] = 248  # traço fraco dentro da faixa
+        return frame
+
+    _drive(loop, 40, frame=scene(194))
+    assert loop.last_ink_gain == pytest.approx(200 / 194, rel=0.02)
+
+    seen = len(ink.pages)
+    patch_means, stroke_means = [], []
+    for _ in range(30):
+        loop.step(_packet(loop, scene(199)))
+        while len(ink.pages) > seen:
+            page = ink.pages[seen].image
+            seen += 1
+            # Na grade retificada (1200, 850): faixa py 200-400/px 276-382,
+            # traço py 280-300/px 298-361.
+            patch_means.append(float(page[210:390, 285:375].mean()))
+            stroke_means.append(float(page[283:297, 305:355].mean()))
+
+    assert len(patch_means) >= 3  # várias submissões no frame claro
+    for patch, stroke in zip(patch_means[-3:], stroke_means[-3:], strict=True):
+        assert patch < 254.5  # a faixa clara não satura mais
+        assert patch - stroke >= 3  # e o traço fraco segue distinto dela
+
+
 def test_ink_auto_gain_ignores_bright_desk_inside_the_quad():
     """Review #52: o quad abrange papel escuro (86%) e mesa clara (14%);
     o ganho é estimado só sobre a folha (cobertura), então o papel é
