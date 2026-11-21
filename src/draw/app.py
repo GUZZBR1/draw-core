@@ -1765,11 +1765,11 @@ def run(
                     # máscara veio de detecção que fechou cantos:
                     # mãos no setup da mesa ou num veto na janela de
                     # remoção queimariam o único flip sem folha de
-                    # evidência (review do PR #123).
-                    if (
-                        sheet_present
-                        and pipeline.last_hand_mask_with_sheet
-                        and auto_rotator.observe_mask(pipeline.last_hand_mask)
+                    # evidência. O gate vive em
+                    # Pipeline.rotation_hand_mask (review PR #123).
+                    rotation_mask = pipeline.rotation_hand_mask
+                    if rotation_mask is not None and auto_rotator.observe_mask(
+                        rotation_mask
                     ):
                         rotation = 180 if frame_source.rotation == 0 else 0
                         frame_source.set_rotation(rotation)

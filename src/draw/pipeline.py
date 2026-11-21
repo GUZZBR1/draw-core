@@ -742,6 +742,19 @@ class Pipeline:
         """A máscara vigente veio de detecção que fechou cantos."""
         return self._hand_mask_with_sheet
 
+    @property
+    def rotation_hand_mask(self):
+        """Máscara de mão apta a votar rotação, ou None.
+
+        O consumo da auto-rotação passa por aqui: a máscara só sai
+        quando veio de detecção que fechou cantos E a folha segue
+        presente. Veto na graça de remoção ou mãos no setup da mesa
+        retornam None (reviews dos PRs #123/#125).
+        """
+        if self.sheet_present and self._hand_mask_with_sheet:
+            return self._hand_mask_det
+        return None
+
     def step(self, packet):
         """Um quadro do laco sem marcadores.
 
