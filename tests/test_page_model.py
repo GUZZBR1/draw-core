@@ -16,12 +16,14 @@ cinco falhas da fila de robustez de 2026-11-21:
   borracha nunca le como tinta.
 """
 
+import threading
 import time
 
 import numpy as np
 import pytest
 
 from draw.contracts import WarpedPage
+from draw.ink import identity as identity_mod
 from draw.ink import page_model as pm_mod
 from draw.ink import worker as worker_mod
 from draw.ink.config import InkConfig
@@ -290,5 +292,634 @@ def test_page_model_seeds_the_full_grid(monkeypatch):
             _drive(worker, generation, image)
         assert worker._page_model is not None
         assert worker._page_model.seeded_fraction == pytest.approx(1.0)
+    finally:
+        worker.stop()
+
+
+def _drive_page(worker, generation, page):
+    before = worker.stats()["passes_total"]
+    worker.submit(page)
+    deadline = time.monotonic() + 5.0
+    while worker.stats()["passes_total"] <= before:
+        if time.monotonic() > deadline:
+            raise AssertionError("a passada nao executou")
+        time.sleep(0.001)
+
+
+def test_page_model_reacquires_same_sheet_with_baseline_and_handwriting(monkeypatch):
+    """Issue 1: marcas de baseline suprimidas do canvas nao derrubam containment."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        gen1 = worker.new_generation()
+        image = np.full((H, W), PAPER, dtype=np.float32)
+        # 900 px de conteudo pre-existente (faixas finas para passar na guarda 32x32)
+        image[10:20, 10:55] = INK
+        image[24:34, 10:55] = INK
+        for _ in range(3):
+            _drive(worker, gen1, image)
+        assert np.count_nonzero(_confirmed(worker, gen1)) == 0
+
+        # 100 px de escrita nova confirmada (containment sem baseline = 100/1000 = 10% < 50%)
+        image[60:70, 80:90] = INK
+        for _ in range(4):
+            _drive(worker, gen1, image)
+        assert np.count_nonzero(_confirmed(worker, gen1)) == 100
+        pm_before = worker._page_model
+
+        gen2 = worker.new_generation(preserve_identity=True)
+        _drive(worker, gen2, image)
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] == "same_page"
+        assert events[-1]["recall"] == pytest.approx(1.0)
+        assert events[-1]["containment"] == pytest.approx(1.0)
+        confirmed = _confirmed(worker, gen2)
+        assert np.count_nonzero(confirmed) == 100
+        assert np.all(confirmed[60:70, 80:90] > 0)
+        assert not np.any(confirmed[10:34, 10:55] > 0)
+        assert worker._page_model is pm_before
+    finally:
+        worker.stop()
+
+
+def test_page_model_reacquisition_control_rejects_different_sheet(monkeypatch):
+    """Issue 1 (controle): folha diferente continua sendo rejeitada como new_page."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        gen1 = worker.new_generation()
+        image = np.full((H, W), PAPER, dtype=np.float32)
+        image[10:20, 10:55] = INK
+        image[24:34, 10:55] = INK
+        for _ in range(3):
+            _drive(worker, gen1, image)
+        image[60:70, 80:90] = INK
+        for _ in range(4):
+            _drive(worker, gen1, image)
+        assert np.count_nonzero(_confirmed(worker, gen1)) == 100
+        pm_before = worker._page_model
+
+        other = np.full((H, W), PAPER, dtype=np.float32)
+        other[75:85, 15:65] = INK
+        gen2 = worker.new_generation(preserve_identity=True)
+        for _ in range(identity_mod._PAGE_IDENTITY_SWITCH_CONSENSUS_FRAMES):
+            _drive(worker, gen2, other)
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] == "new_page"
+        assert np.count_nonzero(_confirmed(worker, gen2)) == 0
+        assert worker._page_model is not pm_before
+    finally:
+        worker.stop()
+
+
+def test_page_model_supports_consecutive_cornerless_submissions(monkeypatch):
+    """Issue 2: submissoes consecutivas sem cantos usam identidade sem crashar."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        generation = worker.new_generation()
+        image = np.full((H, W), PAPER, dtype=np.float32)
+        image[10:20, 10:20] = INK
+        for _ in range(3):
+            _drive_page(worker, generation, WarpedPage(_bgr(image), generation))
+        assert worker.error is None
+        assert worker.last_registration is None
+        assert worker._page_model is not None
+        assert worker._page_model.seeded_fraction == pytest.approx(1.0)
+        assert np.count_nonzero(_confirmed(worker, generation)) == 0
+
+        image[50:60, 50:60] = INK
+        for _ in range(4):
+            _drive_page(worker, generation, WarpedPage(_bgr(image), generation))
+        assert worker.error is None
+        confirmed = _confirmed(worker, generation)
+        assert np.count_nonzero(confirmed) == 100
+        assert np.all(confirmed[50:60, 50:60] > 0)
+    finally:
+        worker.stop()
+
+
+def test_page_model_handles_cornered_then_cornerless_submission(monkeypatch):
+    """Issue 2: passada com cantos seguida de passada sem cantos nao derruba worker."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        generation = worker.new_generation()
+        image = np.full((H, W), PAPER, dtype=np.float32)
+        _drive_page(worker, generation, WarpedPage(_bgr(image), generation, Q0))
+        _drive_page(worker, generation, WarpedPage(_bgr(image), generation, None))
+        _drive_page(worker, generation, WarpedPage(_bgr(image), generation, None))
+        assert worker.error is None
+        assert worker.last_registration is None
+        assert worker._page_model.seeded_fraction == pytest.approx(1.0)
+    finally:
+        worker.stop()
+
+
+def test_page_model_seeding_remaining_ignores_hidden_blocks():
+    """Issue 4: seeding_remaining conta apenas blocos expostos em semeadura ativa."""
+    model = pm_mod.PageModel((H, W), confirm_obs=3)
+    gray = _paper()
+    vis = np.ones((H, W), dtype=bool)
+    vis[0:32, 0:64] = False
+    for _ in range(3):
+        model.observe(gray, visible=vis)
+    assert model.seeding_remaining == 0
+
+    # Expõe [0:32, 0:32] mantendo [0:32, 32:64] oculto (streak=0)
+    vis[0:32, 0:32] = True
+    model.observe(gray, visible=vis)
+    assert model.seeding_remaining == 2
+    model.observe(gray, visible=vis)
+    assert model.seeding_remaining == 1
+    model.observe(gray, visible=vis)
+    assert model.seeding_remaining == 0
+    assert np.all(model.seeded[0:32, 0:32])
+    assert not np.any(model.seeded[0:32, 32:64])
+
+
+def test_page_model_hand_exit_seeds_exposed_blocks_before_rest_and_allows_writing(
+    monkeypatch,
+):
+    """Issue 4: saida da mao mantem passadas suficientes para semear bloco recem-exposto."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.02)
+    monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0.05)
+    now = [1000.0]
+    worker = worker_mod.PageCleanWorker(
+        _ScriptInk(),
+        config=InkConfig(page_model=True),
+        clock=lambda: now[0],
+    )
+    generation = worker.new_generation()
+    image = np.full((H, W), PAPER, dtype=np.float32)
+    covered = np.ones((H, W), dtype=bool)
+    covered[32:64, 32:64] = False
+
+    worker.set_hand_presence(True)
+    for _ in range(4):
+        worker.submit(WarpedPage(_bgr(image), generation, Q0, covered))
+        assert worker.pump()
+        now[0] += 0.05
+    assert not np.any(worker._page_model.seeded[32:64, 32:64])
+
+    # Mao sai e folha fica limpa: deve semear o bloco recem-exposto antes de descansar
+    worker.set_hand_presence(False)
+    for _ in range(10):
+        worker.submit(WarpedPage(_bgr(image), generation, Q0))
+        worker.pump()
+        now[0] += 0.06
+        if worker.stats()["resting"]:
+            break
+    assert worker.stats()["resting"]
+    assert np.all(worker._page_model.seeded[32:64, 32:64])
+
+    # Pausa ociosa de 10 s: nenhuma passada roda em descanso
+    passes_at_rest = worker.stats()["passes_total"]
+    for _ in range(10):
+        worker.submit(WarpedPage(_bgr(image), generation, Q0))
+        assert not worker.pump()
+        now[0] += 1.0
+    assert worker.stats()["passes_total"] == passes_at_rest
+
+    # Escrita subsequente no bloco recem-semeado confirma normalmente
+    worker.set_hand_presence(True, moved=True)
+    image[40:50, 40:50] = INK
+    for _ in range(4):
+        worker.submit(WarpedPage(_bgr(image), generation, Q0))
+        assert worker.pump()
+        now[0] += 0.05
+    snap = worker.poll(generation, 0)
+    assert snap is not None
+    assert np.count_nonzero(snap.confirmed[40:50, 40:50]) == 100
+
+
+def test_page_model_rests_when_block_remains_hidden(monkeypatch):
+    """Issue 4: bloco que permanece oculto nao impede o descanso total."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.02)
+    monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0.05)
+    now = [1000.0]
+    worker = worker_mod.PageCleanWorker(
+        _ScriptInk(),
+        config=InkConfig(page_model=True),
+        clock=lambda: now[0],
+    )
+    generation = worker.new_generation()
+    image = np.full((H, W), PAPER, dtype=np.float32)
+    covered = np.ones((H, W), dtype=bool)
+    covered[0:32, 0:32] = False
+    covered[32:64, 32:64] = False
+
+    worker.set_hand_presence(True)
+    for _ in range(4):
+        worker.submit(WarpedPage(_bgr(image), generation, Q0, covered))
+        assert worker.pump()
+        now[0] += 0.05
+
+    # Mao sai, [32:64, 32:64] exposto mas [0:32, 0:32] segue oculto
+    still_hidden = np.ones((H, W), dtype=bool)
+    still_hidden[0:32, 0:32] = False
+    worker.set_hand_presence(False)
+    for _ in range(12):
+        worker.submit(WarpedPage(_bgr(image), generation, Q0, still_hidden))
+        worker.pump()
+        now[0] += 0.06
+        if worker.stats()["resting"]:
+            break
+    assert worker.stats()["resting"]
+    assert np.all(worker._page_model.seeded[32:64, 32:64])
+    assert not np.any(worker._page_model.seeded[0:32, 0:32])
+
+
+def test_page_model_resets_on_identity_timeout_within_same_generation(monkeypatch):
+    """Issue 5: quarantine_timeout reseta o PageModel junto do acumulador."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        gen1 = worker.new_generation()
+        image = np.full((H, W), PAPER, dtype=np.float32)
+        for _ in range(3):
+            _drive(worker, gen1, image)
+        image[10:20, 10:20] = INK
+        for _ in range(4):
+            _drive(worker, gen1, image)
+        assert np.count_nonzero(_confirmed(worker, gen1)) == 100
+
+        gen2 = worker.new_generation(preserve_identity=True)
+        occluded = np.ones((H, W), dtype=bool)
+        occluded[0:32, 0:32] = False
+        for _ in range(identity_mod._PAGE_IDENTITY_MAX_DEFERRALS):
+            _drive(worker, gen2, image, visible=occluded)
+        assert (
+            worker.telemetry_snapshot()["page_identity_events"][-1]["decision"]
+            == "deferred_occlusion"
+        )
+        assert worker._page_model is not None
+
+        # Passada que estoura a quarentena: reseta acumulador e PageModel
+        _drive(worker, gen2, image, visible=occluded)
+        assert (
+            worker.telemetry_snapshot()["page_identity_events"][-1]["decision"]
+            == "quarantine_timeout"
+        )
+        assert worker._page_model is None
+
+        # Nova folha na mesma geracao: marca pre-existente semeia e traco novo confirma
+        new_sheet = np.full((H, W), PAPER, dtype=np.float32)
+        new_sheet[50:60, 50:60] = INK
+        for _ in range(3):
+            _drive(worker, gen2, new_sheet)
+        assert np.count_nonzero(_confirmed(worker, gen2)) == 0
+        new_sheet[10:20, 10:20] = INK
+        for _ in range(4):
+            _drive(worker, gen2, new_sheet)
+        assert np.count_nonzero(_confirmed(worker, gen2)[10:20, 10:20]) == 100
+    finally:
+        worker.stop()
+
+
+def test_page_model_resets_on_new_page_after_deferred_occlusion(monkeypatch):
+    """Issue 5: new_page apos deferred_occlusion descarta a referencia da ancora velha."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        gen1 = worker.new_generation()
+        image = np.full((H, W), PAPER, dtype=np.float32)
+        for _ in range(3):
+            _drive(worker, gen1, image)
+        image[10:20, 10:20] = INK
+        for _ in range(4):
+            _drive(worker, gen1, image)
+        assert np.count_nonzero(_confirmed(worker, gen1)) == 100
+
+        gen2 = worker.new_generation(preserve_identity=True)
+        occluded = np.ones((H, W), dtype=bool)
+        occluded[0:32, 0:32] = False
+        _drive(worker, gen2, image, visible=occluded)
+        old_pm = worker._page_model
+        assert old_pm is not None
+
+        # Folha diferente visivel: 3 passadas de consenso -> new_page
+        other = np.full((H, W), PAPER, dtype=np.float32)
+        other[60:70, 60:70] = INK
+        for _ in range(identity_mod._PAGE_IDENTITY_SWITCH_CONSENSUS_FRAMES):
+            _drive(worker, gen2, other)
+        assert (
+            worker.telemetry_snapshot()["page_identity_events"][-1]["decision"]
+            == "new_page"
+        )
+        assert worker._page_model is not old_pm
+        # Mais 2 passadas terminam de semear a folha nova com [60:70, 60:70] como baseline
+        for _ in range(2):
+            _drive(worker, gen2, other)
+        assert np.count_nonzero(_confirmed(worker, gen2)) == 0
+        # Traco novo desenhado em [10:20, 10:20] (onde havia tinta na pagina velha) confirma
+        other[10:20, 10:20] = INK
+        for _ in range(4):
+            _drive(worker, gen2, other)
+        assert np.count_nonzero(_confirmed(worker, gen2)[10:20, 10:20]) == 100
+    finally:
+        worker.stop()
+
+
+def test_page_model_does_not_seed_synthetic_fill_when_coverage_expands(monkeypatch):
+    """Issue 6: preenchimento sintetico fora de coverage nao semeia baseline."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        generation = worker.new_generation()
+        real_sheet = np.full((H, W), PAPER, dtype=np.float32)
+        real_sheet[10:20, 10:20] = INK  # marca pre-existente na faixa esquerda
+
+        # Cobertura inicial exclui as primeiras 32 colunas (preenchidas com cor de papel)
+        cov_clipped = np.ones((H, W), dtype=bool)
+        cov_clipped[:, :32] = False
+        filled = real_sheet.copy()
+        filled[:, :32] = PAPER
+        for _ in range(4):
+            _drive_page(
+                worker,
+                generation,
+                WarpedPage(_bgr(filled), generation, Q0, coverage=cov_clipped),
+            )
+        assert not np.any(worker._page_model.seeded[:, :32])
+        assert np.all(worker._page_model.seeded[:, 32:])
+        assert np.count_nonzero(_confirmed(worker, generation)) == 0
+
+        # Cobertura expande e revela a marca pre-existente real: semeia como fundo
+        cov_full = np.ones((H, W), dtype=bool)
+        for _ in range(4):
+            _drive_page(
+                worker,
+                generation,
+                WarpedPage(_bgr(real_sheet), generation, Q0, coverage=cov_full),
+            )
+        assert np.all(worker._page_model.seeded)
+        assert np.count_nonzero(_confirmed(worker, generation)) == 0
+
+        # Traco novo na faixa recem-semeada confirma normalmente
+        real_sheet[50:60, 10:20] = INK
+        for _ in range(4):
+            _drive_page(
+                worker,
+                generation,
+                WarpedPage(_bgr(real_sheet), generation, Q0, coverage=cov_full),
+            )
+        confirmed = _confirmed(worker, generation)
+        assert np.count_nonzero(confirmed) == 100
+        assert np.all(confirmed[50:60, 10:20] > 0)
+    finally:
+        worker.stop()
+
+
+def test_page_model_coverage_drop_preserves_confirmed_ink_reconfirmation(monkeypatch):
+    """Issue 6: queda de coverage sobre tinta ja confirmada nao corrompe ref nem bloqueia voto."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        generation = worker.new_generation()
+        cov_full = np.ones((H, W), dtype=bool)
+        image = np.full((H, W), PAPER, dtype=np.float32)
+        for _ in range(3):
+            _drive_page(
+                worker,
+                generation,
+                WarpedPage(_bgr(image), generation, Q0, coverage=cov_full),
+            )
+        image[50:60, 50:60] = INK
+        for _ in range(4):
+            _drive_page(
+                worker,
+                generation,
+                WarpedPage(_bgr(image), generation, Q0, coverage=cov_full),
+            )
+        assert np.count_nonzero(_confirmed(worker, generation)[50:60, 50:60]) == 100
+
+        # Queda semantica de coverage sobre o traco confirmado
+        cov_drop = np.ones((H, W), dtype=bool)
+        cov_drop[45:65, 45:65] = False
+        for _ in range(4):
+            _drive_page(
+                worker,
+                generation,
+                WarpedPage(_bgr(image), generation, Q0, coverage=cov_drop),
+            )
+        assert np.count_nonzero(_confirmed(worker, generation)[50:60, 50:60]) == 100
+    finally:
+        worker.stop()
+
+
+def test_page_model_missed_hand_over_seeded_paper_is_blocked(monkeypatch):
+    """Issue 7: mao nao mascarada sobre papel ja semeado nao vota nem puxa ref."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        generation = worker.new_generation()
+        image = np.full((H, W), PAPER, dtype=np.float32)
+        for _ in range(3):
+            _drive(worker, generation, image)
+        assert worker._page_model.seeded_fraction == pytest.approx(1.0)
+
+        # Mao escura/quente 48x48 (visible=True) com vincos onde _ScriptInk da 0.95
+        hand_bgr = _bgr(image)
+        hand_bgr[24:72, 40:88] = (90, 110, 150)
+        hand_bgr[42:52, 55:65] = (30, 35, 45)
+        for _ in range(5):
+            _drive_page(worker, generation, WarpedPage(hand_bgr, generation, Q0))
+        assert np.count_nonzero(_confirmed(worker, generation)) == 0
+        np.testing.assert_allclose(
+            worker._page_model.reference[24:72, 40:88], PAPER, atol=1e-3
+        )
+    finally:
+        worker.stop()
+
+
+def test_page_model_missed_hand_preserves_existing_confirmed_ink(monkeypatch):
+    """Issue 7: mao nao mascarada sobre traco confirmado nao o apaga nem corrompe ref."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True, removal=True))
+    try:
+        generation = worker.new_generation()
+        image = np.full((H, W), PAPER, dtype=np.float32)
+        for _ in range(3):
+            _drive(worker, generation, image)
+        image[44:52, 54:64] = INK
+        for _ in range(4):
+            _drive(worker, generation, image)
+        assert np.count_nonzero(_confirmed(worker, generation)[44:52, 54:64]) == 80
+
+        # Palma sem mascara (gray ~120 -> prob=0 no _ScriptInk) cobrindo o traco
+        hand_bgr = _bgr(image)
+        hand_bgr[24:72, 40:88] = (110, 120, 140)
+        for _ in range(10):
+            _drive_page(worker, generation, WarpedPage(hand_bgr, generation, Q0))
+        assert np.count_nonzero(_confirmed(worker, generation)[44:52, 54:64]) == 80
+    finally:
+        worker.stop()
+
+
+def test_page_model_occlusion_hold_blocks_recovery_edge_shadow(monkeypatch):
+    """Issue 7: occlusion_hold_passes segura residuo de sombra logo apos a mao sair."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True, occlusion_hold_passes=2))
+    try:
+        generation = worker.new_generation()
+        image = np.full((H, W), PAPER, dtype=np.float32)
+        for _ in range(3):
+            _drive(worker, generation, image)
+
+        # 1 passada com mao nao mascarada
+        hand_bgr = _bgr(image)
+        hand_bgr[24:72, 40:88] = (80, 90, 110)
+        _drive_page(worker, generation, WarpedPage(hand_bgr, generation, Q0))
+
+        # Nas 2 passadas seguintes (dentro do hold=2), residuo escuro na regiao nao vota
+        residue = image.copy()
+        residue[42:52, 55:65] = INK
+        for _ in range(2):
+            _drive(worker, generation, residue)
+        assert np.count_nonzero(_confirmed(worker, generation)) == 0
+
+        # Solto o hold, mais passadas confirmam o traco real
+        for _ in range(3):
+            _drive(worker, generation, residue)
+        assert np.count_nonzero(_confirmed(worker, generation)[42:52, 55:65]) == 100
+    finally:
+        worker.stop()
+
+
+def test_page_model_work_does_not_block_submit(monkeypatch):
+    """Issue 8: PageModel roda fora de _condition e nao bloqueia submit()."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    entered = threading.Event()
+    release = threading.Event()
+    orig_observe = pm_mod.PageModel.observe
+    calls = [0]
+
+    def _slow_observe(self, *args, **kwargs):
+        calls[0] += 1
+        if calls[0] == 1:
+            entered.set()
+            release.wait(timeout=5.0)
+        return orig_observe(self, *args, **kwargs)
+
+    monkeypatch.setattr(pm_mod.PageModel, "observe", _slow_observe)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        generation = worker.new_generation()
+        image = np.full((H, W), PAPER, dtype=np.float32)
+        worker.submit(WarpedPage(_bgr(image), generation, Q0))
+        assert entered.wait(timeout=5.0)
+
+        t0 = time.monotonic()
+        worker.submit(WarpedPage(_bgr(image), generation, Q0))
+        elapsed = time.monotonic() - t0
+        assert elapsed < 0.2
+        assert not release.is_set()
+        release.set()
+
+        _drive(worker, generation, image)
+        assert worker.error is None
+    finally:
+        release.set()
+        worker.stop()
+
+
+def test_page_model_generation_change_mid_pass_discards_safely(monkeypatch):
+    """Issue 8: troca de geracao enquanto PageModel roda fora do lock descarta passada velha."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    entered = threading.Event()
+    release = threading.Event()
+    orig_observe = pm_mod.PageModel.observe
+    armed = [False]
+
+    def _hooked_observe(self, *args, **kwargs):
+        res = orig_observe(self, *args, **kwargs)
+        if armed[0]:
+            armed[0] = False
+            entered.set()
+            release.wait(timeout=5.0)
+        return res
+
+    monkeypatch.setattr(pm_mod.PageModel, "observe", _hooked_observe)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        gen1 = worker.new_generation()
+        image = np.full((H, W), PAPER, dtype=np.float32)
+        for _ in range(3):
+            _drive(worker, gen1, image)
+
+        stroked = image.copy()
+        stroked[50:60, 50:60] = INK
+        _drive(worker, gen1, stroked)
+        armed[0] = True
+        worker.submit(WarpedPage(_bgr(stroked), gen1, Q0))
+        assert entered.wait(timeout=5.0)
+
+        gen2 = worker.new_generation()
+        release.set()
+        for _ in range(3):
+            _drive(worker, gen2, image)
+        assert worker.error is None
+        assert np.count_nonzero(_confirmed(worker, gen2)) == 0
+    finally:
+        release.set()
+        worker.stop()
+
+
+def test_page_model_counters_exclude_zero_and_hidden_pixels(monkeypatch):
+    """Issue 9: pm_suppressed_px e pm_novel_px contam apenas votos no dominio visivel."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        generation = worker.new_generation()
+        image = np.full((H, W), PAPER, dtype=np.float32)
+        image[10:20, 10:20] = INK  # 100 px baseline pre-existente
+        for _ in range(3):
+            _drive(worker, generation, image)
+
+        # Confirma 50 px em [30:35, 10:20]
+        image[30:35, 10:20] = INK
+        for _ in range(4):
+            _drive(worker, generation, image)
+        assert np.count_nonzero(_confirmed(worker, generation)) == 50
+
+        # Nova passada com:
+        # - 100 px baseline visivel [10:20, 10:20] (suprimido)
+        # - 50 px ja confirmado [30:35, 10:20]
+        # - 80 px novo visivel [50:58, 10:20] (novel)
+        # - 200 px escuro mas OCULTO [70:80, 10:30] (visible=False)
+        image[50:58, 10:20] = INK
+        image[70:80, 10:30] = INK
+        vis = np.ones((H, W), dtype=bool)
+        vis[70:80, 10:30] = False
+        _drive(worker, generation, image, visible=vis)
+        record = worker.telemetry_snapshot()["records"][-1]
+        assert record["pm_suppressed_px"] == 100
+        assert record["pm_novel_px"] == 80
+        assert record["mask_px"] == 80 + 50
+    finally:
+        worker.stop()
+
+
+def test_page_model_counters_under_non_identity_warp_border(monkeypatch):
+    """Issue 9: borda borderValue=0 fora do warp registrado nao infla pm_novel_px."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True, anchor_follow=False))
+    try:
+        generation = worker.new_generation()
+        image = np.full((H, W), PAPER, dtype=np.float32)
+        for _ in range(3):
+            _drive(worker, generation, image)
+
+        shifted_quad = Q0 + np.float32([[6, 4], [6, 4], [6, 4], [6, 4]])
+        vis_cam = np.ones((H, W), dtype=bool)
+        _drive_page(
+            worker,
+            generation,
+            WarpedPage(_bgr(image), generation, shifted_quad, visible=vis_cam),
+        )
+        record = worker.telemetry_snapshot()["records"][-1]
+        assert record["pm_novel_px"] == 0
+        assert record["pm_suppressed_px"] == 0
     finally:
         worker.stop()

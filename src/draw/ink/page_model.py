@@ -47,7 +47,10 @@ semente razoavel para um traco escuro sobre papel claro; o corpus
 de clipes reais e quem calibra de vez.
 """
 
+import cv2
 import numpy as np
+
+from . import paper_evidence
 
 # Bloco da grade de semeadura: a mesma ordem do 32 px medido na
 # guarda fotometrica (#129). Fino o bastante para a mao nao
@@ -139,7 +142,12 @@ class PageModel:
         self.novel_delta = float(novel_delta)
         height, width = self.shape
         self._ref = np.zeros((height, width), dtype=np.float32)
+        self._blue_ref = np.zeros((height, width), dtype=np.float32)
+        self._red_ref = np.zeros((height, width), dtype=np.float32)
+        self._has_chroma_ref = False
         self._seeded = np.zeros((height, width), dtype=bool)
+        self._occluder_hold = np.zeros((height, width), dtype=np.uint8)
+        self._seeding_remaining = 0
         self._streak = np.zeros(
             (-(-height // self.block), -(-width // self.block)), dtype=np.uint8
         )
@@ -161,13 +169,23 @@ class PageModel:
         return self._seeded
 
     @property
+    def seeding_remaining(self):
+        """Observacoes restantes para blocos ja expostos em curso de semeadura.
+
+        Considera apenas blocos com 0 < streak < confirm_obs e pixels visiveis
+        ainda nao semeados — blocos permanentemente ocultos (streak == 0) nao
+        seguram o descanso da trabalhadora.
+        """
+        return self._seeding_remaining
+
+    @property
     def seeded_fraction(self):
         """Fracao da grade com referencia (telemetria de prontidao)."""
         if self._seeded.size == 0:
             return 0.0
         return float(np.count_nonzero(self._seeded) / self._seeded.size)
 
-    def observe(self, gray, visible=None, paper=None):
+    def observe(self, gray, visible=None, paper=None, bgr=None):
         """Alimenta o modelo com a luminancia desta passada (grade da ancora).
 
         `gray` e o warp em luminancia na grade da ancora. `visible`
@@ -176,7 +194,9 @@ class PageModel:
         chamador julga papel limpo (a trabalhadora passa
         `visible & (prob <= piso)`); onde ele e False a referencia
         nao se move — traco nunca afunda no fundo. `paper=None`
-        semeia sem rastrear, o modo conservador.
+        semeia sem rastrear, o modo conservador. `bgr` (opcional,
+        uint8 HxWx3) registra a cromaticidade B/R do papel para a
+        guarda fotometrica (`exposed`).
 
         Semear exige `confirm_obs` observacoes vistas seguidas no
         bloco; o pixel semeia com a observacao da vez, nao com media
@@ -205,9 +225,12 @@ class PageModel:
         streak[~seen] = 0
         ready = _expand(streak >= self.confirm_obs, self.shape, self.block)
         seed_now = ready & visible & ~self._seeded
-        if np.any(seed_now):
+        has_seed_now = bool(np.any(seed_now))
+        if has_seed_now:
             self._ref[seed_now] = gray[seed_now]
             self._seeded |= seed_now
+        update = None
+        has_update = False
         if paper is not None:
             paper = np.asarray(paper, dtype=bool)
             if paper.shape != self.shape:
@@ -215,8 +238,126 @@ class PageModel:
                     f"paper na grade {paper.shape}, modelo na {self.shape}"
                 )
             update = self._seeded & visible & paper
-            if np.any(update):
+            has_update = bool(np.any(update))
+            if has_update:
                 self._ref[update] += self.rate * (gray[update] - self._ref[update])
+        if (
+            (has_seed_now or has_update)
+            and bgr is not None
+            and getattr(bgr, "ndim", 0) == 3
+            and bgr.shape[:2] == self.shape
+            and bgr.shape[2] >= 3
+        ):
+            blue = bgr[..., 0].astype(np.float32)
+            red = bgr[..., 2].astype(np.float32)
+            if has_seed_now:
+                self._blue_ref[seed_now] = blue[seed_now]
+                self._red_ref[seed_now] = red[seed_now]
+                self._has_chroma_ref = True
+            if has_update and self._has_chroma_ref:
+                self._blue_ref[update] += self.rate * (
+                    blue[update] - self._blue_ref[update]
+                )
+                self._red_ref[update] += self.rate * (
+                    red[update] - self._red_ref[update]
+                )
+        unseeded_vis_blocks = (
+            _block_fraction(~self._seeded & visible, self.block, raw=True) > 0
+        )
+        active = (streak > 0) & (streak < self.confirm_obs) & unseeded_vis_blocks
+        self._seeding_remaining = (
+            int(np.max(self.confirm_obs - streak[active])) if np.any(active) else 0
+        )
+
+    def exposed(
+        self,
+        gray,
+        bgr=None,
+        *,
+        visible=None,
+        min_ratio=paper_evidence._MIN_RATIO,
+        chroma_tol=paper_evidence._CHROMA_TOL,
+        hold_passes=0,
+    ):
+        """Mascara bool HxW: True onde a regiao semeada parece papel exposto.
+
+        Impede que maos ou sombras perdidas pelo detector alcancem o voto ou
+        corrompam `self._ref`: tracos de caneta preservam papel adjacente
+        na janela deslizante de `self.block` px, enquanto maos/bracos/sombras
+        caem abaixo de `min_ratio * ref_peak` ou saem da razao B/R do papel.
+        """
+        gray_f = np.asarray(gray, dtype=np.float32)
+        if gray_f.shape != self.shape:
+            raise ValueError(f"gray na grade {gray_f.shape}, modelo na {self.shape}")
+        input_vis = (
+            np.ones(self.shape, dtype=bool)
+            if visible is None
+            else np.asarray(visible, dtype=bool)
+        )
+        if input_vis.shape != self.shape:
+            raise ValueError(
+                f"visible na grade {input_vis.shape}, modelo na {self.shape}"
+            )
+        if not np.any(self._seeded):
+            return np.ones(self.shape, dtype=bool)
+        height, width = self.shape
+        step = paper_evidence._REDUCE_PX
+        cells = max(1, self.block // step)
+        kernel = np.ones((cells, cells), np.uint8)
+        ref_grid = np.where(self._seeded, self._ref, 0.0)[::step, ::step]
+        ref_peak = cv2.dilate(ref_grid, kernel)
+        gray_peak = cv2.dilate(gray_f[::step, ::step], kernel)
+        has_ref = ref_peak > 1.0
+        ok = ~has_ref | (gray_peak >= min_ratio * ref_peak)
+        if (
+            self._has_chroma_ref
+            and bgr is not None
+            and getattr(bgr, "ndim", 0) == 3
+            and bgr.shape[:2] == self.shape
+            and bgr.shape[2] >= 3
+        ):
+            peak_bgr = cv2.dilate(bgr[::step, ::step], kernel)
+            blue_f = peak_bgr[..., 0].astype(np.float32)
+            red_f = peak_bgr[..., 2].astype(np.float32)
+            b_ref_peak = cv2.dilate(
+                np.where(self._seeded, self._blue_ref, 0.0)[::step, ::step], kernel
+            )
+            r_ref_peak = cv2.dilate(
+                np.where(self._seeded, self._red_ref, 0.0)[::step, ::step], kernel
+            )
+            paper_ratio = np.where(
+                r_ref_peak > 1.0, b_ref_peak / np.maximum(r_ref_peak, 1.0), 1.0
+            )
+            spread = chroma_tol * np.maximum(paper_ratio, 1e-3) + 1e-6
+            chroma_ok = (
+                (red_f > 1.0)
+                & (blue_f >= (paper_ratio - spread) * red_f)
+                & (blue_f <= (paper_ratio + spread) * red_f)
+            )
+            ok &= ~has_ref | (r_ref_peak <= 1.0) | chroma_ok
+        if visible is not None:
+            vis_peak = cv2.dilate(input_vis.astype(np.uint8)[::step, ::step], kernel)
+            ok |= vis_peak == 0
+        half = max(1, cells // 2) + 1
+        ok = cv2.erode(
+            ok.astype(np.uint8),
+            np.ones((2 * half + 1, 2 * half + 1), np.uint8),
+            borderValue=1,
+        )
+        grown = cv2.resize(ok, None, fx=step, fy=step, interpolation=cv2.INTER_NEAREST)
+        raw_exposed = grown[:height, :width].astype(bool)
+        hold = self._occluder_hold
+        if hold_passes > 0:
+            trigger = self._seeded & input_vis & ~raw_exposed
+            if np.any(trigger):
+                hold[trigger] = hold_passes
+            release = raw_exposed & (hold > 0)
+            if np.any(release):
+                hold[release] -= 1
+            return ~self._seeded | (raw_exposed & (hold == 0))
+        if np.any(hold):
+            hold.fill(0)
+        return ~self._seeded | raw_exposed
 
     def admissible(self, visible=None):
         """Pixels que podem entregar evidencia: os que tem referencia.

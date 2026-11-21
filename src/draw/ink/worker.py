@@ -198,6 +198,17 @@ def _crop_all_visible(visible, corners):
     return bool(visible[crop.astype(bool)].all())
 
 
+def _reg_triple(anchor, reg_corners, corners):
+    """Normaliza tripla (ancora, registro, submetido) ou None sem geometria."""
+    if anchor is None or reg_corners is None:
+        return None
+    return (
+        anchor.copy(),
+        reg_corners.copy(),
+        None if corners is None else corners.copy(),
+    )
+
+
 @dataclass(slots=True)
 class _Pass:
     """Scratch mutavel de uma passada da trabalhadora.
@@ -262,6 +273,20 @@ class _Pass:
     force_publish: bool = False
     arbitration_abstain: bool = False
     follow_abstain: bool = False
+    motion_abstain: bool = False
+    used_registered_prob: bool = False
+    pass_voted: bool = False
+    last_reg: object = None
+    pm_epoch: object = None
+    confirmed_ink: object = None
+    pm_baseline_ink: object = None
+    next_baseline_ink: object = None
+    paper_ok: object = None
+    reg_coverage: object = None
+    coverage_matches_last_reg: bool = False
+    pm_seeding_remaining: int = 0
+    pm_confirm_obs: int = 0
+    pm_has_hold: bool = False
     reg_info: dict = field(default_factory=dict)
 
 
@@ -358,10 +383,14 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._motion_unregistered_total = 0
         self._ruling_generation = None
         # Modelo persistente da pagina limpa (InkConfig.page_model,
-        # opt-in): uma instancia por geracao/grade, criada na primeira
-        # passada votada da geracao — ver draw.ink.page_model.
+        # opt-in): mantido por epoca (canvas_epoch, pm_reset_seq) e
+        # propriedade exclusiva da thread trabalhadora — ver draw.ink.page_model.
         self._page_model = None
-        self._pm_generation = None
+        self._pm_epoch = None
+        self._pm_reset_seq = 0
+        self._pm_confirm_obs = page_model._CONFIRM_OBS
+        self._pm_baseline_ink = None
+        self._identity_baseline = None
         # Relogio monotonico injetavel: o padrao e o do processo;
         # replays com pump() passam o relogio da cena.
         self._clock = clock
@@ -534,9 +563,17 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     if self._anchor_corners is None
                     else self._anchor_corners.copy()
                 )
+                self._identity_baseline = (
+                    None
+                    if self._pm_baseline_ink is None
+                    else self._pm_baseline_ink.copy()
+                )
             else:
                 self._identity_reference = None
                 self._identity_reference_corners = None
+                self._identity_baseline = None
+                self._pm_baseline_ink = None
+                self._pm_reset_seq += 1
             self._generation += 1
             self._anchor_samples = []
             self._reg_frozen_corners = None
@@ -712,13 +749,18 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         traco ja lido com a mao presente, e um traco revelado so depois
         da saida precisa das leituras restantes (Devin Review PR #122).
         """
-        if (
-            self._config.vote_score_strong > votes._INK_VOTE_SCORE_STRONG
-            or self._config.hysteresis
-            or self._config.post_exit_full_window
-        ):
-            return votes._INK_VOTE_WINDOW
-        return 1
+        passes = (
+            votes._INK_VOTE_WINDOW
+            if (
+                self._config.vote_score_strong > votes._INK_VOTE_SCORE_STRONG
+                or self._config.hysteresis
+                or self._config.post_exit_full_window
+            )
+            else 1
+        )
+        if self._config.page_model:
+            passes = max(passes, self._pm_confirm_obs)
+        return passes
 
     @property
     def _confirm_once(self):
@@ -1223,17 +1265,16 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         try:
             self._pass_evidence(p)
             abort = self._pass_anchor_state(p)
-            if abort is None:
-                self._pass_register_motion_coverage(p)
+            if abort is not None:
+                return abort
+            self._pass_register_motion_coverage(p)
+            return self._pass_commit(p)
         except Exception as error:  # noqa: BLE001 - vai para o laco
             with self._condition:
                 self._error = error
                 self._stopped = True
                 self._condition.notify_all()
             return False
-        if abort is not None:
-            return abort
-        return self._pass_commit(p)
 
     def _pass_evidence(self, p):
         """Imagem -> evidencia de tinta: visivel na grade do warp,
@@ -1330,7 +1371,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         # canal proprio ate depois do registro: o veto nao e
         # cego nem se confunde com oclusao de mao — ver o
         # gate de re-confirmacao abaixo, no espaco da ancora.
-        p.pass_ended_at = self._clock()
 
     def _pass_anchor_state(self, p):
         """Ancora da passada sob o lock: guarda de geracao, escolha da
@@ -1452,11 +1492,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 pass_corners=p.corners,
             )
         )
-        self._last_registration = (
-            None if p.anchor is None else p.anchor.copy(),
-            (None if p.registration_corners is None else p.registration_corners.copy()),
-            None if p.corners is None else p.corners.copy(),
-        )
+        p.last_reg = _reg_triple(p.anchor, p.registration_corners, p.corners)
         # Mapa registrado SO pela camera: e o que a arbitragem de
         # ancora compara com o mapa cru para julgar pouso x quad ruim.
         # A escolha/correcao do portao vale so para a evidencia que
@@ -1523,11 +1559,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         pass_corners=p.corners,
                     )
                 )
-                self._last_registration = (
-                    p.anchor.copy(),
-                    p.registration_corners.copy(),
-                    None if p.corners is None else p.corners.copy(),
-                )
+                p.last_reg = _reg_triple(p.anchor, p.registration_corners, p.corners)
             if p.motion_decision == "correct":
                 # A evidencia volta para a grade da ancora pelo
                 # modelo afim medido nesta mesma imagem.
@@ -1630,6 +1662,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     p.motion_fix.warp_back(reg_coverage.astype(np.uint8), nearest=True)
                     > 0
                 )
+            p.reg_coverage = reg_coverage
+            p.coverage_matches_last_reg = True
             p.registered_prob = _gate(p.registered_prob, reg_coverage)
             if camera_untouched:
                 p.camera_prob = p.registered_prob
@@ -1647,12 +1681,15 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             )
 
     def _pass_commit(self, p):
-        """Decisao, voto e publicacao da passada, sob o lock.
+        """Decisao, PageModel (fora do lock), voto e publicacao da passada.
 
-        Estagios internos: _pass_identity (pagina nova/mesma/adiada)
-        -> _pass_anchor_gates (arbitragem e mobilidade da ancora)
-        -> _pass_vote_and_publish (abstencoes, acumulador, contadores,
-        publicacao e telemetria). Devolve o bool que _run_pass propaga.
+        Estagios internos:
+        - Lock 2a: _pass_identity -> _pass_anchor_gates -> _pass_prepare_vote
+        - Fora do lock: _pass_paper_and_page_model (registro do gray/bgr,
+          cobertura, guarda de papel exposto, observe, novel, suppress)
+        - Lock 2b: _pass_vote_and_publish (checagem de epoca/geracao,
+          acumulador, contadores, fim do timer pass_ended_at e publicacao).
+        Devolve o bool que _run_pass propaga.
         """
         delta_job = None
         with self._condition:
@@ -1687,6 +1724,16 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 or p.identity_switch_pending
             )
             self._pass_anchor_gates(p)
+            self._pass_prepare_vote(p)
+        self._pass_paper_and_page_model(p)
+        with self._condition:
+            if self._stopped:
+                return False
+            if p.generation != self._generation or p.pm_epoch != (
+                self._canvas_epoch,
+                self._pm_reset_seq,
+            ):
+                return True
             delta_job = self._pass_vote_and_publish(p)
             self._condition.notify_all()
         if delta_job is not None:
@@ -1707,6 +1754,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         )
         if p.first_pass or p.identity_pending:
             identity_reference = self._identity_reference
+            identity_baseline = self._identity_baseline
             identity_corners = self._identity_reference_corners
             identity_recovery_requested = self._identity_recovery_requested
             p.keep_page = False
@@ -1716,6 +1764,11 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 if identity_corners is not None and p.corners is not None:
                     p.identity_geometry_registered = True
                 prior = identity_reference > 0
+                if (
+                    identity_baseline is not None
+                    and identity_baseline.shape == p.prob.shape
+                ):
+                    prior = prior | identity_baseline
                 prior_px = int(np.count_nonzero(prior))
                 p.identity_reference_px = prior_px
                 if prior_px == 0:
@@ -1838,6 +1891,9 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     # A proxima passada estabelece outra ancora.
                     self._accumulator.reset()
                     self._canvas_epoch += 1
+                    self._page_model = None
+                    self._pm_epoch = None
+                    self._pm_baseline_ink = None
                     self._anchor_corners = None
                     self._anchor_samples = []
                     self._reg_frozen_corners = None
@@ -1857,6 +1913,9 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 elif not p.keep_page:
                     self._accumulator.reset()
                     self._canvas_epoch += 1
+                    self._page_model = None
+                    self._pm_epoch = None
+                    self._pm_baseline_ink = None
                     self._anchor_corners = p.corners
                     self._anchor_samples = (
                         [p.corners.copy()]
@@ -1867,6 +1926,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 # observations remain registered into the same canvas.
                 self._identity_reference = None
                 self._identity_reference_corners = None
+                self._identity_baseline = None
                 self._identity_recovery_requested = False
                 self._identity_defer_count = 0
                 self._identity_switch_votes = 0
@@ -1980,19 +2040,12 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 visible_cam=p.visible_cam,
             )
         )
-        self._last_registration = (
-            None if self._anchor_corners is None else self._anchor_corners.copy(),
-            (None if registration_corners is None else registration_corners.copy()),
-            None if p.corners is None else p.corners.copy(),
-        )
+        p.last_reg = _reg_triple(self._anchor_corners, registration_corners, p.corners)
+        p.coverage_matches_last_reg = False
 
-    def _pass_vote_and_publish(self, p):
-        """Voto, acumulador e publicacao: caminho da evidencia,
-        abstencoes, guarda de papel, contadores e telemetria.
-
-        Chamado com _condition tomado. Devolve o delta_job para
-        _pass_commit gravar depois de soltar o lock."""
-        delta_job = None
+    def _pass_prepare_vote(self, p):
+        """Escolhe o mapa que vota, aplica abstencoes e tira snapshot do
+        estado da epoca/acumulador antes de soltar o lock para o PageModel."""
         if (
             (p.first_pass or p.identity_pending)
             and not p.identity_deferred
@@ -2007,31 +2060,22 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # passada — o par registrado antes (referencia
             # de identidade, quad atual) descreveria uma
             # matriz pela qual a tinta nunca passou.
-            self._last_registration = (
-                None
-                if p.corners is None
-                else (p.corners.copy(), p.corners.copy(), p.corners.copy())
-            )
+            p.last_reg = _reg_triple(p.corners, p.corners, p.corners)
+            p.coverage_matches_last_reg = False
+            p.used_registered_prob = False
         else:
             p.prob = p.registered_prob
             p.visible = p.registered_visible
+            p.used_registered_prob = True
         # Veto de movimento so vale na passada registrada: a 1a
         # passada e a de identidade votam na propria geometria.
-        motion_abstain = p.motion_decision == "veto" and p.prob is p.registered_prob
-        if motion_abstain:
-            self._motion_vetoes_total += 1
-        elif p.motion_decision == "correct" and p.prob is p.registered_prob:
-            self._motion_corrections_total += 1
-        elif p.motion_decision == "unregistered" and p.prob is p.registered_prob:
-            self._motion_unregistered_total += 1
-        elif p.motion_decision == "fail_open" and p.prob is p.registered_prob:
-            self._motion_fail_open_total += 1
-        pass_voted = not (
+        p.motion_abstain = p.motion_decision == "veto" and p.used_registered_prob
+        p.pass_voted = not (
             p.identity_switch_pending
             or (p.identity_deferred and p.identity_timed_out)
             or p.arbitration_abstain
             or p.follow_abstain
-            or motion_abstain
+            or p.motion_abstain
         )
         if p.identity_switch_pending or (p.identity_deferred and p.identity_timed_out):
             p.visible = np.zeros(p.prob.shape, dtype=bool)
@@ -2046,22 +2090,35 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # deslocada que a re-ancoragem existe para
             # nao fabricar.
             p.visible = np.zeros(p.prob.shape, dtype=bool)
-        if motion_abstain:
+        if p.motion_abstain:
             # A folha anda sob um quad parado: registrada, esta
             # passada carimbaria a copia deslocada da tinta.
             p.visible = np.zeros(p.prob.shape, dtype=bool)
-        if not pass_voted:
+        if not p.pass_voted:
             # Passada abstida nao deposita: o registro fica
             # None para o avaliador nao projetar GT por uma
             # geometria que nunca chegou ao canvas.
-            self._last_registration = None
+            p.last_reg = None
+        p.pm_epoch = (self._canvas_epoch, self._pm_reset_seq)
+        confirmed = self._accumulator._confirmed
+        p.confirmed_ink = (
+            (confirmed > 0).copy()
+            if confirmed is not None and confirmed.shape == p.prob.shape
+            else np.zeros(p.prob.shape, dtype=bool)
+        )
+        p.pm_baseline_ink = (
+            None if self._pm_baseline_ink is None else self._pm_baseline_ink.copy()
+        )
+
+    def _pass_paper_and_page_model(self, p):
+        """Registro da guarda de papel e PageModel, fora do lock."""
         paper_ok = p.paper_ok_page
-        registration_used = self._last_registration
+        registration_used = p.last_reg
         if (
             paper_ok is not None
             and registration_used is not None
             and registration_used[0] is not None
-            and p.prob is p.registered_prob
+            and p.used_registered_prob
         ):
             # Mesma transformacao da probabilidade; so o que sobrevive
             # inteiro ao resample (== 1) conta como papel.
@@ -2080,8 +2137,9 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 paper_ok = (
                     p.motion_fix.warp_back(paper_ok.astype(np.uint8), nearest=True) > 0
                 )
-        last_reg = self._last_registration
-        if self._config.page_model and pass_voted and last_reg is not None:
+        p.paper_ok = paper_ok
+        last_reg = p.last_reg
+        if self._config.page_model and p.pass_voted:
             # Modelo persistente da pagina (draw.ink.page_model):
             # observa a passada na grade da ancora e so entrega
             # evidencia onde ha referencia semeada; o que nao e
@@ -2090,64 +2148,205 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # nao observa: geometria em fluxo envenenaria a
             # referencia. A 1a passada e a de identidade entram na
             # propria geometria — que e a da ancora por definicao.
-            # A matriz e a do last_registration: no follow
-            # re-ancorado a ancora desta passada ja e a nova (o
-            # `anchor` local ainda guarda a velha) e o prob foi
-            # re-registrado para ela — so o par registrado de fato
-            # mantem o gray alinhado com o mapa que vota.
+            # Sem cantos (last_reg None), a passada ja esta na propria
+            # grade (transformacao identidade).
             if (
-                self._pm_generation != p.generation
+                self._pm_epoch != p.pm_epoch
                 or self._page_model is None
                 or self._page_model.shape != p.prob.shape
             ):
                 self._page_model = page_model.PageModel(p.prob.shape)
-                self._pm_generation = p.generation
+                self._pm_epoch = p.pm_epoch
+                p.next_baseline_ink = np.zeros(p.prob.shape, dtype=bool)
+            elif (
+                p.pm_baseline_ink is not None
+                and p.pm_baseline_ink.shape == p.prob.shape
+            ):
+                p.next_baseline_ink = p.pm_baseline_ink
+            else:
+                p.next_baseline_ink = np.zeros(p.prob.shape, dtype=bool)
             pm = self._page_model
+            p.pm_confirm_obs = pm.confirm_obs
             gray = (
                 p.warped
                 if p.warped.ndim == 2
                 else cv2.cvtColor(p.warped, cv2.COLOR_BGR2GRAY)
             )
-            pm_matrix = registration._registration_matrix(
-                last_reg[0], last_reg[1], p.prob.shape
-            )
-            if not registration._registration_is_identity(pm_matrix):
-                gray = cv2.warpPerspective(
-                    gray,
-                    pm_matrix,
-                    (p.prob.shape[1], p.prob.shape[0]),
-                    flags=cv2.INTER_LINEAR,
-                    borderValue=0,
+            reg_bgr = p.warped if p.warped.ndim == 3 else None
+            pm_matrix = None
+            size = (p.prob.shape[1], p.prob.shape[0])
+            if (
+                last_reg is not None
+                and last_reg[0] is not None
+                and last_reg[1] is not None
+            ):
+                pm_matrix = registration._registration_matrix(
+                    last_reg[0], last_reg[1], p.prob.shape
                 )
+                if not registration._registration_is_identity(pm_matrix):
+                    gray = cv2.warpPerspective(
+                        gray,
+                        pm_matrix,
+                        size,
+                        flags=cv2.INTER_LINEAR,
+                        borderValue=0,
+                    )
+                    if reg_bgr is not None:
+                        reg_bgr = cv2.warpPerspective(
+                            reg_bgr,
+                            pm_matrix,
+                            size,
+                            flags=cv2.INTER_LINEAR,
+                            borderValue=0,
+                        )
             gray = np.asarray(gray, dtype=np.float32)
+            if p.motion_decision == "correct" and p.used_registered_prob:
+                gray = p.motion_fix.warp_back(gray)
+                if reg_bgr is not None:
+                    reg_bgr = p.motion_fix.warp_back(reg_bgr)
+            pm_coverage = None
+            if p.coverage_page_static is not None:
+                pm_coverage = p.coverage_page_static
+                if pm_matrix is not None and not registration._registration_is_identity(
+                    pm_matrix
+                ):
+                    pm_coverage = (
+                        cv2.warpPerspective(
+                            pm_coverage.astype(np.uint8),
+                            pm_matrix,
+                            size,
+                            flags=cv2.INTER_NEAREST,
+                            borderValue=0,
+                        )
+                        > 0
+                    )
+                if p.motion_decision == "correct" and p.used_registered_prob:
+                    pm_coverage = (
+                        p.motion_fix.warp_back(
+                            pm_coverage.astype(np.uint8), nearest=True
+                        )
+                        > 0
+                    )
+            elif p.coverage_cam is not None:
+                if p.coverage_matches_last_reg and p.reg_coverage is not None:
+                    pm_coverage = p.reg_coverage
+                elif p.corners is not None:
+                    page_mat = registration._corners_page_matrix(
+                        p.corners, size[0], size[1]
+                    )
+                    if (
+                        pm_matrix is not None
+                        and not registration._registration_is_identity(pm_matrix)
+                    ):
+                        pm_coverage = (
+                            cv2.warpPerspective(
+                                p.coverage_cam.astype(np.uint8),
+                                pm_matrix @ page_mat,
+                                size,
+                                flags=cv2.INTER_NEAREST,
+                                borderValue=0,
+                            )
+                            > 0
+                        )
+                    else:
+                        pm_coverage = (
+                            cv2.warpPerspective(
+                                p.coverage_cam.astype(np.uint8) * 255,
+                                page_mat,
+                                size,
+                                flags=cv2.INTER_LINEAR,
+                                borderValue=0,
+                            )
+                            > 127
+                        )
+                    if p.motion_decision == "correct" and p.used_registered_prob:
+                        pm_coverage = (
+                            p.motion_fix.warp_back(
+                                pm_coverage.astype(np.uint8), nearest=True
+                            )
+                            > 0
+                        )
+            obs_visible = (
+                pm_coverage
+                if p.visible is None
+                else (p.visible if pm_coverage is None else (p.visible & pm_coverage))
+            )
+            if self._config.paper_guard and p.warped.dtype == np.uint8:
+                exposed_mask = pm.exposed(
+                    gray,
+                    bgr=reg_bgr,
+                    visible=obs_visible,
+                    hold_passes=self._config.occlusion_hold_passes,
+                )
+                p.pm_has_hold = bool(np.any(pm._occluder_hold > 0))
+                p.visible = (
+                    exposed_mask if p.visible is None else (p.visible & exposed_mask)
+                )
+                obs_visible = (
+                    exposed_mask
+                    if obs_visible is None
+                    else (obs_visible & exposed_mask)
+                )
             pm.observe(
                 gray,
-                visible=p.visible,
+                visible=obs_visible,
                 paper=(
                     p.prob <= registration._REMOVAL_LOW_PROB
-                    if p.visible is None
-                    else p.visible & (p.prob <= registration._REMOVAL_LOW_PROB)
+                    if obs_visible is None
+                    else obs_visible & (p.prob <= registration._REMOVAL_LOW_PROB)
+                ),
+                bgr=(
+                    reg_bgr
+                    if (reg_bgr is not None and p.warped.dtype == np.uint8)
+                    else None
                 ),
             )
+            p.pm_seeding_remaining = pm.seeding_remaining
             p.visible = pm.admissible(p.visible)
-            confirmed = self._accumulator._confirmed
-            confirmed_ink = (
-                confirmed > 0
-                if confirmed is not None and confirmed.shape == p.prob.shape
-                else np.zeros(p.prob.shape, dtype=bool)
-            )
+            confirmed_ink = p.confirmed_ink
             novel_mask = pm.novel(gray)
             suppress = pm.seeded & ~novel_mask & ~confirmed_ink
-            if np.any(suppress):
-                p.prob[suppress] = 0.0
+            voting_px = p.visible & (p.prob > self._accumulator.threshold)
             p.reg_info["pm_seeded_frac"] = pm.seeded_fraction
-            p.reg_info["pm_novel_px"] = int(np.count_nonzero(novel_mask))
-            p.reg_info["pm_suppressed_px"] = int(np.count_nonzero(suppress))
-            p.reg_info["pm_pending_px"] = int(np.count_nonzero(pm.pending()))
+            p.reg_info["pm_novel_px"] = int(
+                np.count_nonzero(novel_mask & voting_px & ~confirmed_ink)
+            )
+            p.reg_info["pm_suppressed_px"] = int(np.count_nonzero(suppress & voting_px))
+            p.reg_info["pm_pending_px"] = int(np.count_nonzero(pm.pending(obs_visible)))
+            baseline_seen = (
+                suppress & p.visible & (p.prob > self._accumulator.threshold)
+            )
+            if np.any(baseline_seen):
+                p.next_baseline_ink[baseline_seen] = True
+            baseline_erased = (
+                pm.seeded & p.visible & (p.prob <= registration._REMOVAL_LOW_PROB)
+            )
+            if np.any(baseline_erased):
+                p.next_baseline_ink[baseline_erased] = False
+            if np.any(suppress):
+                p.prob = np.where(suppress, 0.0, p.prob).astype(np.float32)
+
+    def _pass_vote_and_publish(self, p):
+        """Voto, acumulador e publicacao sob _condition: comita estado,
+        roda acumulador, carimba pass_ended_at e publica telemetria."""
+        delta_job = None
+        self._last_registration = p.last_reg
+        if p.motion_abstain:
+            self._motion_vetoes_total += 1
+        elif p.motion_decision == "correct" and p.used_registered_prob:
+            self._motion_corrections_total += 1
+        elif p.motion_decision == "unregistered" and p.used_registered_prob:
+            self._motion_unregistered_total += 1
+        elif p.motion_decision == "fail_open" and p.used_registered_prob:
+            self._motion_fail_open_total += 1
+        if p.pm_confirm_obs > 0:
+            self._pm_confirm_obs = p.pm_confirm_obs
+        if p.next_baseline_ink is not None:
+            self._pm_baseline_ink = p.next_baseline_ink
         result = self._accumulator.add(
             p.prob,
             p.visible,
-            paper_ok=paper_ok,
+            paper_ok=p.paper_ok,
             removal_allowed=(
                 not p.identity_owned
                 and not p.arbitration_abstain
@@ -2183,26 +2382,44 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         # Contadores do descanso total: so a saida
         # CONFIRMADA interessa (provisoria tremula com o
         # warp e nao pode segurar a trabalhadora acordada).
-        if (
-            self._spent_confirm_pass
-            and (
+        if self._spent_confirm_pass and self._hand_state is False:
+            pm_cap = self._pm_confirm_obs if self._config.page_model else 0
+            pm_needed = (
+                (self._confirm_passes + 1)
+                if (self._config.page_model and not p.pass_voted)
+                else p.pm_seeding_remaining
+            )
+            hold_needed = (
                 result["frozen_pending_px"] > 0
                 or result["recovering_px"] >= _RECOVERY_MIN_PX
             )
-            and self._confirm_passes < self._post_exit_confirm_passes()
-            and self._confirm_masked_skips
-            < 2 * votes._INK_VOTE_WINDOW + self._config.occlusion_hold_passes + 1
-        ):
-            # Pos-saida da mao: enquanto a guarda congela tinta nova
-            # detectada pelo modelo (ou remocao elegivel no hold) ou a
-            # sombra esta saindo (recovering_px), as passadas gastas ate
-            # aqui nao deram voto limpo. Re-arma a janela cheia (limitado
-            # pelo teto de devolucoes) para que, solto o hold, haja uma
-            # janela inteira de votos antes do descanso.
-            self._confirm_masked_skips += 1
-            self._confirm_passes = self._post_exit_confirm_passes()
+            max_skips = (
+                2 * votes._INK_VOTE_WINDOW + self._config.occlusion_hold_passes + 1
+            )
+            if self._config.page_model:
+                max_skips = max(max_skips, 2 * pm_cap + votes._INK_VOTE_WINDOW)
+            if (
+                hold_needed
+                and self._confirm_passes < self._post_exit_confirm_passes()
+                and self._confirm_masked_skips < max_skips
+            ):
+                # Pos-saida da mao: enquanto a guarda congela tinta nova
+                # detectada pelo modelo (ou remocao elegivel no hold) ou a
+                # sombra esta saindo (recovering_px), as passadas gastas ate
+                # aqui nao deram voto limpo. Re-arma a janela cheia (limitado
+                # pelo teto de devolucoes) para que, solto o hold, haja uma
+                # janela inteira de votos antes do descanso.
+                self._confirm_masked_skips += 1
+                self._confirm_passes = self._post_exit_confirm_passes()
+            elif (
+                self._config.page_model
+                and pm_needed > self._confirm_passes
+                and self._confirm_masked_skips < max_skips
+            ):
+                self._confirm_masked_skips += 1
+                self._confirm_passes = min(max(self._confirm_passes, pm_needed), pm_cap)
         self._generation_passes += 1
-        if result["confirmed_changed"] or result["turn"] or motion_abstain:
+        if result["confirmed_changed"] or result["turn"] or p.motion_abstain:
             # Passada vetada nao e quietude: a folha esta fora do
             # lugar e a tinta nova ainda nao entrou — descansar aqui
             # deixava o traco sem confirmar ate outro evento.
@@ -2210,7 +2427,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         else:
             self._quiet_passes += 1
         self._passes_total += 1
-        self._last_pass_ms = (self._clock() - p.pass_started) * 1000.0
+        p.pass_ended_at = self._clock()
+        self._last_pass_ms = (p.pass_ended_at - p.pass_started) * 1000.0
         self._provisional_px = result["provisional_px"]
         self._confirmed_px = result["confirmed_px"]
         self._retracted_px_total = result["retracted_px_total"]
