@@ -635,6 +635,7 @@ def _result(clip, bundle, canvas_px, conditions=None):
 
 def test_run_bundle_carrega_conditions_no_resultado(monkeypatch, tmp_path):
     import lab.bench_ink as bench_ink
+    import lab.corpus.run as run_mod
 
     clip_dir = tmp_path / "clipe-cond"
     _write_fake_clip_json(
@@ -655,7 +656,17 @@ def test_run_bundle_carrega_conditions_no_resultado(monkeypatch, tmp_path):
             "wall_s": 0.05,
         },
     )
-    res = run_bundle(clip_dir, "base", [])
+    # Modelos injetados; se run_bundle tocasse o caminho _fresh_* o
+    # teste falharia — prova de que nenhum .onnx local e necessario.
+    monkeypatch.setattr(
+        run_mod, "_fresh_detector", lambda verify: pytest.fail("modelo real")
+    )
+    monkeypatch.setattr(
+        run_mod, "_fresh_page_clean", lambda verify: pytest.fail("modelo real")
+    )
+    res = run_bundle(
+        clip_dir, "base", [], detector=SimpleNamespace(), page_clean=SimpleNamespace()
+    )
     assert res.conditions == {"lighting": "sombra-movel", "motion": "estatica"}
 
     # Round trip JSONL preserva rotulos; resultado antigo sem a chave carrega {}.
@@ -694,9 +705,47 @@ def test_render_markdown_agrupa_por_condicao():
     assert "## Condições" not in md_sem
 
 
+def test_condicoes_delta_ignora_clipe_nao_medido_por_todos():
+    """Erro ou ausencia de um bundle num clipe tira o clipe da soma de
+    TODOS os bundles — o delta nao conta tinta que a base nunca mediu."""
+    base_b = _result("sombra-b", "base", 0, {"lighting": "sombra"})
+    base_b.error = "falhou"
+    md = render_markdown(
+        [
+            _result("sombra-a", "base", 100, {"lighting": "sombra"}),
+            _result("sombra-a", "cand", 100, {"lighting": "sombra"}),
+            base_b,
+            _result("sombra-b", "cand", 60, {"lighting": "sombra"}),
+        ],
+        baseline="base",
+    )
+    sec = md.split("## Condições")[1]
+    # sombra-b sai da fatia: base 100 x cand 100, sem o +60 px falso.
+    assert "clipes: sombra-a" in sec
+    assert "sombra-b" not in sec
+    assert "| base | 100 | 0 | 1 | - |" in sec
+    assert "| cand | 100 | 0 | 1 | +0 px (+0%) |" in sec
+
+    # Clipe que um bundle nem rodou tambem sai da soma.
+    md = render_markdown(
+        [
+            _result("claro-a", "base", 80, {"lighting": "claro"}),
+            _result("claro-a", "cand", 80, {"lighting": "claro"}),
+            _result("claro-b", "cand", 50, {"lighting": "claro"}),
+        ],
+        baseline="base",
+    )
+    sec = md.split("## Condições")[1]
+    assert "clipes: claro-a" in sec
+    assert "claro-b" not in sec
+    assert "| cand | 80 | 0 | 1 | +0 px (+0%) |" in sec
+
+
 def test_report_rerenderiza_com_baseline_salvo(monkeypatch, tmp_path, capsys):
     """Baseline nao-primeiro sobrevive a run -> save -> report (BUG_0006)."""
     import lab.bench_ink as bench_ink
+    import lab.corpus.run as run_mod
+    import lab.replay_lab as replay_lab
     from lab.corpus.__main__ import main
     from lab.corpus.manifest import build_manifest, write_manifest
 
@@ -717,6 +766,13 @@ def test_report_rerenderiza_com_baseline_salvo(monkeypatch, tmp_path, capsys):
         }
 
     monkeypatch.setattr(bench_ink, "run_clip", fake_run_clip)
+    # Sem .onnx local: _fresh_* devolvem stubs e qualquer consulta a
+    # arquivo de modelo derruba o teste.
+    monkeypatch.setattr(run_mod, "_fresh_detector", lambda verify: object())
+    monkeypatch.setattr(run_mod, "_fresh_page_clean", lambda verify: object())
+    monkeypatch.setattr(
+        replay_lab, "_default_model", lambda name: pytest.fail("modelo real")
+    )
     out = tmp_path / "saida"
     rc = main(
         [
