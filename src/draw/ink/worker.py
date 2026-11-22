@@ -322,16 +322,22 @@ def _shift_bool_mask(mask, dy, dx):
 
 
 def _align_identity_baseline(identity_baseline, seen, prior, radius, kernel):
+    """Alinha a pauta impressa a evidencia independente do prior.
+
+    Devolve (baseline_alinhado, dy, dx): o deslocamento medido da
+    pauta e o mesmo da folha — a escrita salva reaparece no quadro
+    deslocado junto com ela.
+    """
     base_nonprior = identity_baseline & ~prior
     if radius <= 0 or not np.any(base_nonprior) or not np.any(seen):
-        return identity_baseline
+        return identity_baseline, 0, 0
     prior_d = cv2.dilate(prior.astype(np.uint8), kernel) > 0
     seen_indep = seen & ~prior_d
     if not np.any(seen_indep):
-        return identity_baseline
+        return identity_baseline, 0, 0
     active_rows = np.flatnonzero(np.any(base_nonprior, axis=1))
     if active_rows.size == 0:
-        return identity_baseline
+        return identity_baseline, 0, 0
     base_rows = base_nonprior[active_rows]
     active_cols = np.flatnonzero(np.any(base_rows, axis=0))
     x0 = int(active_cols[0])
@@ -387,7 +393,7 @@ def _align_identity_baseline(identity_baseline, seen, prior, radius, kernel):
                 best_overlap = overlap
                 best_dy, best_dx = dy, dx
                 best_dist = dist
-    return _shift_bool_mask(identity_baseline, best_dy, best_dx)
+    return _shift_bool_mask(identity_baseline, best_dy, best_dx), best_dy, best_dx
 
 
 def _evaluate_page_identity(
@@ -448,14 +454,15 @@ def _evaluate_page_identity(
             prior_excluded = None
         else:
             prior_excluded = prior & ~prior_judgeable
-            radius = identity._IDENTITY_DILATION_KERNEL // 2
-            aligned_baseline = _align_identity_baseline(
-                identity_baseline, seen, prior_judgeable, radius, kernel
-            )
-            seen = seen & ~aligned_baseline
+        radius = identity._IDENTITY_DILATION_KERNEL // 2
+        aligned_baseline, baseline_dy, baseline_dx = _align_identity_baseline(
+            identity_baseline, seen, prior_judgeable, radius, kernel
+        )
+        seen = seen & ~aligned_baseline
     else:
         prior_judgeable = prior
         prior_excluded = None
+        baseline_dy = baseline_dx = 0
     # Dominio inspecionado da comparacao: a guarda do quad salvo,
     # cruzada com a visibilidade. Resposta de borda fora da area
     # util nao pode derrubar o containment nem rejeitar a pagina
@@ -520,14 +527,21 @@ def _evaluate_page_identity(
         # limitado ate o timeout.
         return (False, None, None, prior_px, 0, True, "no_overlap", False)
     if identity_visible is not None and prior_domain_px > 0:
+        # Gate precoce de "evidencia suficiente para avaliar", nao de
+        # restauracao: a tinta ambigua (sobre pauta) visivel nao pode
+        # carregar atribuicao, entao desconta do bound INTEIRO. Um
+        # match na fatia clara ainda passa pelo piso estrito la embaixo
+        # — mas se entrar, pode estabelecer o hold de oclusao em vez de
+        # queimar a quarentena adiando ate o timeout.
         min_eval_px = min(
             prior_guard_px,
             max(
                 1,
                 max(
-                    identity._IDENTITY_MIN_VISIBLE_PX - ambig_visible_px,
+                    identity._IDENTITY_MIN_VISIBLE_PX,
                     int(identity._IDENTITY_MIN_VISIBLE_FRACTION * prior_domain_px),
-                ),
+                )
+                - ambig_visible_px,
             ),
         )
         if prior_eval_px < min_eval_px:
@@ -616,11 +630,20 @@ def _evaluate_page_identity(
         # imperfeito entrava em `seen` e a dilatacao do recall a
         # projetava sobre a escrita escondida — uma folha limpa
         # do mesmo formulario herdava o desenho.
-        baseline_src = (
-            aligned_baseline if prior_excluded is not None else identity_baseline
-        )
-        baseline_d = cv2.dilate(baseline_src.astype(np.uint8), kernel) > 0
-        seen = seen & (~baseline_d | prior_eval)
+        baseline_d = cv2.dilate(aligned_baseline.astype(np.uint8), kernel) > 0
+        reobserved = prior_eval
+        if baseline_dy != 0 or baseline_dx != 0:
+            # A pauta mediu o deslocamento da folha: a escrita salva
+            # reaparece no quadro deslocado junto com ela. Um traco
+            # fino colado a margem impressa que desceu 1 px cai dentro
+            # de baseline_d sem tocar a posicao salva — sem o quadro
+            # deslocado a evidencia dele era descartada e a mesma
+            # folha votava como nova. Os dois quadros valem: jitter de
+            # registro pode deixar o traco entre um e outro.
+            reobserved = prior_eval | _shift_bool_mask(
+                prior_eval, baseline_dy, baseline_dx
+            )
+        seen = seen & (~baseline_d | reobserved)
     seen_d = cv2.dilate(seen.astype(np.uint8), kernel) > 0
     prior_d = cv2.dilate(prior_eval.astype(np.uint8), kernel) > 0
     recall = np.count_nonzero(prior_eval & seen_d) / prior_eval_px
@@ -637,14 +660,19 @@ def _evaluate_page_identity(
             int(identity._PAGE_IDENTITY_MIN_REFERENCE_FRACTION * prior_guard_px),
         ),
     )
-    # Sem baseline impresso alinhado, o piso e o absoluto da
+    # Sem o rastreio de baseline, o piso e o absoluto da
     # referencia classica: tinta menor que a massa minima nao
-    # prova a folha. Com baseline, o alinhamento da pauta ancora
-    # a comparacao e o piso nao pode exigir mais do que a massa
-    # julgavel inteira — senao uma marca de 20 px nunca
-    # restauraria.
+    # prova a folha. Com o rastreio ativo — PageModel ligado,
+    # mesmo em folha em branco onde o baseline capturado veio
+    # vazio — a comparacao ja esta ancorada e o piso nao pode
+    # exigir mais do que a massa julgavel inteira: senao uma
+    # marca de 20 px deferia ate o timeout e o modelo novo
+    # aprenderia o traco dela como pagina.
+    baseline_tracked = (
+        identity_baseline is not None and identity_baseline.shape == candidate.shape
+    )
     coverage_floor = (
-        min(prior_guard_px, coverage_bound) if has_baseline else coverage_bound
+        min(prior_guard_px, coverage_bound) if baseline_tracked else coverage_bound
     )
     if keep_page and prior_domain_px < coverage_floor:
         # Fragmento: a pegada alcancou so uma fatia da referencia
@@ -2992,13 +3020,35 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 if p.visible is None
                 else (p.visible if pm_coverage is None else (p.visible & pm_coverage))
             )
-            if p.sampled is not None:
+            pm_sampled = p.sampled
+            if pm_sampled is None:
+                # A pegada nao depende da guarda de borda: sem ela
+                # _pass_sampled devolve None e o padding do registro
+                # semearia a referencia de pagina limpa em regiao que
+                # a passada nunca observou. Quando ha correcao afim
+                # aplicada a evidencia, a pegada calculada aqui segue
+                # o mesmo warp_back (com a guarda ligada isso ja foi
+                # feito em _pass_register_motion_coverage).
+                pm_sampled = registration._observed_footprint(
+                    p.anchor, p.registration_corners, p.corners, p.prob.shape
+                )
+                if p.motion_decision == "correct" and p.used_registered_prob:
+                    pm_sampled = (
+                        p.motion_fix.warp_back(
+                            np.ones(p.prob.shape, np.uint8)
+                            if pm_sampled is None
+                            else pm_sampled.astype(np.uint8),
+                            nearest=True,
+                        )
+                        > 0
+                    )
+            if pm_sampled is not None:
                 # O PageModel aprende so onde a passada amostrou de
                 # verdade: o padding do registro nao pode semear a
                 # referencia de pagina limpa em regioes que o
                 # acumulador rejeita pela pegada.
                 obs_visible = (
-                    p.sampled if obs_visible is None else (obs_visible & p.sampled)
+                    pm_sampled if obs_visible is None else (obs_visible & pm_sampled)
                 )
             # Papel coberto agora pela mao (mascara fisica), ainda sem
             # referencia: conta para a prontidao. Pixel visivel que a

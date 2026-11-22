@@ -1013,6 +1013,168 @@ def test_page_model_clean_copy_does_not_inherit_hidden_sketch(monkeypatch):
         worker.stop()
 
 
+def test_page_model_reacquires_small_stroke_on_blank_paper(monkeypatch):
+    """Review PR #145: marca de 20 px em folha SEM pauta (baseline
+    capturado vazio) restaura — o cap do piso depende do rastreio
+    de baseline estar ativo, nao de haver pixels impressos."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        gen1 = worker.new_generation()
+        vis_all = np.ones((H, W), dtype=bool)
+        image = np.full((H, W), PAPER, dtype=np.float32)
+        for _ in range(3):
+            _drive(worker, gen1, image, visible=vis_all)
+        assert np.count_nonzero(_confirmed(worker, gen1)) == 0
+
+        # Ponto manuscrito de 20 px (< _IDENTITY_MIN_VISIBLE_PX = 32)
+        image[60:64, 80:85] = INK
+        for _ in range(4):
+            _drive(worker, gen1, image, visible=vis_all)
+        assert np.count_nonzero(_confirmed(worker, gen1)) == 20
+
+        gen2 = worker.new_generation(preserve_identity=True)
+        _drive(worker, gen2, image, visible=vis_all)
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] == "same_page"
+        assert events[-1]["deferred"] is False
+        assert np.count_nonzero(_confirmed(worker, gen2)[60:64, 80:85]) == 20
+    finally:
+        worker.stop()
+
+
+def test_page_model_reacquires_thin_stroke_shifted_with_print(monkeypatch):
+    """Review PR #145: traco de 1 px colado a pauta que desceu 1 px
+    junto com ela nao vira folha nova — o deslocamento medido na
+    pauta desloca o quadro da escrita salva tambem."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        gen1 = worker.new_generation()
+        vis_all = np.ones((H, W), dtype=bool)
+        form = np.full((H, W), PAPER, dtype=np.float32)
+        # Pauta impressa de 2 px [40:42, 10:100].
+        form[40:42, 10:100] = 95.0
+        for _ in range(3):
+            _drive(worker, gen1, form, visible=vis_all)
+        assert np.count_nonzero(_confirmed(worker, gen1)) == 0
+
+        # Traco manuscrito de 1 px 1 px abaixo da pauta [43, 40:60].
+        with_stroke = form.copy()
+        with_stroke[43, 40:60] = INK
+        for _ in range(7):
+            _drive(worker, gen1, with_stroke, visible=vis_all)
+        assert np.count_nonzero(_confirmed(worker, gen1)) == 20
+
+        # A MESMA folha volta com pauta e traco deslocados 1 px para
+        # baixo: o traco em 44 cai na margem dilatada da pauta sem
+        # tocar a posicao salva — sem o quadro deslocado ele era
+        # descartado e a folha votava como nova.
+        shifted = np.full((H, W), PAPER, dtype=np.float32)
+        shifted[41:43, 10:100] = 95.0
+        shifted[44, 40:60] = INK
+        gen2 = worker.new_generation(preserve_identity=True)
+        _drive(worker, gen2, shifted, visible=vis_all)
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] == "same_page"
+        assert np.count_nonzero(_confirmed(worker, gen2)[43, 40:60]) == 20
+
+        # Controle: copia limpa deslocada do mesmo formulario (sem o
+        # traco) NAO herda a escrita — o quadro deslocado admite so
+        # re-observacao, e na copia nao ha traco onde ele espera.
+        clean_shifted = np.full((H, W), PAPER, dtype=np.float32)
+        clean_shifted[41:43, 10:100] = 95.0
+        gen3 = worker.new_generation(preserve_identity=True)
+        for _ in range(identity_mod._PAGE_IDENTITY_SWITCH_CONSENSUS_FRAMES):
+            _drive(worker, gen3, clean_shifted, visible=vis_all)
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] == "new_page"
+        assert np.count_nonzero(_confirmed(worker, gen3)[43:45, 40:60]) == 0
+    finally:
+        worker.stop()
+
+
+def test_page_model_occlusion_band_enters_hold_and_restores(monkeypatch):
+    """Review PR #145: mao cobrindo a maior parte da escrita que
+    cruza pauta entra em hold de oclusao em vez de queimar a
+    quarentena — o desconto ambiguo vale no gate precoce de
+    evidencia, nao no piso estrito de restauracao."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        gen1 = worker.new_generation()
+        vis_all = np.ones((H, W), dtype=bool)
+        form = np.full((H, W), PAPER, dtype=np.float32)
+        # Pauta impressa de 4 px [30:34, 10:100].
+        form[30:34, 10:100] = 95.0
+        for _ in range(3):
+            _drive(worker, gen1, form, visible=vis_all)
+        assert np.count_nonzero(_confirmed(worker, gen1)) == 0
+
+        # Traco vertical de 220 px [28:50, 50:60]: 40 px sobre a
+        # pauta (ambiguos) e 180 px julgaveis.
+        with_stroke = form.copy()
+        with_stroke[28:50, 50:60] = INK
+        for _ in range(7):
+            _drive(worker, gen1, with_stroke, visible=vis_all)
+        assert np.count_nonzero(_confirmed(worker, gen1)) == 220
+
+        # Mao cobre as linhas >= 35 da regiao do traco: restam 20 px
+        # julgaveis visiveis [28:30] e 40 px ambiguos [30:34]. O gate
+        # precoce descontado deixa o frame chegar ao match, que segura
+        # a decisao em hold sem queimar a quarentena.
+        vis_hand = np.ones((H, W), dtype=bool)
+        vis_hand[35:, 45:65] = False
+        gen2 = worker.new_generation(preserve_identity=True)
+        for _ in range(identity_mod._PAGE_IDENTITY_MAX_DEFERRALS + 2):
+            _drive(worker, gen2, with_stroke, visible=vis_hand)
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        # Alem do orcamento de quarentena (5): com hold a referencia
+        # segue pendente — sem ele o sexto frame a destruia.
+        assert events[-1]["decision"] == "deferred_occlusion"
+        assert events[-1]["quarantine_frames"] == 0
+
+        # Mao sai: a folha inteira visivel restaura o desenho exato.
+        _drive(worker, gen2, with_stroke, visible=vis_all)
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] == "same_page"
+        assert np.count_nonzero(_confirmed(worker, gen2)[28:50, 50:60]) == 220
+    finally:
+        worker.stop()
+
+
+def test_page_model_baseline_footprint_without_border_guard(monkeypatch):
+    """Review PR #145: com a guarda de borda desligada, o padding do
+    registro nao semeia a referencia de pagina limpa — a pegada do
+    modelo nao depende da guarda."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True, border_guard_px=0, paper_guard=False))
+    try:
+        generation = worker.new_generation()
+        image = np.full((H, W), PAPER, dtype=np.float32)
+        # 1a passada estabelece a ancora no quad inteiro.
+        _drive(worker, generation, image)
+
+        # Folha recuada 6 px a direita e 4 px para baixo: o warp deixa
+        # padding (zeros) nas linhas < 4 e colunas < 6 da ancora. Sem
+        # mascara de visibilidade, sem guarda de borda e sem a guarda
+        # de papel (que ja rejeitaria o preto do padding), a pegada e
+        # a unica coisa que separa "nao observei" de "observei vazio".
+        shifted_quad = Q0 + np.float32([[6, 4], [6, 4], [6, 4], [6, 4]])
+        for _ in range(6):
+            _drive_page(
+                worker,
+                generation,
+                WarpedPage(_bgr(image), generation, shifted_quad),
+            )
+        model = worker._page_model
+        assert model is not None
+        assert not np.any(model.seeded[:3, :4])
+        assert np.all(model.seeded[32:64, 32:64])
+    finally:
+        worker.stop()
+
+
 def test_page_model_does_not_seed_synthetic_fill_when_coverage_expands(monkeypatch):
     """Issue 6: preenchimento sintetico fora de coverage nao semeia baseline."""
     monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
