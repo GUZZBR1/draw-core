@@ -588,6 +588,96 @@ def test_uncertain_photometry_does_not_advance_removal_streak():
     assert not acc._removal_streak[10:190, 10:110].any()
 
 
+def test_clear_ink_read_resets_streak_even_where_paper_is_unproven():
+    """Leitura clara zera o streak mesmo com papel não provado.
+
+    O exemplo do Devin Review do PR #144: o veto dark_ink da
+    guarda (tinta forte sobre luma escura nunca prova papel) casa
+    com todo pixel de traço real e tira o paper_exposed dele
+    sempre que ALGUM tile da página está anômalo — a leitura
+    clara segurava o streak em vez de zerá-lo, e faltas
+    espalhadas somavam até apagar tinta confirmada.
+    """
+    acc = accumulator_mod.LayeredInkAccumulator()
+    prob = _big_ink()
+    confirmed(acc, prob)
+    target = (slice(10, 60), slice(10, 60))
+    visible = np.ones(prob.shape, bool)
+    unproven = visible.copy()
+    unproven[target] = False  # o veto dark_ink sobre o traço lido
+    misread = prob.copy()
+    misread[target] = 0.05
+
+    acc.add(misread, visible, paper_exposed=visible)  # falta conta
+    assert np.all(acc._removal_streak[target] == 1)
+    # Leitura clara com o traço fora do paper_exposed: evidência
+    # positiva — o streak zera, não segura.
+    acc.add(prob, visible, paper_exposed=unproven)
+    assert not acc._removal_streak[target].any()
+
+    for _ in range(registration_mod._REMOVAL_PASSES + 2):
+        result = acc.add(misread, visible, paper_exposed=visible)
+        assert result["removed_confirmed_px"] == 0
+        result = acc.add(prob, visible, paper_exposed=unproven)
+        assert result["removed_confirmed_px"] == 0
+        assert not acc._removal_streak[target].any()
+    assert np.all(acc._confirmed[target] == 255)
+
+
+def test_dark_ink_veto_keeps_resetting_the_streak_end_to_end():
+    """Caso do review pelo caminho real: a mão/sombra não
+    mascarada torna tiles anômalos, o veto por pixel derruba o
+    paper_exposed do traço lido claramente — e a leitura forte
+    continua zerando o streak da falta anterior (Devin Review do
+    PR #144)."""
+    shape = (120, 160)
+    paper = np.full((*shape, 3), 220, dtype=np.uint8)
+    stroke = (slice(8, 12), slice(8, 88))  # traço fino e escuro
+    page = paper.copy()
+    page[stroke] = 60  # luma escura: o veto dark_ink o descreve
+    shadow = (slice(48, 96), slice(96, 144))  # anomalia 2x3 tiles
+    shadowed = page.copy()
+    shadowed[shadow] = 60
+
+    witness = (slice(16, 96), slice(8, 72))  # ~5,1k px: testemunha
+    prob_full = np.zeros(shape, np.float32)
+    prob_full[witness] = 0.95
+    prob_full[stroke] = 0.95
+    prob_misread = prob_full.copy()
+    prob_misread[stroke] = 0.05
+
+    clock = rr.SceneClock()
+    page_clean = _MutablePageClean(prob_full)
+    worker = rr.make_ink_worker(page_clean, clock)
+    generation = worker.new_generation()
+    corners = rr.base_quad(shape)
+    visible = np.ones((720, 1280), bool)
+
+    def pass_page(image, prob):
+        page_clean.prob = prob
+        clock.now += 1
+        worker.submit(WarpedPage(image, generation, corners, visible=visible))
+        assert worker.pump()
+        assert worker.error is None
+
+    for _ in range(8):
+        pass_page(page, prob_full)
+    assert worker._accumulator._confirmed[stroke].all()
+
+    for _ in range(registration_mod._REMOVAL_PASSES + 2):
+        pass_page(page, prob_misread)  # falta testemunhada: streak++
+        assert np.all(worker._accumulator._removal_streak[stroke] == 1)
+        # Traço lido a 0,95 sob página anômala: veto dark_ink tira
+        # o papel_exposed, mas a evidência positiva zera o streak.
+        pass_page(shadowed, prob_full)
+        assert not worker._accumulator._removal_streak[stroke].any()
+
+    assert worker._accumulator._confirmed[stroke].all()
+    assert worker._accumulator._confirmed[witness].all()
+    records = worker.telemetry_snapshot()["records"]
+    assert sum(r["removed_confirmed_px"] for r in records) == 0
+
+
 def test_hand_mask_dropouts_cannot_erase_or_add_hand_edges_and_exit_confirms():
     shape = (240, 320)
     old = np.zeros(shape, np.float32)
