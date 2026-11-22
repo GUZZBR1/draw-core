@@ -802,7 +802,17 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 self._confirm_masked_skips = 0
                 self._hand_exit_submits = self._telemetry_submits
                 self._awaiting_clear_post_exit = True
-            elif present is not False:
+            elif present is not False and self._hand_state is False:
+                # A janela pos-saida so e cancelada pela TRANSICAO
+                # que encerra o episodio de mao fora (a mao de
+                # volta ou o sinal perdido): a premissa "pagina
+                # assentada sem mao" morreu. Uma amostra repetida
+                # com a mao ja presente nao muda estado nenhum —
+                # o laco chama isto a cada amostra de presenca, e
+                # zerar aqui apagava o rearma da adocao de
+                # preenchimento (_pass_anchor_state) na amostra
+                # seguinte, antes de o preenchimento votar (Devin
+                # Review do PR #144).
                 self._confirm_passes = 0
                 self._confirm_masked_skips = 0
                 self._awaiting_clear_post_exit = False
