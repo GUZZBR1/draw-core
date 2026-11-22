@@ -752,50 +752,69 @@ def _trace_branch_out(ink, x_start, top0, bot0, limit, direction, h_run, need, s
     ponta seguindo pauta não classifica o irmão que vai para o branco.
     """
     h = ink.shape[0]
-    active = [(top0, bot0, ())]
-    ends = []  # (hist, x_fim, top, bot) de cada caminho encerrado
+    # (top, bot, hist, last_thick): cada caminho vivo carrega a sequência de
+    # espessura e a posição do último intervalo grosso — é ela, não a cauda
+    # fina, que responde ao veto de ombro
+    active = [(top0, bot0, (), None)]
+    ends = []  # (hist, last_thick) de cada caminho encerrado
     x = x_start
     for x in range(x_start + direction, limit, direction):
         col = ink[:, x]
         nxt = []
-        for pt, pb, hist in active:
+        for pt, pb, hist, lt in active:
             pc = (pt + pb) // 2
             lo, hi = max(0, pt), min(h, pb + 1)
-            grew = False
+            grew = merged = False
             for hit in np.flatnonzero(col[lo:hi]) + lo:
                 if nxt and hit <= nxt[-1][1]:
+                    # o hit funde num intervalo já aceito: a tinta é uma só,
+                    # então as histórias se unem — um reencontro não pode
+                    # enterrar a evidência grossa do outro ramo
+                    t_n, b_n, h_n, lt_n = nxt[-1]
+                    nxt[-1] = (
+                        t_n,
+                        b_n,
+                        tuple(a or b for a, b in zip(h_n, hist, strict=True)),
+                        lt_n
+                        if lt is None
+                        or (lt_n and lt_n[0] * direction >= lt[0] * direction)
+                        else lt,
+                    )
+                    merged = True
                     continue
                 top = bot = int(hit)
                 while top > 0 and col[top - 1] and pc - (top - 1) <= 2 * _R:
                     top -= 1
                 while bot + 1 < h and col[bot + 1] and (bot + 1) - pc <= 2 * _R:
                     bot += 1
-                nxt.append((top, bot, hist))
+                nxt.append((top, bot, hist, lt))
                 grew = True
-            if not grew:
-                ends.append((hist, x - direction, pt, pb))
+            if not (grew or merged):
+                ends.append((hist, lt))
         if not nxt:
             active = []
             break
         active = []
-        for top, bot, hist in nxt:
-            h2 = hist + ((bot - top + 1) > h_run + _THIN_MARGIN,)
+        for top, bot, hist, lt in nxt:
+            thick = (bot - top + 1) > h_run + _THIN_MARGIN
+            h2 = hist + (thick,)
+            lt2 = (x, top, bot) if thick else lt
             if len(h2) >= need and (not h2[-1] or len(h2) >= stop):
-                ends.append((h2, x, top, bot))
+                ends.append((h2, lt2))
             else:
-                active.append((top, bot, h2))
+                active.append((top, bot, h2, lt2))
         if not active:
             break
-    for top, bot, hist in active:
-        ends.append((hist, x, top, bot))
+    for _top, _bot, hist, lt in active:
+        ends.append((hist, lt))
     out = []
-    for hist, x_end, top_e, bot_e in ends:
-        if len(hist) < need:
+    for hist, lt in ends:
+        if len(hist) < need or lt is None:
             continue
         arr = np.array(hist, bool)[None, :]
         if arr[:, :need].mean() < _VOTE_FRAC:
             continue
-        out.append((int(_extent(arr, need)[0]), x_end, top_e, bot_e))
+        out.append((int(_extent(arr, need)[0]), *lt))
     return out
 
 

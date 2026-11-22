@@ -1491,3 +1491,38 @@ def test_full_width_thick_ruling_without_observable_side_is_erased():
         prob[y : y + th, :] = 0.95
     out = ruling.RulingFilter().apply(prob.copy())
     assert (out > 0.5).sum() == 0
+
+
+def test_rejoining_thick_stroke_and_thin_rule_keeps_the_stroke():
+    """Review: um traco grosso e a pauta fina se separam apos o vinco e se
+    reencontram 5 col depois; o reencontro nao pode enterrar a historia
+    grossa do traco (a uniao das sequencias e a da tinta conectada)."""
+    prob = _fold_page()
+    y = 80 + 40 * 5  # 280
+    prob[y : y + 6, 540:600] = 0.95
+    for x in range(600, 640):  # dobra na faixa ate a ponta ~318-323
+        dy = x - 600
+        prob[y + dy : y + dy + 6, x] = 0.95
+    prob[323:329, 640:645] = 0.95  # traco grosso, gap de 1 linha sob a pauta 320
+    prob[320:329, 645] = 0.95  # ponte vertical: reencontro traco + pauta
+    for x in range(646, 662):  # traco segue grosso descendo p/ o branco
+        dy = x - 646
+        prob[323 + dy : 329 + dy, x] = 0.95
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[y : y + 6, 562:600] > 0.5).all()
+
+
+def test_thin_tip_off_the_rule_does_not_rescue_a_shadow_shoulder():
+    """Review: traco alcanca a faixa e sai por um ombro de 13 col que vira a
+    pauta fina + uma ponta fina de 2 px fora dela. A ponta fina nao prova
+    nada: quem responde ao veto e o ultimo intervalo grosso (na pauta)."""
+    prob = _fold_page(right_sh=13)
+    y = 80 + 40 * 5  # 280
+    prob[y : y + 6, 540:600] = 0.95
+    for x in range(600, 640):  # dobra ate o ombro da pauta 320
+        dy = x - 600
+        prob[y + dy : y + dy + 6, x] = 0.95
+    prob[325:328, 653:662] = 0.95  # ponta fina fora da pauta, colada ao ombro
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[y : y + 6, 562:600] > 0.5).sum() == 0
+    assert (out[320:326, 600:630] > 0.5).sum() == 0
