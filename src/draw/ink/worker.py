@@ -304,6 +304,19 @@ def _reg_triple(anchor, reg_corners, corners):
     )
 
 
+def _mask_bbox(mask):
+    """(y0, y1, x0, x1) exclusivo dos pixels ligados, ou None.
+
+    Reducoes por eixo em vez de np.nonzero: numa grade A4 com tinta
+    espalhada o nonzero completo custava ms por chamada.
+    """
+    rows = np.flatnonzero(np.any(mask, axis=1))
+    if rows.size == 0:
+        return None
+    cols = np.flatnonzero(np.any(mask[rows[0] : rows[-1] + 1], axis=0))
+    return int(rows[0]), int(rows[-1]) + 1, int(cols[0]), int(cols[-1]) + 1
+
+
 def _shift_bool_mask(mask, dy, dx):
     if dy == 0 and dx == 0:
         return mask
@@ -351,17 +364,22 @@ def _align_identity_baseline(identity_baseline, seen, prior, radius, kernel):
     if prior is not None:
         # ~prior dilatado so difere de `seen` num raio do bbox do
         # prior, recortado ainda mais para dentro da banda.
-        py, px = np.nonzero(prior)
-        if py.size > 0:
+        prior_box = _mask_bbox(prior)
+        if prior_box is not None:
             pm = kernel.shape[0] // 2
-            py0 = max(sy0, int(py.min()) - pm)
-            py1 = min(sy1, int(py.max()) + pm + 1)
-            px0 = max(sx0, int(px.min()) - pm)
-            px1 = min(sx1, int(px.max()) + pm + 1)
+            py0 = max(sy0, prior_box[0] - pm)
+            py1 = min(sy1, prior_box[1] + pm)
+            px0 = max(sx0, prior_box[2] - pm)
+            px1 = min(sx1, prior_box[3] + pm)
             if py1 > py0 and px1 > px0:
+                # A dilatacao le o prior com a margem do kernel ALEM da
+                # banda: tinta salva logo fora do recorte ainda projeta
+                # o halo dela para dentro.
+                wy0, wy1 = max(0, py0 - pm), min(h, py1 + pm)
+                wx0, wx1 = max(0, px0 - pm), min(w, px1 + pm)
                 prior_d = (
-                    cv2.dilate(prior[py0:py1, px0:px1].astype(np.uint8), kernel) > 0
-                )
+                    cv2.dilate(prior[wy0:wy1, wx0:wx1].astype(np.uint8), kernel) > 0
+                )[py0 - wy0 : py1 - wy0, px0 - wx0 : px1 - wx0]
                 seen_indep = seen_indep.copy()
                 iy0, ix0 = py0 - sy0, px0 - sx0
                 seen_indep[iy0 : iy0 + (py1 - py0), ix0 : ix0 + (px1 - px0)] &= ~prior_d
@@ -499,7 +517,6 @@ def _evaluate_page_identity(
         # dominio julgavel como a pauta coberta — abstencao, nao voto.
         baseline_d = cv2.dilate(aligned_baseline.astype(np.uint8), kernel) > 0
         darker = None
-        expected = None
         if (
             identity_gray is not None
             and identity_model is not None
@@ -512,53 +529,75 @@ def _evaluate_page_identity(
             # interna (near + |shift|). Fora dela a comparacao nao
             # pode provar nada — e numa folha A4 a varredura inteira
             # custava mais que o resto da avaliacao.
-            py, px = np.nonzero(prior)
+            prior_box = _mask_bbox(prior)
             region = (
-                max(0, int(py.min()) - radius),
-                min(candidate.shape[0], int(py.max()) + radius + 1),
-                max(0, int(px.min()) - radius),
-                min(candidate.shape[1], int(px.max()) + radius + 1),
+                max(0, prior_box[0] - radius),
+                min(candidate.shape[0], prior_box[1] + radius),
+                max(0, prior_box[2] - radius),
+                min(candidate.shape[1], prior_box[3] + radius),
             )
-            darker, expected = identity_model.darker_than_reference(
-                identity_gray,
+            # Uma normalizacao por passada: o ganho e a parte cara e
+            # as duas comparacoes fotometricas usam a mesma.
+            identity_norm = identity_model.normalize(identity_gray, identity_visible)
+            darker, _ = identity_model.darker_than_reference(
+                identity_norm,
                 dy=baseline_dy,
                 dx=baseline_dx,
                 near=radius,
                 visible=identity_visible,
                 region=region,
+                prenormalized=True,
+                with_expected=False,
             )
         ambiguous = None
         ambiguous_px = 0
+        tone_obs = None
+        photometric = (
+            darker is not None
+            and identity_gray_ref is not None
+            and identity_gray_ref.shape == candidate.shape
+        )
+        if photometric and prior_excluded is not None:
+            # Com o tom da tinta salva conhecido, o traco sobre a pauta
+            # e julgavel como o resto: a fotometria abaixo o separa em
+            # presente, ausente provado ou ambiguo. Exclui-lo inteiro
+            # deixava a mesma folha mista sem containment (a evidencia
+            # admitida sem referencia) e a copia limpa presa no hold.
+            prior_judgeable = prior.copy()
+            prior_excluded = None
         amb_prior = prior & baseline_d
         if np.any(amb_prior):
             ambiguous = amb_prior & seen_raw
             if darker is not None:
                 ambiguous &= ~darker
-                # O escuro na posicao salva so e genuinamente
-                # indistinguivel quando a tinta salva teria produzido
-                # a MESMA observacao: |nivel_salvo - esperado| dentro
-                # do delta do modelo. Com pauta mais clara que a tinta
-                # (95 esperado vs 40 salvo), a aparencia de pauta que
-                # a posicao mostra PROVA que a tinta nao esta ali —
-                # ausencia real, nao ambiguidade: o pixel segue
-                # julgavel e conta contra a pagina.
-                if identity_gray_ref is not None and (
-                    identity_gray_ref.shape == candidate.shape
-                ):
-                    # A comparacao de nivel so vale nos pixels
-                    # ambiguos — nas posicoes finitas (tipicamente
-                    # dezenas) em vez da grade inteira.
-                    amb_y, amb_x = np.nonzero(ambiguous)
-                    exp_amb = expected[amb_y, amb_x]
-                    ambiguous[amb_y, amb_x] &= ~np.isfinite(exp_amb) | (
-                        np.abs(identity_gray_ref[amb_y, amb_x] - exp_amb)
-                        <= identity_model.novel_delta
+                if photometric:
+                    # Escuro na posicao salva sem escurecer a referencia
+                    # local so e indistinguivel quando alguma aparencia
+                    # limpa alcancavel reproduz o tom salvo. Tom salvo
+                    # distinto de todas: casar com ele prova presenca
+                    # (lapis de 70 colado a pauta de 40, que o `darker`
+                    # contra a pior vizinha nao admite), nao casar
+                    # prova ausencia (a pauta vista onde a tinta
+                    # estava).
+                    distinct, tone_obs = identity_model.saved_tone_evidence(
+                        identity_norm,
+                        identity_gray_ref,
+                        ambiguous,
+                        dy=baseline_dy,
+                        dx=baseline_dx,
+                        near=radius,
+                        visible=identity_visible,
+                        region=region,
+                        prenormalized=True,
                     )
+                    ambiguous &= ~distinct
             ambiguous_px = int(np.count_nonzero(ambiguous))
             if ambiguous_px == 0:
                 ambiguous = None
         if ambiguous is not None:
-            prior_judgeable &= ~ambiguous
+            # Sem `&=`: prior_judgeable pode ser o proprio `prior` (tinta
+            # toda sobre a pauta) e mutar zerava a referencia inteira.
+            prior_judgeable = prior_judgeable & ~ambiguous
             prior_excluded = (
                 ambiguous if prior_excluded is None else prior_excluded | ambiguous
             )
@@ -631,7 +670,7 @@ def _evaluate_page_identity(
             admitted = reobserved & seen_raw
             if inspected is not None:
                 admitted &= inspected
-            admitted &= darker
+            admitted &= darker if tone_obs is None else (darker | tone_obs)
             seen |= admitted
     # A guarda e estatica: o que ela exclui nao volta a aparecer e
     # sai do denominador da oclusao, que mede so o escondido pela
@@ -764,21 +803,54 @@ def _evaluate_page_identity(
         seen_any = seen
         if inspected is not None:
             seen_any = seen_any & inspected
-        if admitted is not None and np.any(admitted):
+        ambiguous_seen = ambiguous is not None and bool(
+            np.any(ambiguous if inspected is None else (ambiguous & inspected))
+        )
+        prior_vis = prior_guard_full
+        if identity_sampled is not None:
+            prior_vis = prior_vis & identity_sampled
+        if identity_visible is not None:
+            prior_vis = prior_vis & identity_visible
+        prior_vis_px = int(np.count_nonzero(prior_vis))
+        containment = None
+        if admitted is not None and np.any(admitted) and prior_vis_px > 0:
             # O dominio julgavel esvaziou por ambiguidade, mas a
-            # aparencia provou escrita numa posicao salva (incluindo
-            # o quadro deslocado): a tinta retornou — mesma pagina.
+            # aparencia provou escrita em posicoes salvas: restaura so
+            # se essa evidencia cobre a tinta visivel (recall) e
+            # explica a tinta vista (containment) — um fragmento
+            # coincidente numa folha com outro desenho nao basta.
+            # Evidencia insuficiente e inconclusiva, nao voto.
+            admitted_d = cv2.dilate(admitted.astype(np.uint8), kernel) > 0
+            recall = float(np.count_nonzero(prior_vis & admitted_d)) / prior_vis_px
+            seen_any_px = int(np.count_nonzero(seen_any))
+            prior_vis_d = cv2.dilate(prior_vis.astype(np.uint8), kernel) > 0
+            containment = (
+                0.0
+                if seen_any_px == 0
+                else float(np.count_nonzero(seen_any & prior_vis_d)) / seen_any_px
+            )
+            if not (
+                recall >= identity._PAGE_IDENTITY_MIN_RECALL
+                and containment >= identity._PAGE_IDENTITY_MIN_CONTAINMENT
+            ):
+                return (
+                    False,
+                    recall,
+                    containment,
+                    prior_px,
+                    0,
+                    True,
+                    "occlusion",
+                    True,
+                )
             keep_page = True
-            recall = float(np.count_nonzero(admitted)) / max(prior_px, 1)
-        elif np.any(seen_any):
-            keep_page = False
-            recall = 0.0
-        elif ambiguous is not None and np.any(ambiguous):
+        elif ambiguous_seen:
             # Posicao salva escura dentro da margem sem escurecer a
             # referencia local: pode ser a pauta ou a tinta — a
-            # passada nao distingue. Nem prova nem refuta: INCONCLUISO
+            # passada nao distingue. Nem prova nem refuta: INCONCLUSIVO
             # com hold — a referencia fica protegida em vez de virar
-            # match posicional (heranca) ou voto negativo (perda).
+            # match posicional (heranca) ou voto negativo (perda). Tinta
+            # nova em outro lugar da folha nao prova que a salva sumiu.
             return (
                 False,
                 None,
@@ -789,6 +861,9 @@ def _evaluate_page_identity(
                 "occlusion",
                 True,
             )
+        elif np.any(seen_any):
+            keep_page = False
+            recall = 0.0
         else:
             keep_page = True
             recall = 1.0
@@ -809,7 +884,7 @@ def _evaluate_page_identity(
             return (
                 keep_page,
                 recall,
-                None,
+                containment,
                 prior_px,
                 prior_eval_px,
                 True,
@@ -819,7 +894,7 @@ def _evaluate_page_identity(
         return (
             keep_page,
             recall,
-            None,
+            containment,
             prior_px,
             prior_eval_px,
             False,
@@ -831,11 +906,11 @@ def _evaluate_page_identity(
     # recall e containment medem sobreposicao num raio da referencia:
     # todo o trabalho mora no bbox do prior_eval + a margem do kernel.
     # Dilatar a grade inteira dominava a avaliacao numa folha A4.
-    pe_y, pe_x = np.nonzero(prior_eval)
-    pe_y0 = max(0, int(pe_y.min()) - radius)
-    pe_y1 = min(candidate.shape[0], int(pe_y.max()) + radius + 1)
-    pe_x0 = max(0, int(pe_x.min()) - radius)
-    pe_x1 = min(candidate.shape[1], int(pe_x.max()) + radius + 1)
+    pe_box = _mask_bbox(prior_eval)
+    pe_y0 = max(0, pe_box[0] - radius)
+    pe_y1 = min(candidate.shape[0], pe_box[1] + radius)
+    pe_x0 = max(0, pe_box[2] - radius)
+    pe_x1 = min(candidate.shape[1], pe_box[3] + radius)
     seen_d = cv2.dilate(seen[pe_y0:pe_y1, pe_x0:pe_x1].astype(np.uint8), kernel) > 0
     recall = (
         np.count_nonzero(prior_eval[pe_y0:pe_y1, pe_x0:pe_x1] & seen_d) / prior_eval_px
@@ -1356,12 +1431,14 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     # Nivel de cinza da tinta salva (normalizado): o
                     # que separa "a pauta vista na posicao" de "a
                     # tinta escondida na pauta" — mesma aparencia do
-                    # modelo, mesma base da comparacao local.
+                    # modelo, mesma base da comparacao local. So a
+                    # ultima observacao VALIDA de cada pixel: o tom da
+                    # mao que cobria o traco na ultima passada nao e o
+                    # da tinta (NaN onde nunca foi visto).
                     self._identity_gray_ref = (
                         None
                         if self._page_model is None
-                        or self._page_model.last_normalized_gray is None
-                        else self._page_model.last_normalized_gray.copy()
+                        else self._page_model.observed_normalized_gray.copy()
                     )
                 # Toda geracao preservada zera o acumulador, com ou
                 # sem captura nova: a referencia pendente e a unica

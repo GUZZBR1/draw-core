@@ -2088,3 +2088,273 @@ def test_page_model_two_print_tones_darker_mark_does_not_inherit(monkeypatch):
         assert np.count_nonzero(_confirmed(worker, gen2)[62, 40:60]) == 20
     finally:
         worker.stop()
+
+
+def _saved_sheet(worker, form, written):
+    gen1 = worker.new_generation()
+    vis_all = np.ones((H, W), dtype=bool)
+    for _ in range(3):
+        _drive(worker, gen1, form, visible=vis_all)
+    assert np.count_nonzero(_confirmed(worker, gen1)) == 0
+    for _ in range(6):
+        _drive(worker, gen1, written, visible=vis_all)
+    return gen1, int(np.count_nonzero(_confirmed(worker, gen1)))
+
+
+def test_page_model_mixed_traced_and_freehand_same_sheet_reacquires(monkeypatch):
+    """worker.py:635: traco sobre a pauta + escrita livre — a mesma folha
+    restaura; o containment nao perde a parte tracada da referencia."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        form = np.full((H, W), PAPER, dtype=np.float32)
+        form[30:34, 10:110] = 95.0
+        written = form.copy()
+        written[30:34, 20:100] = INK  # tracado: 320 px sobre a pauta
+        written[60:64, 40:60] = INK  # livre: 80 px
+        gen1, before = _saved_sheet(worker, form, written)
+        assert before >= 380
+
+        gen2 = worker.new_generation(preserve_identity=True)
+        _drive(worker, gen2, written, visible=np.ones((H, W), dtype=bool))
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] == "same_page"
+        assert int(np.count_nonzero(_confirmed(worker, gen2))) == before
+    finally:
+        worker.stop()
+
+
+def test_page_model_mixed_form_clean_copy_rejects_without_hold(monkeypatch):
+    """worker.py:877: copia limpa inteiramente visivel de um formulario
+    com traco sobre a pauta vota new_page desde a primeira passada — o
+    traco salvo sobre a pauta nao conta como escondido (sem hold)."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        form = np.full((H, W), PAPER, dtype=np.float32)
+        form[30:34, 10:110] = 95.0
+        written = form.copy()
+        written[30:34, 20:100] = INK
+        written[60:62, 40:50] = INK  # livre pequeno: 20 px
+        _saved_sheet(worker, form, written)
+
+        gen2 = worker.new_generation(preserve_identity=True)
+        frames = identity_mod._PAGE_IDENTITY_SWITCH_CONSENSUS_FRAMES
+        for _ in range(frames):
+            _drive(worker, gen2, form, visible=np.ones((H, W), dtype=bool))
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        decisions = [e["decision"] for e in events[-frames:]]
+        assert "deferred_occlusion" not in decisions
+        assert decisions[-1] == "new_page"
+        assert int(np.count_nonzero(_confirmed(worker, gen2))) == 0
+    finally:
+        worker.stop()
+
+
+def test_page_model_light_pencil_beside_dark_print_reacquires(monkeypatch):
+    """worker.py:556: lapis (70) colado a regra escura (40) nao escurece a
+    pior aparencia vizinha, mas o tom salvo difere do papel embaixo
+    dele — reaparecer prova presenca; a copia limpa prova ausencia."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        form = np.full((H, W), PAPER, dtype=np.float32)
+        form[30, 20:100] = INK
+        penciled = form.copy()
+        penciled[31, 40:70] = 70.0
+        _, before = _saved_sheet(worker, form, penciled)
+        assert before >= 20
+
+        gen2 = worker.new_generation(preserve_identity=True)
+        _drive(worker, gen2, penciled, visible=np.ones((H, W), dtype=bool))
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] == "same_page"
+        assert int(np.count_nonzero(_confirmed(worker, gen2))) == before
+
+        gen3 = worker.new_generation(preserve_identity=True)
+        frames = identity_mod._PAGE_IDENTITY_SWITCH_CONSENSUS_FRAMES
+        for _ in range(frames):
+            _drive(worker, gen3, form, visible=np.ones((H, W), dtype=bool))
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] == "new_page"
+        assert int(np.count_nonzero(_confirmed(worker, gen3))) == 0
+    finally:
+        worker.stop()
+
+
+def test_page_model_hand_over_stroke_keeps_saved_ink_tone(monkeypatch):
+    """worker.py:1365: a mao cobrindo o traco na ultima passada antes da
+    troca nao vira o tom salvo — a mesma folha restaura pelo tom real."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        form = np.full((H, W), PAPER, dtype=np.float32)
+        form[30, 20:100] = INK
+        penciled = form.copy()
+        penciled[31, 40:70] = 70.0
+        gen1, before = _saved_sheet(worker, form, penciled)
+        assert before >= 20
+
+        hand = penciled.copy()
+        hand[25:45, 35:75] = 200.0
+        vis_hand = np.ones((H, W), dtype=bool)
+        vis_hand[25:45, 35:75] = False
+        _drive(worker, gen1, hand, visible=vis_hand)
+        assert int(np.count_nonzero(_confirmed(worker, gen1))) == before
+
+        gen2 = worker.new_generation(preserve_identity=True)
+        ref = worker._identity_gray_ref
+        assert ref is not None
+        assert np.all(np.abs(ref[31, 40:70] - 70.0) <= 2.0)
+        _drive(worker, gen2, penciled, visible=np.ones((H, W), dtype=bool))
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] == "same_page"
+        assert int(np.count_nonzero(_confirmed(worker, gen2))) == before
+    finally:
+        worker.stop()
+
+
+def _ambiguous_identity_fixture(shape=(H, W)):
+    """Referencia salva inteira sobre a pauta, com tom salvo igual ao da
+    pauta (80 sobre 95): nenhuma passada distingue tinta de pauta."""
+    model = pm_mod.PageModel(shape)
+    form = np.full(shape, PAPER, dtype=np.float32)
+    form[30:34, 10:110] = 95.0
+    vis = np.ones(shape, dtype=bool)
+    for _ in range(4):
+        model.observe(form, visible=vis, paper=vis)
+    assert model.seeded_fraction == 1.0
+    ref = np.zeros(shape, dtype=np.uint8)
+    ref[30:34, 20:100] = 255
+    baseline = np.zeros(shape, dtype=bool)
+    baseline[30:34, 10:110] = True
+    gray_ref = np.full(shape, np.nan, dtype=np.float32)
+    gray_ref[30:34, 20:100] = 80.0
+    return model, form, ref, baseline, gray_ref
+
+
+def _identity_candidate(gray):
+    return ((PAPER - gray) / PAPER).astype(np.float32)
+
+
+def test_identity_ambiguous_saved_ink_with_unrelated_new_stroke_holds():
+    """worker.py:778: tinta nova longe da tinta salva ambigua nao prova
+    que ela sumiu — inconclusivo com hold, nao new_page."""
+    model, form, ref, baseline, gray_ref = _ambiguous_identity_fixture()
+    gray = form.copy()
+    gray[30:34, 20:100] = 80.0
+    gray[60:66, 40:60] = INK  # tinta nova sem relacao com a salva
+    vis = np.ones((H, W), dtype=bool)
+    res = worker_mod._evaluate_page_identity(
+        ref,
+        baseline,
+        _identity_candidate(gray),
+        vis,
+        None,
+        None,
+        False,
+        0.2,
+        identity_gray=gray,
+        identity_model=model,
+        identity_gray_ref=gray_ref,
+    )
+    assert res[0] is False
+    assert res[5] is True and res[6] == "occlusion"
+
+
+def test_identity_coincidental_fragment_does_not_restore_ambiguous_canvas():
+    """worker.py:772: dominio julgavel vazio por ambiguidade (tinta toda
+    sobre a pauta) e um fragmento escuro coincidente no quadro deslocado:
+    6 px nao restauram os 160 salvos numa folha com outro desenho."""
+    model, form, ref, baseline, gray_ref = _ambiguous_identity_fixture()
+    ref[:] = 0
+    ref[31:33, 20:100] = 255
+    gray = np.full((H, W), PAPER, dtype=np.float32)
+    gray[31:35, 10:110] = 95.0  # mesma pauta, folha 1 px abaixo
+    gray[33, 20:26] = INK  # fragmento no quadro deslocado
+    gray[60:80, 30:90] = INK  # o desenho da folha substituta
+    res = worker_mod._evaluate_page_identity(
+        ref,
+        baseline,
+        _identity_candidate(gray),
+        np.ones((H, W), dtype=bool),
+        None,
+        None,
+        False,
+        0.2,
+        identity_gray=gray,
+        identity_model=model,
+        identity_gray_ref=gray_ref,
+    )
+    assert res[0] is False
+    assert res[1] is not None and res[1] < identity_mod._PAGE_IDENTITY_MIN_RECALL
+
+
+def test_align_identity_baseline_removes_prior_halo_across_band_edge():
+    """worker.py:367: tinta salva logo FORA da banda de busca ainda projeta
+    o halo dilatado dela para dentro — nao pode puxar o ajuste."""
+    shape = (80, 120)
+    kernel = np.ones((identity_mod._IDENTITY_DILATION_KERNEL,) * 2, np.uint8)
+    radius = identity_mod._IDENTITY_DILATION_KERNEL // 2
+    baseline = np.zeros(shape, dtype=bool)
+    baseline[40, 20:100] = True
+    prior = np.zeros(shape, dtype=bool)
+    prior[36, 20:100] = True  # 1 px fora da banda (40 - radius = 37)
+    seen = np.zeros(shape, dtype=bool)
+    seen[40, 20:40] = True  # pauta vista no lugar, parcialmente
+    seen[38, 20:100] = True  # pele do traco salvo, dentro do halo
+    _, dy, dx = worker_mod._align_identity_baseline(
+        baseline, seen, prior, radius, kernel
+    )
+    assert (dy, dx) == (0, 0)
+
+
+def test_identity_recovery_photometric_budget_on_a4_grid():
+    """test_page_model.py:613: o caminho completo (cinza, modelo semeado,
+    tom salvo, alinhamento e comparacao local) cabe no orcamento A4."""
+    shape = (1200, 850)
+    form = np.full(shape, PAPER, dtype=np.float32)
+    form[10:15, 10:200] = 95.0
+    form[200:205, 100:700] = 95.0
+    form[1180:1185, 650:840] = 95.0
+    vis = np.ones(shape, dtype=bool)
+    model = pm_mod.PageModel(shape)
+    for _ in range(4):
+        model.observe(form, visible=vis, paper=vis)
+    baseline = form < 200
+    written = form.copy()
+    written[200:205, 300:400] = INK  # tracado sobre a pauta
+    written[400:420, 300:350] = INK  # livre
+    written[1181:1185, 700:760] = 75.0  # lapis sobre a pauta
+    ref = np.zeros(shape, dtype=np.uint8)
+    ref[written < form - 10] = 255
+    gray_ref = np.full(shape, np.nan, dtype=np.float32)
+    gray_ref[ref > 0] = written[ref > 0]
+    gray = np.roll(written, (1, 1), axis=(0, 1))
+    candidate = _identity_candidate(gray)
+
+    def run():
+        return worker_mod._evaluate_page_identity(
+            ref,
+            baseline,
+            candidate,
+            vis,
+            None,
+            None,
+            False,
+            0.2,
+            identity_gray=gray,
+            identity_model=model,
+            identity_gray_ref=gray_ref,
+        )
+
+    run()
+    start = time.monotonic()
+    for _ in range(20):
+        res = run()
+    per_pass_ms = (time.monotonic() - start) / 20 * 1000
+    assert res[0] is True
+    # ~19 ms medidos contra ~9-15 ms do caminho reduzido na mesma
+    # maquina (antes desta revisao: 40-60 ms); o bound pega regressao
+    # de ordem de grandeza, nao ruido sob carga.
+    assert per_pass_ms < 30.0, per_pass_ms
