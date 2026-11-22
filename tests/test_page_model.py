@@ -2511,14 +2511,23 @@ def test_page_model_hidden_projected_rule_does_not_discard_canvas(monkeypatch):
         vis = np.ones((H, W), dtype=bool)
         hand = vis.copy()
         hand[32:34, :] = False
-        frames = identity_mod._PAGE_IDENTITY_SWITCH_CONSENSUS_FRAMES
+        # Mais passadas cobertas que o prazo de adiamentos: o traco
+        # bloqueado pela amostra escondida segura o hold.
+        passes = (
+            max(
+                identity_mod._PAGE_IDENTITY_SWITCH_CONSENSUS_FRAMES,
+                identity_mod._PAGE_IDENTITY_MAX_DEFERRALS,
+            )
+            + 2
+        )
         gen2 = worker.new_generation(preserve_identity=True)
-        for _ in range(frames + 1):
+        for _ in range(passes):
             _drive(worker, gen2, returned, visible=hand)
         decisions = [
             e["decision"] for e in worker.telemetry_snapshot()["page_identity_events"]
         ]
         assert "new_page" not in decisions
+        assert "quarantine_timeout" not in decisions
         for _ in range(2):
             _drive(worker, gen2, returned, visible=vis)
         decisions = [

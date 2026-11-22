@@ -551,6 +551,7 @@ def _evaluate_page_identity(
             )
         ambiguous = None
         ambiguous_px = 0
+        unsure = None
         tone_obs = None
         photometric = (
             darker is not None
@@ -621,6 +622,7 @@ def _evaluate_page_identity(
         darker = None
         ambiguous = None
         ambiguous_px = 0
+        unsure = None
     # Dominio inspecionado da comparacao: a guarda do quad salvo,
     # cruzada com a visibilidade. Resposta de borda fora da area
     # util nao pode derrubar o containment nem rejeitar a pagina
@@ -728,6 +730,13 @@ def _evaluate_page_identity(
         prior_guard if identity_sampled is None else (prior_guard & identity_sampled)
     )
     prior_domain_px = int(np.count_nonzero(prior_domain))
+    # Tinta no dominio cujo veto limpo depende de amostra escondida:
+    # nao julgavel nesta passada, mas pode ser a tinta salva.
+    unsure_domain_px = (
+        0
+        if unsure is None or not np.any(unsure)
+        else int(np.count_nonzero(unsure & prior_domain))
+    )
     prior_eval = (
         prior_domain if identity_visible is None else (prior_domain & identity_visible)
     )
@@ -781,7 +790,9 @@ def _evaluate_page_identity(
             # queimar o prazo apagaria o desenho que o hold existe
             # para proteger. Ambiguidade fotometrica vale o mesmo:
             # o escuro indistinguivel pode ser a tinta salva —
-            # estabelece o hold em vez de emprestar o hold_seen.
+            # estabelece o hold em vez de emprestar o hold_seen. Idem
+            # a tinta bloqueada por amostra escondida: a mao sobre a
+            # regra projetada nao pode queimar o prazo.
             return (
                 False,
                 None,
@@ -790,7 +801,7 @@ def _evaluate_page_identity(
                 prior_eval_px,
                 True,
                 "occlusion",
-                hold_seen or ambiguous_px > 0,
+                hold_seen or ambiguous_px > 0 or unsure_domain_px > 0,
             )
     if prior_eval_px == 0:
         unobserved_px = 0 if identity_sampled is None else usable_total_px - usable_px
