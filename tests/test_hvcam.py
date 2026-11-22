@@ -843,6 +843,28 @@ def test_ensure_hvcam_host_rejects_bad_sha256(tmp_path):
     assert not (tmp_path / "hvcam-host.exe").exists()
 
 
+def test_ensure_hvcam_host_uses_sibling_checkout_offline(monkeypatch, tmp_path):
+    """Com cache vazio e checkout irmao ../hvcam, copia o exe local sem baixar."""
+    work = tmp_path / "work"
+    sibling = work / "hvcam" / "dist"
+    sibling.mkdir(parents=True)
+    host = sibling / "hvcam-host.exe"
+    host.write_bytes(b"MZ-local-build")
+
+    prov = hvcam_module._provision
+    fake_file = work / "draw-core" / "src" / "draw" / "hvcam" / "_provision.py"
+    monkeypatch.setattr(prov, "__file__", str(fake_file))
+
+    def _no_download(*_a, **_k):
+        pytest.fail("downloader chamado com checkout irmao presente")
+
+    exe = hvcam_module.ensure_hvcam_host(
+        cache_dir=tmp_path,
+        urlopen=_no_download,
+    )
+    assert exe.read_bytes() == b"MZ-local-build"
+
+
 def test_list_hvcam_devices_parses_cp1252_stderr(monkeypatch, tmp_path):
     raw = b"[0] 1200W Camera\r\n[1] POCO M3 (C\xe2mera Virtual)\r\n"
     monkeypatch.setattr(

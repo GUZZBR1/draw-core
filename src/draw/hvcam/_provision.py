@@ -71,11 +71,12 @@ def _windows_cache_dir():
 
 def _local_hvcam_host_candidates():
     """Locais onde um checkout/instalacao local do hvcam-host.exe pode morar."""
-    here = Path(__file__).resolve().parent
+    here = Path(__file__).resolve().parent.parent
     candidates = [
-        # parents[3] = irmao do checkout (o pacote desceu um nivel).
-        here.parents[3] / "hvcam" / "dist" / "hvcam-host.exe",
-        here.parents[3] / "hvcam" / "build" / "Release" / "hvcam-host.exe",
+        # here = diretorio do pacote draw (como no hvcam.py antigo);
+        # parents[2] = diretorio pai do checkout — onde mora ../hvcam.
+        here.parents[2] / "hvcam" / "dist" / "hvcam-host.exe",
+        here.parents[2] / "hvcam" / "build" / "Release" / "hvcam-host.exe",
         Path.home() / "hvcam" / "dist" / "hvcam-host.exe",
         Path.home() / "hvcam" / "build" / "Release" / "hvcam-host.exe",
     ]
