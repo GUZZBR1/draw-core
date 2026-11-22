@@ -2598,7 +2598,8 @@ def _clipped_rule_scene(freehand=False):
     """Folha pautada (regras 4-5 e 34-35) de volta 2 linhas acima: a
     regra 2-3 visivel estabelece o deslocamento, a projetada 32-33
     decide o traco salvo 29-30 (65 salvo, 85 visto). `freehand` soma
-    um traco livre de 600 px (12-21). `run(visible, sampled)` zera a
+    um traco livre de 300 px na margem direita (linhas 8-27, colunas
+    112-126), fora das regras. `run(visible, sampled)` zera a
     prob e poe papel (255) fora de `sampled`, como o registro."""
     model = pm_mod.PageModel((H, W))
     form = np.full((H, W), PAPER, dtype=np.float32)
@@ -2617,9 +2618,9 @@ def _clipped_rule_scene(freehand=False):
     gray[32:34, 10:110] = 95.0
     gray[29:31, 25:105] = 85.0
     if freehand:
-        ref[12:22, 30:90] = 255
-        gray_ref[12:22, 30:90] = INK
-        gray[12:22, 30:90] = INK
+        ref[8:28, 112:127] = 255
+        gray_ref[8:28, 112:127] = INK
+        gray[8:28, 112:127] = INK
 
     def run(visible, sampled, hold_seen=False):
         seen = gray.copy()
@@ -2661,9 +2662,26 @@ def test_identity_hidden_projected_rule_holds_only_under_the_hand():
         assert clipped[7] is False
 
 
+def test_identity_clipped_rule_hand_on_shifted_stroke_keeps_hold():
+    """worker.py:830: recorte fixo; a posicao salva (29-30) visivel e
+    inconclusiva, a mao cobre so a posicao deslocada (27-28) dentro da
+    pegada: o hold anterior persiste; sem a mao, o recorte sozinho nao
+    segura."""
+    run, vis = _clipped_rule_scene()
+    clip = vis.copy()
+    clip[32:, :] = False
+    hand = clip.copy()
+    hand[27:29, :] = False
+    covered = run(hand, clip, True)
+    assert covered[5] is True and covered[6] == "occlusion"
+    assert covered[7] is True
+    lifted = run(clip, clip, True)
+    assert lifted[5] is True and lifted[7] is False
+
+
 def test_identity_clipped_rule_and_hand_covered_stroke_hold():
     """worker.py:812/823: o recorte bloqueia o traco da borda (160 px) e
-    a mao cobre o traco livre (600 px) dentro da pegada: descobri-lo
+    a mao cobre o traco livre (300 px) dentro da pegada: descobri-lo
     basta para o piso, entao adia com hold; a mao sai e a folha e a
     mesma. Se a folha anda ao tirar a mao e o traco livre sai da
     pegada, sobra so o veto geometrico: o hold anterior nao persiste."""
@@ -2671,14 +2689,16 @@ def test_identity_clipped_rule_and_hand_covered_stroke_hold():
     clip = vis.copy()
     clip[32:, :] = False
     hand = clip.copy()
-    hand[10:24, :] = False
+    hand[:, 111:] = False
     covered = run(hand, clip)
     assert covered[0] is False and covered[5] is True
     assert covered[6] == "occlusion" and covered[7] is True
     lifted = run(clip, clip, covered[7])
     assert lifted[0] is True
+    # A folha anda ao tirar a mao: a borda direita da pegada (um lado
+    # do quadrilatero registrado) passa por dentro da margem.
     moved_out = clip.copy()
-    moved_out[12:22, 28:92] = False
+    moved_out[:, 111:] = False
     stalled = run(moved_out, moved_out, covered[7])
     assert stalled[0] is False and stalled[5] is True
     assert stalled[6] == "occlusion" and stalled[7] is False

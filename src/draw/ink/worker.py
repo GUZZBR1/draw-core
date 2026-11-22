@@ -763,6 +763,19 @@ def _evaluate_page_identity(
     hand_hidden = hand_visible is not None and bool(
         np.any(prior_domain & ~hand_visible)
     )
+    if (
+        not hand_hidden
+        and unsure_in_domain
+        and hand_visible is not None
+        and (baseline_dy or baseline_dx)
+    ):
+        # A tinta inconclusiva tambem e comparada na posicao deslocada
+        # com a pauta: a mao ali (dentro da pegada) ainda e oclusao.
+        shifted = _shift_bool_mask(unsure & prior_domain, baseline_dy, baseline_dx)
+        shifted &= ~hand_visible
+        if identity_sampled is not None:
+            shifted &= identity_sampled
+        hand_hidden = bool(np.any(shifted))
     prior_eval = (
         prior_domain if identity_visible is None else (prior_domain & identity_visible)
     )
