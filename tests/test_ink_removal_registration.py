@@ -533,6 +533,117 @@ def test_texture_mismatch_blocks_removal_under_a_paper_colored_ruler():
     assert worker._accumulator._confirmed[52:60, 48:80].all()
 
 
+def test_marked_ruler_does_not_erase_the_covered_stroke():
+    """Régua cor de papel COM marcas: o modelo lê os traços da régua
+    como tinta e a amostra ponderada os descarta — sem o veto de
+    tinta nova, a textura restante casava com o papel e a falta
+    apagava o traço escondido (Devin Review do PR #144)."""
+    shape = (120, 160)
+    paper = np.full((*shape, 3), 220, dtype=np.uint8)
+    target = (slice(52, 60), slice(48, 80))  # traço que a régua cobre
+    witness = (slice(8, 20), slice(8, 20))  # testemunha de remoção
+    page = paper.copy()
+    page[target] = 60
+    page[witness] = 60
+
+    old = np.zeros(shape, np.float32)
+    old[target] = 0.95
+    old[witness] = 0.95
+    marked = np.zeros(shape, np.float32)
+    marked[witness] = 0.95
+
+    ruler = paper.copy()
+    ticks = np.zeros(shape, dtype=bool)
+    for c in range(52, 120, 16):
+        ticks[24:96, c] = True  # marcas escuras nos tiles da régua
+    ruler[ticks] = 60
+    marked[ticks] = 0.9  # o modelo lê as marcas como tinta
+
+    class _MutablePageClean:
+        threshold = 0.7
+
+        def __init__(self):
+            self.prob = old
+
+        def ink_prob(self, _image):
+            return self.prob
+
+    clock = rr.SceneClock()
+    page_clean = _MutablePageClean()
+    worker = rr.make_ink_worker(page_clean, clock)
+    generation = worker.new_generation()
+    corners = rr.base_quad(shape)
+    for _ in range(16):
+        clock.now += 1
+        worker.submit(WarpedPage(page, generation, corners))
+        assert worker.pump()
+        assert worker.error is None
+    assert worker._accumulator._confirmed[target].all()
+
+    page_clean.prob = marked
+    for _ in range(registration_mod._REMOVAL_PASSES + 2):
+        clock.now += 1
+        worker.submit(WarpedPage(ruler, generation, corners))
+        assert worker.pump()
+        assert worker.error is None
+    assert worker._accumulator._confirmed[target].all()
+    records = worker.telemetry_snapshot()["records"]
+    assert sum(r["removed_confirmed_px"] for r in records) == 0
+
+
+def test_partial_erasure_of_a_dense_patch_still_counts_cleared_pixels():
+    """Metade do tile apagada: a cobertura insuficiente para APRENDER
+    a referência não pode vetar o voto de remoção dos pixels limpos.
+    O veto por pixel (dark_ink) já protege a metade ainda grafite
+    (Devin Review do PR #144)."""
+    shape = (120, 160)
+    paper = np.full((*shape, 3), 220, dtype=np.uint8)
+    patch = (slice(24, 48), slice(0, 14))  # ~58% do tile (1,0)
+    page = paper.copy()
+    page[patch] = 160
+    witness = (slice(80, 96), slice(96, 144))
+    page[witness] = 60
+
+    prob_full = np.zeros(shape, np.float32)
+    prob_full[patch] = 0.95
+    prob_full[witness] = 0.95
+    cleared = (slice(24, 48), slice(12, 14))
+    prob_partial = prob_full.copy()
+    prob_partial[cleared] = 0.0
+    erased_page = page.copy()
+    erased_page[cleared] = 220  # a borda apagada volta ao papel
+
+    class _MutablePageClean:
+        threshold = 0.7
+
+        def __init__(self):
+            self.prob = prob_full
+
+        def ink_prob(self, _image):
+            return self.prob
+
+    clock = rr.SceneClock()
+    page_clean = _MutablePageClean()
+    worker = rr.make_ink_worker(page_clean, clock)
+    generation = worker.new_generation()
+    corners = rr.base_quad(shape)
+    for _ in range(16):
+        clock.now += 1
+        worker.submit(WarpedPage(page, generation, corners))
+        assert worker.pump()
+        assert worker.error is None
+    assert worker._accumulator._confirmed[patch].all()
+
+    page_clean.prob = prob_partial
+    for _ in range(registration_mod._REMOVAL_PASSES + 2):
+        clock.now += 1
+        worker.submit(WarpedPage(erased_page, generation, corners))
+        assert worker.pump()
+        assert worker.error is None
+    assert not worker._accumulator._confirmed[cleared].any()
+    assert worker._accumulator._confirmed[24:48, 0:12].all()
+
+
 def test_erasing_preexisting_pencil_stroke_releases_texture_veto():
     """A referência de textura usa o fundo do tile, não o grafite presente.
 
@@ -844,10 +955,10 @@ def test_clear_ink_read_resets_streak_even_where_paper_is_unproven():
 
 
 def test_dark_ink_veto_keeps_resetting_the_streak_end_to_end():
-    """Caso do review pelo caminho real: a mão/sombra não
-    mascarada torna tiles anômalos e o traço ainda visível é
-    textura-anômalo — papel exposto nunca é provado ali, a falta
-    não acumula e faltas espalhadas não apagam tinta confirmada
+    """Caso do review pelo caminho real: a falta testemunhada conta
+    quando o traço some da câmera (streak sobe), e a leitura forte
+    sob veto fotométrico zera o streak em vez de segurá-lo —
+    faltas espalhadas não apagam tinta confirmada
     (Devin Review do PR #144)."""
     shape = (120, 160)
     paper = np.full((*shape, 3), 220, dtype=np.uint8)
@@ -858,7 +969,10 @@ def test_dark_ink_veto_keeps_resetting_the_streak_end_to_end():
     shadowed = page.copy()
     shadowed[shadow] = 60
 
-    witness = (slice(16, 96), slice(8, 72))  # ~5,1k px: testemunha
+    # Testemunha longe dos tiles do traço: a amostragem INTER_AREA
+    # sangra a tinta dela para os tiles de borda e o veto de tinta
+    # nova (correto) impediria o traço de contar falta ali.
+    witness = (slice(48, 120), slice(8, 72))  # ~4,6k px: testemunha
     prob_full = np.zeros(shape, np.float32)
     prob_full[witness] = 0.95
     prob_full[stroke] = 0.95
@@ -883,15 +997,17 @@ def test_dark_ink_veto_keeps_resetting_the_streak_end_to_end():
         pass_page(page, prob_full)
     assert worker._accumulator._confirmed[stroke].all()
 
+    # O traço some da CÂMERA (não só do modelo) na passada de falta: o
+    # tile volta a parecer papel, a falta testemunhada conta e o streak
+    # sobe — depois a leitura forte sob o veto dark_ink tem de zerar um
+    # streak que existe de verdade.
+    erased = paper.copy()
     for _ in range(registration_mod._REMOVAL_PASSES + 2):
-        pass_page(page, prob_misread)
-        # A falta nem conta: o traço ainda desenhado na câmera deixa a
-        # textura do tile diferente da do papel — "não é papel provado"
-        # é mais forte que "papel exposto", e a remoção pede a segunda.
-        assert not worker._accumulator._removal_streak[stroke].any()
-        # Traço lido a 0,95 sob página anômala: veto dark_ink tira
-        # o papel_exposed e a evidência positiva manteria o streak em
-        # zero de qualquer forma.
+        pass_page(erased, prob_misread)
+        assert np.all(worker._accumulator._removal_streak[stroke] == 1)
+        # Traço lido a 0,95 sob página anômala: veto dark_ink tira o
+        # paper_exposed, mas a evidência positiva zera o streak — não o
+        # segura até apagar (Devin Review do PR #144).
         pass_page(shadowed, prob_full)
         assert not worker._accumulator._removal_streak[stroke].any()
 

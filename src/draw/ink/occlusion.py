@@ -15,6 +15,10 @@ _VISIBLE_TILE_FRACTION = 0.85
 # variação relativa local com a textura de papel aprendida por tile.
 _TEXTURE_CHANGE = 0.015
 _TEXTURE_MIN_PAPER_FRACTION = 0.6
+# Fração de tinta lida pelo modelo num tile cuja referência foi
+# formada em papel: marca nova sobre papel é oclusão suspeita, não
+# textura aprendida.
+_TEXTURE_NEW_INK_FRACTION = 0.05
 # Um deslocamento fotométrico da página inteira (luz da sala caindo,
 # auto-exposição da câmera, balanço de branco) move a quase totalidade
 # dos tiles de uma vez — não é oclusão local. Quando a parcela anômala
@@ -255,6 +259,7 @@ class PaperExposureGuard:
             else:
                 texture_weights.fill(0.0)
         paper_fraction = cv2.resize(texture_weights, size, interpolation=cv2.INTER_AREA)
+        ink_fraction = 1.0 - paper_fraction
         sampled_mean = cv2.resize(
             gray * texture_weights, size, interpolation=cv2.INTER_AREA
         )
@@ -306,6 +311,7 @@ class PaperExposureGuard:
             self._page_reference = None
             self._page_color_reference = None
             self._texture_reference = np.full(current.shape, np.nan, dtype=np.float32)
+            self._texture_learned_clean = np.zeros(current.shape, dtype=bool)
             self._was_texture_anomalous = np.zeros(current.shape, dtype=bool)
             self._ink_streak = np.zeros(current.shape, dtype=np.uint8)
             self._fill_adopted = np.zeros(current.shape, dtype=bool)
@@ -374,13 +380,24 @@ class PaperExposureGuard:
             texture_known, self._texture_reference, neighbor_reference
         )
         texture_comparable = texture_known | (neighbor_count > 0)
-        texture_anomaly = ~texture_valid | (
-            texture_comparable
-            & (
-                np.abs(texture - texture_reference)
-                > np.maximum(_TEXTURE_CHANGE, texture_reference * 0.5)
-            )
+        texture_mismatch = texture_comparable & (
+            np.abs(texture - texture_reference)
+            > np.maximum(_TEXTURE_CHANGE, texture_reference * 0.5)
         )
+        # Tinta nova sobre tile aprendida limpa: as marcas de um
+        # oclusor podem ser lidas como tinta e sair da amostra
+        # ponderada — a régua passava com textura de papel e a falta
+        # apagava o traço sob ela. O veto pede referência formada em
+        # papel: tile que sempre teve tinta não é "novo". Cobertura
+        # insuficiente barra só o aprendizado (texture_valid ali),
+        # não o veto por pixel — a metade apagada de um patch denso
+        # precisa poder provar papel (Devin Review do PR #144).
+        new_ink = (
+            texture_known
+            & self._texture_learned_clean
+            & (ink_fraction >= _TEXTURE_NEW_INK_FRACTION)
+        )
+        texture_anomaly = texture_mismatch | new_ink
 
         anomalous = darkened | color_anomaly
         updateable_px = int(np.count_nonzero(updateable))
@@ -448,10 +465,16 @@ class PaperExposureGuard:
             # do nível da página e permanece vetado, assim como o tile
             # marcado só pelo croma (Devin Review do PR #144).
             page_drop = max(_MIN_DARKENING, page_reference * _DARKENING_FRACTION)
+            # O veto de textura no rebaseline segura só quem SEGUE
+            # anômalo agora: a régua parada não vira papel com a
+            # mudança de luz, mas o tile cuja textura já voltou ao
+            # normal precisa reancorar — senão a trava ficava
+            # permanente depois de qualquer nivelamento (Devin
+            # Review do PR #144).
             flattened = (
                 updateable
                 & (anomalous | texture_anomaly)
-                & ~self._was_texture_anomalous
+                & ~(self._was_texture_anomalous & texture_anomaly)
                 & ~color_anomaly
                 & (current >= page_reference - page_drop)
             )
@@ -536,6 +559,9 @@ class PaperExposureGuard:
             updateable & texture_valid & texture_known & ~anomalous & ~texture_anomaly
         )
         self._texture_reference[texture_refresh] = texture[texture_refresh]
+        # Referência formada com fundo visível bastante era papel:
+        # tinta nova sobre ela é anomalia, não "sempre foi assim".
+        self._texture_learned_clean[texture_initialize | texture_refresh] = True
 
         # A clean first sample can seed and use its own tile immediately;
         # anomalously dark tiles remain unknown and cannot authorize votes.
