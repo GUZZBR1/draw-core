@@ -343,7 +343,7 @@ def test_page_model_reacquires_same_sheet_with_baseline_and_handwriting(monkeypa
 
 
 def test_page_model_reacquisition_control_rejects_different_sheet(monkeypatch):
-    """Issue 1 (controle): folha diferente continua sendo rejeitada como new_page."""
+    """Issue 1 (controle): folha diferente (mesmo com a mesma pauta impressa) e rejeitada."""
     monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
     worker = _worker(InkConfig(page_model=True))
     try:
@@ -359,7 +359,10 @@ def test_page_model_reacquisition_control_rejects_different_sheet(monkeypatch):
         assert np.count_nonzero(_confirmed(worker, gen1)) == 100
         pm_before = worker._page_model
 
+        # Outra folha que compartilha os mesmos 900 px de baseline mas tem escrita diferente
         other = np.full((H, W), PAPER, dtype=np.float32)
+        other[10:20, 10:55] = INK
+        other[24:34, 10:55] = INK
         other[75:85, 15:65] = INK
         gen2 = worker.new_generation(preserve_identity=True)
         for _ in range(identity_mod._PAGE_IDENTITY_SWITCH_CONSENSUS_FRAMES):
@@ -789,7 +792,7 @@ def test_page_model_occlusion_hold_blocks_recovery_edge_shadow(monkeypatch):
 
 
 def test_page_model_exposed_hold_counts_exact_recovery_passes():
-    """R351-357: hold_passes=1 bloqueia 1 passada limpa; hold_passes=3 bloqueia 3."""
+    """R351-357 & page_model.py:417: hold conta apenas passadas de recuperacao VISIVEIS."""
     for hold_n in (1, 3):
         model = pm_mod.PageModel((H, W), confirm_obs=1)
         paper = _paper()
@@ -799,6 +802,13 @@ def test_page_model_exposed_hold_counts_exact_recovery_passes():
         exp0 = model.exposed(occluded, hold_passes=hold_n)
         assert not exp0[48, 64]
         assert model.recovering_px == 0
+
+        # Quadros ocultos pela mascara visible=False nao consomem o hold
+        hidden_vis = np.zeros((H, W), dtype=bool)
+        for _ in range(hold_n + 2):
+            model.exposed(paper, visible=hidden_vis, hold_passes=hold_n)
+            assert model.recovering_px == 0
+            assert not model.hold_mask[48, 64]
 
         for step in range(hold_n):
             exp_rec = model.exposed(paper, hold_passes=hold_n)
@@ -851,33 +861,49 @@ def test_page_model_does_not_seed_under_startup_shadow_rejected_by_paper_guard(
 
 
 def test_page_model_adapts_to_sustained_dimming_and_captures_new_stroke(monkeypatch):
-    """R307-311: queda coerente de iluminacao da folha nao trava exposed nem o voto."""
+    """R307-311 & R369-371: marca impressa semeada continua suprimida sob dimming e relighting."""
     monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
     worker = _worker(InkConfig(page_model=True))
     try:
         generation = worker.new_generation()
         bright = np.full((H, W), PAPER, dtype=np.float32)
+        # Marca impressa estreita em nivel 95 (abaixo de 100 -> _ScriptInk da 0.95)
+        bright[14:22, 14:44] = 95.0
         for _ in range(3):
             _drive(worker, generation, bright)
         assert worker._page_model.seeded_fraction == pytest.approx(1.0)
+        assert np.count_nonzero(_confirmed(worker, generation)) == 0
 
-        # Iluminacao cai de 235 para 170 (< 0.78 * 235 = 183.3) com traco novo a 40
-        # e um oclusor escuro localizado [0:36, 0:36] a 70 (que deve seguir bloqueado).
+        # Iluminacao cai de 235 para 170: papel le 170 e marca impressa cai de 95 para 69
+        # (queda bruta de 26 > novel_delta=24, mas proporcionalmente inalterada),
+        # junto de um traco novo a 40 em [50:60, 80:90].
         dimmed = np.full((H, W), 170.0, dtype=np.float32)
+        dimmed[14:22, 14:44] = 69.0
         dimmed[50:60, 80:90] = INK
         dimmed_with_occluder = dimmed.copy()
-        dimmed_with_occluder[0:36, 0:36] = 70.0
+        dimmed_with_occluder[0:36, 70:106] = 70.0
         exp = worker._page_model.exposed(
             dimmed_with_occluder, bgr=_bgr(dimmed_with_occluder)
         )
         assert exp[55, 85]
-        assert not exp[10, 10]
+        assert not exp[10, 85]
 
-        for _ in range(4):
+        # Dimming sustentado por 10 passadas: marca impressa segue suprimida, traco novo confirma
+        for _ in range(10):
             _drive(worker, generation, dimmed)
         confirmed = _confirmed(worker, generation)
         assert np.count_nonzero(confirmed[50:60, 80:90]) == 100
+        assert not np.any(confirmed[14:22, 14:44] > 0)
         assert float(worker._page_model.reference[80, 100]) < PAPER - 15.0
+
+        # Luz original retorna (235 papel, 95 marca impressa): marca impressa segue suprimida
+        relit = bright.copy()
+        relit[50:60, 80:90] = INK
+        for _ in range(6):
+            _drive(worker, generation, relit)
+        confirmed_relit = _confirmed(worker, generation)
+        assert np.count_nonzero(confirmed_relit[50:60, 80:90]) == 100
+        assert not np.any(confirmed_relit[14:22, 14:44] > 0)
     finally:
         worker.stop()
 

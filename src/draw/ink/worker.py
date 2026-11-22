@@ -1765,15 +1765,23 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 if identity_corners is not None and p.corners is not None:
                     p.identity_geometry_registered = True
                 prior = identity_reference > 0
-                if (
+                has_baseline = (
                     identity_baseline is not None
                     and identity_baseline.shape == p.prob.shape
-                ):
-                    prior = prior | identity_baseline
+                    and bool(np.any(identity_baseline))
+                )
                 prior_px = int(np.count_nonzero(prior))
                 p.identity_reference_px = prior_px
                 if prior_px == 0:
                     seen_any = candidate > self._accumulator.threshold
+                    if has_baseline:
+                        kernel = np.ones(
+                            (identity._IDENTITY_DILATION_KERNEL,) * 2, np.uint8
+                        )
+                        baseline_d = (
+                            cv2.dilate(identity_baseline.astype(np.uint8), kernel) > 0
+                        )
+                        seen_any = seen_any & ~baseline_d
                     if identity_visible is not None:
                         seen_any = seen_any & identity_visible
                     p.keep_page = not np.any(seen_any)
@@ -1783,6 +1791,12 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     kernel = np.ones(
                         (identity._IDENTITY_DILATION_KERNEL,) * 2, np.uint8
                     )
+                    if has_baseline:
+                        baseline_d = (
+                            cv2.dilate(identity_baseline.astype(np.uint8), kernel) > 0
+                        )
+                        prior_full_d = cv2.dilate(prior.astype(np.uint8), kernel) > 0
+                        seen = seen & ~(baseline_d & ~prior_full_d)
                     seen_d = cv2.dilate(seen.astype(np.uint8), kernel) > 0
                     if identity_visible is not None:
                         prior_visible = prior & identity_visible
