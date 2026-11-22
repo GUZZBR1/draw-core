@@ -344,7 +344,7 @@ def test_token_file_ilegivel_vira_erro_de_autenticacao(tmp_path):
 
 
 def test_check_helper_source_token_file_ruim(tmp_path, capsys):
-    from draw.app import _check_helper_source
+    from draw.selfcheck import _check_helper_source
 
     result = _check_helper_source(
         "tcp://127.0.0.1:1", token_file=str(tmp_path / "ausente.txt")
@@ -546,7 +546,7 @@ def test_check_helper_source_respeita_deadline(monkeypatch, tmp_path, capsys):
     so e encurtado por subclasse — functools.partial(timeout=...)
     seria sobreposto pelo timeout=5.0 explicito do check.
     """
-    from draw import app as app_module
+    from draw import selfcheck as selfcheck_module
 
     class _ShortTimeout(HelperCapture):
         def __init__(self, source, **kwargs):
@@ -571,9 +571,9 @@ def test_check_helper_source_respeita_deadline(monkeypatch, tmp_path, capsys):
     thread.start()
     token_file = tmp_path / "helper.token"
     token_file.write_text(TOKEN)
-    monkeypatch.setattr(app_module, "HelperCapture", _ShortTimeout)
+    monkeypatch.setattr(selfcheck_module, "HelperCapture", _ShortTimeout)
     started = time.monotonic()
-    rc = app_module._check_helper_source(
+    rc = selfcheck_module._check_helper_source(
         f"tcp://127.0.0.1:{server.getsockname()[1]}", token_file=str(token_file)
     )
     elapsed = time.monotonic() - started

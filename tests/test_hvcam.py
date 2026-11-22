@@ -20,9 +20,9 @@ import numpy as np
 import pytest
 
 from draw import _hvcam_mjpeg as mjpeg_module
-from draw import app as app_module
 from draw import camera as camera_module
 from draw import hvcam as hvcam_module
+from draw import selfcheck as selfcheck_module
 from draw.hvcam import HvcamCapture, is_hvcam_source, parse_hvcam_endpoint
 
 
@@ -351,26 +351,26 @@ def test_open_capture_hvcam_raises_with_open_error(monkeypatch):
 def test_check_hvcam_source_reads_frame(monkeypatch, capsys):
     cam = FakeCamera([(_info(), _payload())])
     monkeypatch.setattr(
-        app_module,
+        selfcheck_module,
         "HvcamCapture",
         lambda source, timeout_ms=None: HvcamCapture(
             source, camera_factory=_factory(cam)
         ),
     )
-    assert app_module._check_hvcam_source("hvcam://") == 1
+    assert selfcheck_module._check_hvcam_source("hvcam://") == 1
     assert "quadro lido da fonte hvcam" in capsys.readouterr().out
 
 
 def test_check_hvcam_source_fails_unopened(monkeypatch, capsys):
     cam = FakeCamera([], fail=OSError("connect failed (-110)"))
     monkeypatch.setattr(
-        app_module,
+        selfcheck_module,
         "HvcamCapture",
         lambda source, timeout_ms=None: HvcamCapture(
             source, camera_factory=_factory(cam)
         ),
     )
-    assert app_module._check_hvcam_source("hvcam://") == 0
+    assert selfcheck_module._check_hvcam_source("hvcam://") == 0
     out = capsys.readouterr().out
     assert "FAIL" in out and "connect failed" in out
 
@@ -757,18 +757,18 @@ def test_run_check_on_wsl_without_dev_video_uses_hvcam_fallback(monkeypatch, cap
             camera_factory=_factory(FakeCamera([], fail=OSError("no service"))),
         )
 
-    monkeypatch.setattr(app_module.sys, "platform", "linux")
+    monkeypatch.setattr(selfcheck_module.sys, "platform", "linux")
     monkeypatch.setattr(camera_module.sys, "platform", "linux")
-    monkeypatch.setattr(app_module, "_require_gui_backend", lambda: None)
-    monkeypatch.setattr(app_module, "_check_models", lambda: True)
-    monkeypatch.setattr(app_module, "_video_nodes", lambda: [])
+    monkeypatch.setattr(selfcheck_module, "_require_gui_backend", lambda: None)
+    monkeypatch.setattr(selfcheck_module, "_check_models", lambda: True)
+    monkeypatch.setattr(selfcheck_module, "_video_nodes", lambda: [])
     monkeypatch.setattr(camera_module, "_video_nodes", lambda: [])
     monkeypatch.setattr(camera_module.os.path, "exists", lambda _p: False)
-    monkeypatch.setattr(app_module, "is_wsl", lambda: True)
+    monkeypatch.setattr(selfcheck_module, "is_wsl", lambda: True)
     monkeypatch.setattr(camera_module, "is_wsl", lambda: True)
     monkeypatch.setattr(camera_module, "HvcamCapture", fake_hvcam)
 
-    assert app_module.run_check(0) == 0
+    assert selfcheck_module.run_check(0) == 0
     assert cam.closed is True
     assert seen == [
         ("hvcam://", {"timeout_ms": 5000}),
@@ -1294,19 +1294,19 @@ def test_try_other_local_cameras_skips_camera_that_stalls_permanently(monkeypatc
 
 
 def test_run_check_succeeds_without_fail_message_when_video1_works(monkeypatch, capsys):
-    monkeypatch.setattr(app_module.sys, "platform", "linux")
-    monkeypatch.setattr(app_module, "_require_gui_backend", lambda: None)
-    monkeypatch.setattr(app_module, "_check_models", lambda: True)
+    monkeypatch.setattr(selfcheck_module.sys, "platform", "linux")
+    monkeypatch.setattr(selfcheck_module, "_require_gui_backend", lambda: None)
+    monkeypatch.setattr(selfcheck_module, "_check_models", lambda: True)
     monkeypatch.setattr(
-        app_module, "_video_nodes", lambda: ["/dev/video0", "/dev/video1"]
+        selfcheck_module, "_video_nodes", lambda: ["/dev/video0", "/dev/video1"]
     )
-    monkeypatch.setattr(app_module.os, "access", lambda p, _m: p == "/dev/video1")
+    monkeypatch.setattr(selfcheck_module.os, "access", lambda p, _m: p == "/dev/video1")
     monkeypatch.setattr(
-        app_module,
+        selfcheck_module,
         "_check_camera_open",
         lambda idx, _label: idx == 1,
     )
-    assert app_module.run_check(0) == 0
+    assert selfcheck_module.run_check(0) == 0
     assert "FAIL:" not in capsys.readouterr().out
 
 

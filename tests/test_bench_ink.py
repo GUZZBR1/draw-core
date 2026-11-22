@@ -232,7 +232,7 @@ def test_run_clip_measures_canvas_regions_and_cpu(tmp_path):
     assert out["ruling_over_writing"] == 0.0
     assert np.isfinite(out["cpu_s_per_scene_s"]) and out["cpu_s_per_scene_s"] > 0
     assert out["passes"] > 0
-    assert out["_canvas"].shape == (config.PAPER_H, config.PAPER_W)
+    assert out["_canvas"].shape == (config.current().height, config.current().width)
     assert not list(clip.glob(".bench_out"))  # nada escrito na pasta do clipe
 
 
@@ -249,6 +249,60 @@ def test_run_clip_honors_the_orientation_of_the_clip(tmp_path):
     (clip / "clip.json").write_text(json.dumps(meta))
     out = bench.run_clip(clip, [], detector=_Detector(), page_clean=_Ink())
     assert out["_canvas"].shape == (850, 1200)
+
+
+def test_run_clip_threads_an_explicit_frame_inventory(tmp_path):
+    """O corpus passa os f*.png registrados: preview.png e raw/ nao
+    entram no replay nem substituem os quadros registrados."""
+    clip = _fake_clip(tmp_path)
+    img = np.zeros((64, 64, 3), np.uint8)
+    cv2.imwrite(str(clip / "preview.png"), img)
+    (clip / "raw").mkdir()
+    cv2.imwrite(str(clip / "raw" / "decoy.png"), img)
+
+    # Sem o inventario, a descoberta preferiria o raw/ solto.
+    out = bench.run_clip(clip, [], detector=_Detector(), page_clean=_Ink())
+    assert out["frames"] == 1
+
+    inventory = sorted(clip.glob("f*.png"))
+    out = bench.run_clip(
+        clip,
+        [],
+        detector=_Detector(),
+        page_clean=_Ink(),
+        frame_files=inventory,
+    )
+    assert out["frames"] == len(inventory) == 10
+
+
+def test_run_clip_exposes_trace_and_scope_counts(tmp_path):
+    """_trace = (quadro, px confirmado, geracao) por frame; _scope_px = a
+    mesma serie restrita a cada reta pedida — base das regras de escopo."""
+    clip = _fake_clip(tmp_path)
+    out = bench.run_clip(
+        clip,
+        [],
+        detector=_Detector(),
+        page_clean=_Ink(),
+        trace=True,
+        scopes=[(90, 90, 210, 210), (0, 0, 10, 10)],
+    )
+    assert len(out["_trace"]) == out["frames"] == 10
+    assert out["_trace"][-1]["px"] == out["canvas_px"]
+    assert out["_trace"][0]["frame"] == 0
+    scoped = out["_scope_px"]
+    assert list(scoped[(90, 90, 210, 210)])[-1] == out["canvas_px"]
+    assert scoped[(0, 0, 10, 10)] == [0] * 10
+
+
+def test_run_clip_rejects_invalid_regions_before_replay(tmp_path):
+    """Caixa fora da régua compartilhada falha cedo, sem rodar o laço."""
+    from lab.corpus.clip import ClipError
+
+    clip = _fake_clip(tmp_path)
+    (clip / "regions.json").write_text(json.dumps({"writing": [[10, 20, 40]]}))
+    with pytest.raises(ClipError, match="regions"):
+        bench.run_clip(clip, [], detector=_Detector(), page_clean=_Ink())
 
 
 # ----------------------------------------------------------------- presets
