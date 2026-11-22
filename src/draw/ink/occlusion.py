@@ -244,6 +244,7 @@ class PaperExposureGuard:
         self._marks_hold_age = None
         self._marks_pending_age = 0
         self._occluded_confirmed = None
+        self._veto_px = None
 
     @property
     def pending_fill_recovery(self):
@@ -280,6 +281,16 @@ class PaperExposureGuard:
     def recovery_pending(self):
         """Recuperação com trabalho pendente (streak ou hold ativo)."""
         return self.pending_fill_recovery or self.recovering
+
+    @property
+    def veto_px(self):
+        """Pixels onde a guarda ainda suspeita de oclusor na última
+        passada observada: tiles anômalos (luma/croma) ou tinta lida
+        fora das posições aprendidas e das isentas por confirmação sob
+        anomalia. A evidência de retorno à aparência semeada não pode
+        abrir `paper_exposed` nesses lugares (Devin Review do PR #144).
+        None antes da primeira observação."""
+        return self._veto_px
 
     @property
     def max_marks_recovery_age(self):
@@ -611,8 +622,9 @@ class PaperExposureGuard:
                 > 0
             )
         exempt = self._occluded_confirmed
+        suspect_ink = ink_mask & (learned_marks == 0) & ~exempt
         new_marks_fraction = cv2.resize(
-            (ink_mask & (learned_marks == 0) & ~exempt).astype(np.float32),
+            suspect_ink.astype(np.float32),
             size,
             interpolation=cv2.INTER_AREA,
         )
@@ -1054,12 +1066,19 @@ class PaperExposureGuard:
         self._recovering[self._was_anomalous & ~anomalous] = _RECOVERY_HOLD_PASSES
         # Snapshot da tinta confirmada enquanto o tile era anômalo:
         # só ela é isenta dos vetos de marca nova na próxima passada.
-        # O traço sob a régua (tile limpo) nunca entra — o tick
-        # confirmado não pode isentar a si mesmo. Pixels que saíram
-        # do canvas perdem a isenção junto com a confirmação.
+        # A anomalia tem que ser explicada pela própria tinta —
+        # fração acima do teto do veto de marcas, onde o veto nem
+        # opera. Uma sombra sobre a régua (anomalia de luma com
+        # fração de tinta baixa) NÃO grava: os ticks confirmados
+        # continuariam isentos depois que ela saísse e o veto por
+        # posição morreria junto com ela (Devin Review do PR #144).
+        # Pixels que saíram do canvas perdem a isenção junto com a
+        # confirmação.
         occluded_px = (
             cv2.resize(
-                anomalous.astype(np.uint8),
+                (anomalous & (ink_fraction > _TEXTURE_NEW_INK_MAX_FRACTION)).astype(
+                    np.uint8
+                ),
                 (width, height),
                 interpolation=cv2.INTER_NEAREST,
             )
@@ -1067,6 +1086,14 @@ class PaperExposureGuard:
         )
         self._occluded_confirmed &= confirmed_cover
         self._occluded_confirmed[occluded_px] = confirmed_cover[occluded_px]
+        self._veto_px = suspect_ink | (
+            cv2.resize(
+                anomalous.astype(np.uint8),
+                (width, height),
+                interpolation=cv2.INTER_NEAREST,
+            )
+            > 0
+        )
         self._was_anomalous = anomalous.copy()
         self._was_texture_anomaly = texture_anomaly.copy()
         return ExposureAssessment(

@@ -4004,20 +4004,34 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 else erase_candidates & returned_mask & obs_admissible
             )
             if returned_seen is not None and np.any(returned_seen):
+                # O retorno a aparencia semeada vale evidencia de
+                # ausencia so fora dos pixels sob suspeita de oclusor
+                # nesta passada: tile anomalo (luma/croma — a regua
+                # escura que imita a guia) ou tinta em posicao nao
+                # aprendida (as marcas dela). O veto de pixel
+                # "confirmada sobre pixel escuro" e o unico que o
+                # casamento com a referencia do PageModel sobrepoe
+                # (Devin Review do PR #144).
+                if p.exposure is not None:
+                    veto_px = p.exposure_guard.veto_px
+                    if veto_px is not None:
+                        returned_seen = returned_seen & ~veto_px
                 zero = zero | returned_seen
                 # O retorno a aparencia semeada tambem prova exposicao:
                 # a impressao escura sob o traco apagado cai no veto
                 # dark_ink da guarda ("tinta confirmada sobre pixel
                 # escuro") e a remocao congelava para sempre (merge do
                 # #161 no PR #144). O casamento com a referencia do
-                # PageModel e a evidencia de que nada cobre o pixel.
-                exposed_mask = p.paper_exposed
-                if isinstance(exposed_mask, (bool, np.bool_)):
-                    exposed_mask = np.full(p.prob.shape, exposed_mask, dtype=bool)
-                else:
-                    exposed_mask = exposed_mask.copy()
-                exposed_mask[returned_seen] = True
-                p.paper_exposed = exposed_mask
+                # PageModel e a evidencia de que nada cobre o pixel —
+                # abertura so pixel, nunca sobre veto de tile.
+                if p.exposure is not None and np.any(returned_seen):
+                    exposed_mask = p.paper_exposed
+                    if isinstance(exposed_mask, (bool, np.bool_)):
+                        exposed_mask = np.full(p.prob.shape, exposed_mask, dtype=bool)
+                    else:
+                        exposed_mask = exposed_mask.copy()
+                    exposed_mask[returned_seen] = True
+                    p.paper_exposed = exposed_mask
             if np.any(zero):
                 p.prob = np.where(zero, 0.0, p.prob).astype(np.float32)
 
