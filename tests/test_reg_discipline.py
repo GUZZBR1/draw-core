@@ -195,21 +195,37 @@ def test_anchor_median_rejects_first_pass_outlier(fast, spy):
 
 
 @pytest.mark.slow
-def test_anchor_is_first_sample_with_median_off(fast, spy):
+def test_landing_default_rescues_first_pass_outlier(fast, spy):
+    """Com a arbitragem sempre ligada, o outlier da 1a amostra nao e
+    terminal: a passada 0 ancora nele, o evento abre quando a folha
+    assenta em BASE, o streak fecha na 3a passada consistente e o
+    veredito landing_default (canvas vazio = custo zero nas duas
+    hipoteses) repousa a ancora na mediana do streak — o resgate que
+    a flag anchor_arbitration entregava so ligada."""
     page = _page()
     sequence = _outlier_generation(page, np.random.default_rng(1))
-    worker, confirmed, _provisional = _run(
-        sequence,
-        config=InkConfig(anchor_arbitration=False, anchor_follow=False),
-    )
-    assert np.array_equal(worker._anchor_corners, sequence[0][1])
-    for anchor_used, _corners in spy:
-        assert np.array_equal(anchor_used, OUTLIER)
-    assert all(
-        "reg_anchor_samples" not in r for r in worker.telemetry_snapshot()["records"]
-    )
+    worker, confirmed, _provisional = _run(sequence)
+    anchor = worker._anchor_corners
+    assert not np.array_equal(anchor, OUTLIER)
+    assert np.max(np.abs(anchor - BASE)) <= 2.0
+    snapshot = worker.telemetry_snapshot()
+    assert snapshot["anchor_arbitration_actions"] == 1
+    events = snapshot["anchor_arbitration_events"]
+    assert len(events) == 1
+    assert events[0]["verdict"] == "landing_default"
+    assert events[0]["streak"] == 3
+    assert snapshot["anchor_reanchors"] == 0
+    # 8 submissoes + o re-registro da passada do veredito: passadas
+    # 0-3 registram contra o outlier, dali em diante a mediana
+    # resgatada.
+    assert len(spy) == len(sequence) + 1
+    assert np.array_equal(spy[0][0], OUTLIER)
+    np.testing.assert_allclose(spy[-1][0], anchor)
+    # O resgate veio da arbitragem: a ancora-mediana (Tier B) segue
+    # desligada e nao emite reg_anchor_samples.
+    assert all("reg_anchor_samples" not in r for r in snapshot["records"])
     _w, truth, _p = _run([_pass(page, BASE) for _ in sequence])
-    assert _iou(confirmed, truth) < 0.1, "a falha silenciosa que a flag elimina"
+    assert _iou(confirmed, truth) > 0.4
 
 
 # --- (b) banda morta --------------------------------------------------

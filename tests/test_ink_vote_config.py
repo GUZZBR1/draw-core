@@ -80,7 +80,7 @@ def test_strict_vote_shifts_the_vote_fields_and_keeps_seen_threshold():
     # O limiar de "visto como tinta" governa identidade, remoção e
     # âncora da fronteira: o voto estrito não o toca (review #53).
     assert cfg.seen_threshold == InkConfig().seen_threshold == 0.7
-    assert InkConfig.strict_vote(0.92, removal=False).removal is False
+    assert InkConfig.strict_vote(0.92, hysteresis=True).hysteresis is True
 
 
 def test_strict_vote_keeps_the_page_identity_threshold():
@@ -269,3 +269,16 @@ def test_main_preset_rejects_conflicting_flags(monkeypatch):
         with pytest.raises(SystemExit) as error:
             app_module.main()
         assert error.value.code == 2
+
+
+def test_production_preset_keeps_paper_and_border_guards():
+    # O preset nunca pode perder as duas guardas: paper_ok segura a
+    # janela pre-sementeira do PageModel e a remocao sob oclusor nao
+    # mascarado (contrato 9); o inset automatico (None ->
+    # resolve_border_guard_px) e a unica exclusao de borda nao-papel
+    # sem mascara de cobertura (contrato 4, faixa de mesa). O default
+    # do campo border_guard_px e 0 (InkConfig() e a pilha legada) —
+    # production() precisa do None explicito.
+    cfg = InkConfig.production()
+    assert cfg.paper_guard is True
+    assert cfg.border_guard_px is None

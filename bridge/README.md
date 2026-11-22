@@ -4,7 +4,8 @@ Experimental protocol between a Windows-side capture helper and Draw
 running in WSL, for frame capture with trustworthy timestamps — ground
 work for a future cursor bridge. Draw consumes it with
 `--source tcp://host` + `--helper-token-file`; nothing in the default
-path depends on this folder.
+path depends on this folder. See [`../docs/CHANNELS.md`](../docs/CHANNELS.md)
+for the map of all three wire channels (DRAW, DRAL, HVCM).
 
 - `PROTOCOL.md` — the wire contract: a stream of records (28-byte
   binary header + JPEG payload) over TCP or in a recorded file; the

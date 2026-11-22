@@ -1,4 +1,4 @@
-"""Mobilidade de ancora por divergencia assentada (InkConfig.anchor_follow).
+"""Mobilidade de ancora por divergencia assentada (mecanismo fixo).
 
 Frente 34 (2026-11-10; 34-desenho-ancora-movel.md): a vigia v3
 fechou o split errado do puxao e expos a pergunta sem dono — quem
@@ -13,10 +13,10 @@ folha; deformar o estado pela homografia do raio da camera e o
 carry da migracao v1, reprovado no FALHAS M2).
 
 Contratos:
-1. Divergencia assentada sustentada => exatamente 1 re-ancoragem,
-   ancora na mediana do streak, canvas byte-identico ao
-   pre-evento (preservacao 1,0 >= 0,98) e poll() publica na
-   passada da troca.
+1. Divergencia que a arbitragem nao fecha (deriva lenta
+   assentada) => exatamente 1 re-ancoragem, ancora na mediana do
+   streak, canvas byte-identico ao pre-evento (preservacao
+   1,0 >= 0,98) e poll() publica na passada da troca.
 2. Tremor (<= ~3 px de grade) e spikes de 1 passada => 0
    re-ancoragens.
 3. Abstencao: nenhuma confirmacao nasce de passada de evento
@@ -31,8 +31,8 @@ Contratos:
    FOLLOW dispara — e a tinta volta a votar na pose nova.
 6. Identidade pendente (recuperacao em quarentena ou juiz
    armado) trava a re-ancoragem: streak 0, 0 re-ancoragens.
-7. Flag desligada: canvas byte-identico ao baseline (GOLDEN);
-   flag ligada nao dispara no replay assentado do GOLDEN.
+7. O mecanismo nao dispara no replay assentado do GOLDEN (canvas
+   byte-identico ao baseline).
 """
 
 import importlib.util
@@ -48,7 +48,6 @@ from draw.contracts import WarpedPage
 from draw.ink import anchor as anchor_mod
 from draw.ink import registration as registration_mod
 from draw.ink import worker as worker_mod
-from draw.ink.config import InkConfig
 
 
 def _load(name, path):
@@ -127,33 +126,33 @@ def test_constants_reuse_the_migration_and_settled_specs():
     assert anchor_mod._FOLLOW_SETTLE_PX == 6.0
 
 
-# --- 1. divergencia assentada: 1 re-ancoragem, estado intacto ---------
+# --- 1. divergencia que a arbitragem nao fecha: 1 re-ancoragem ---
 
 
 @pytest.mark.slow
-def test_settled_divergence_reanchors_once_state_untouched(fast):
+def test_drift_divergence_reanchors_once_state_untouched(fast):
+    """Com a arbitragem sempre ligada, a unica divergencia que o
+    FOLLOW fecha e a deriva lenta: cada degrau assentado fica a
+    <=6 px do anterior (o streak do FOLLOW cresce) mas a >6 px do
+    primeiro quad do streak da arbitragem a cada 2 passadas (a
+    consistencia par-a-par nunca fecha — nenhum veredito nasce e a
+    geometria decide o episodio)."""
     content = _content()
-    # settle 4 + salto (degrau grande: abre o evento, nao conta) +
-    # 3 assentadas no destino (streak) + 2 de regime.
-    sequence = (
-        _settled(content)
-        + [(content, STEP.copy()) for _ in range(4)]
-        + [(content, STEP.copy()) for _ in range(2)]
-    )
-    worker = worker_mod.PageCleanWorker(
-        _ProbIsWarp(), config=InkConfig(anchor_arbitration=False)
-    ).start()
+    # settle 4 + deriva de 5 px/passo: o evento abre no meio do
+    # creep (degrau de ~30 px de camera passa dos 8 px de grade)
+    # e o FOLLOW dispara na 3a assentada do streak — medido no
+    # indice 11 (streak {+30,+35,+40}) — e a publicacao e
+    # forcada nela.
+    sequence = _creep_sequence(content, steps=11)
+    worker = worker_mod.PageCleanWorker(_ProbIsWarp()).start()
     try:
         generation = worker.new_generation()
-        _drive(worker, generation, sequence[:7])
+        _drive(worker, generation, sequence[:11])
         _snap = worker.poll(generation, 0)
         version_mid, canvas_mid = _snap.version, _snap.confirmed
-        # Salto (indice 4, nao conta) + assentadas 5 e 6 (streak
-        # 1, 2): na 3a assentada (indice 7) o FOLLOW dispara — e
-        # a publicacao e forcada nela.
-        _drive(worker, generation, sequence[7:8])
+        _drive(worker, generation, sequence[11:12])
         got = worker.poll(generation, version_mid)
-        _drive(worker, generation, sequence[8:])
+        _drive(worker, generation, sequence[12:])
         snapshot = worker.telemetry_snapshot()
         anchor = worker._anchor_corners.copy()
         _disp = worker.poll_display(generation, 0)
@@ -169,21 +168,28 @@ def test_settled_divergence_reanchors_once_state_untouched(fast):
     assert event["generation"] == generation
     assert event["streak"] == anchor_mod._FOLLOW_PASSES
     assert event["displacement_px"] > anchor_mod._FOLLOW_DISPLACEMENT_PX
-    assert event["anchor_delta_px"] > 100
-    assert event["closed_arb_event"] is False
-    np.testing.assert_allclose(anchor, STEP)
+    # A ancora anda ~35 px de camera (mediana do streak {+30,+35,
+    # +40} no meio da deriva), nao os >100 px do salto unico.
+    assert event["anchor_delta_px"] > 25
+    # O evento da arbitragem ficou aberto o episodio inteiro e a
+    # re-ancoragem o fechou — e o que deixa a geometria decidir.
+    assert event["closed_arb_event"] is True
+    # A consistencia par-a-par da arbitragem nunca fecha sob
+    # deriva: nenhum veredito, nenhuma acao.
+    assert snapshot["anchor_arbitration_actions"] == 0
+    assert snapshot["anchor_arbitration_events"] == []
+    np.testing.assert_allclose(anchor, BASE + np.float32([35.0, 0.0]), atol=1.5)
     reanchored = [bool(r.get("follow_reanchored", False)) for r in snapshot["records"]]
-    assert reanchored == [False] * 7 + [True] + [False] * 2
-    assert [r["follow_streak"] for r in snapshot["records"]][4:9] == [0, 1, 2, 0, 0]
+    assert reanchored == [False] * 11 + [True] + [False] * 3
     assert got is not None, "poll() nao publicou na passada da re-ancoragem"
     _v, canvas_fire = got.version, got.confirmed
     assert np.array_equal(canvas_fire, canvas_mid), (
         "a troca de ancora nao pode deformar o canvas (carry = folha)"
     )
-    # O canvas final e o da pagina assentada pura: nada se perdeu
-    # e nenhuma copia deslocada nasceu do evento.
+    # Nada do canvas assentado se perdeu (a mancha de borda do
+    # registro por quads que derivam e fisica do harness).
     _w2, _g2, truth = _run(_settled(content))
-    assert np.array_equal(confirmed, truth)
+    assert np.count_nonzero(truth & ~confirmed) == 0
 
 
 # --- 2. tremor e spikes nao re-ancoram ---------------------------------
@@ -259,14 +265,12 @@ def test_slow_creep_reanchors(fast):
     assert 30.0 < float(np.max(np.linalg.norm(anchor - BASE, axis=1))) < 55.0
     # Nada do canvas assentado se perde. A mancha de borda do
     # registro por quads que derivam e fisica do harness (a prob
-    # enviada nao muda com o quad): com a flag DESLIGADA a mesma
-    # sequencia mancha 703 px; o FOLLOW nao pode manchar mais.
+    # enviada nao muda com o quad): na medicao original com o
+    # mecanismo desligado a mesma sequencia manchava 703 px — o
+    # FOLLOW nao pode manchar mais que isso.
     _w2, _g2, truth = _run(_settled(content))
     assert np.count_nonzero(truth & ~confirmed) == 0
-    _w3, _g3, off = _run(
-        _creep_sequence(content), config=InkConfig(anchor_follow=False)
-    )
-    assert np.count_nonzero(confirmed & ~truth) <= np.count_nonzero(off & ~truth)
+    assert np.count_nonzero(confirmed & ~truth) <= 703
 
 
 @pytest.mark.slow
@@ -432,18 +436,7 @@ def test_identity_judgment_is_not_crossed(fast):
     )
 
 
-# --- 7. paridade com a flag desligada ------------------------------------
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize("scenario", sorted(discipline.GOLDEN))
-def test_follow_off_canvas_is_byte_identical_to_baseline(fast, scenario):
-    digest, snapshot = discipline._parity_canvas(
-        scenario, config=InkConfig(anchor_follow=False)
-    )
-    assert digest == discipline.GOLDEN[scenario]
-    assert "anchor_reanchors" not in snapshot
-    assert not any(k.startswith("follow_") for r in snapshot["records"] for k in r)
+# --- 7. paridade no replay assentado -------------------------------------
 
 
 @pytest.mark.slow
