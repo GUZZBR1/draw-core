@@ -42,7 +42,16 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .export_vectors import _dp_open, simplify
+from .export_vectors import (
+    _degree,
+    _dp_open,
+    _index_node_components,
+    filter_microfragments,
+    simplify,
+)
+from .export_vectors import (
+    make_8_minimal as _make_8_minimal,
+)
 
 PAPER_W_PX = 850
 PAPER_H_PX = 1200
@@ -67,7 +76,6 @@ _NEIGHBORS = (
     (1, 0),
     (1, 1),
 )
-_DEGREE_KERNEL = np.array([[1, 1, 1], [1, 0, 1], [1, 1, 1]], dtype=np.uint8)
 
 
 def load_ink(path):
@@ -93,36 +101,11 @@ def load_stamps(path):
     return {"first_seen_ms": first, "last_update_ms": last}
 
 
-def filter_microfragments(ink, min_area=4):
-    """Remove componentes conexas minúsculas (< min_area px) antes de afinar."""
-    if min_area <= 1:
-        return ink.astype(bool, copy=True)
-    ink_u8 = ink.astype(np.uint8)
-    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
-        ink_u8, connectivity=8
-    )
-    if n_labels <= 1:
-        return np.zeros_like(ink, dtype=bool)
-    areas = stats[:, cv2.CC_STAT_AREA]
-    keep_lut = areas >= int(min_area)
-    keep_lut[0] = False
-    return keep_lut[labels]
-
-
 def thin(ink, thinning="zhangsuen"):
     """Afina a máscara de tinta para um esqueleto de 1 px (booleano)."""
     src = ink.astype(np.uint8) * np.uint8(255)
     skel = cv2.ximgproc.thinning(src, None, THINNING_TYPES[thinning])
     return skel > 0
-
-
-def _degree(skel):
-    """Grau de cada pixel do esqueleto (vizinhança de 8)."""
-    skel_u8 = skel.astype(np.uint8)
-    deg = cv2.filter2D(
-        skel_u8, cv2.CV_16U, _DEGREE_KERNEL, borderType=cv2.BORDER_CONSTANT
-    )
-    return (deg * skel_u8).astype(np.int32)
 
 
 def _skeleton_neighbors(flat_idx, skel_flat, width, height):
@@ -136,39 +119,6 @@ def _skeleton_neighbors(flat_idx, skel_flat, width, height):
             if skel_flat[nidx]:
                 out.append(nidx)
     return out
-
-
-def _index_node_components(labels, n_nodes):
-    """Indexa pixels e centróides de todos os nós numa única passada O(H*W)."""
-    labels_flat = labels.ravel()
-    width = labels.shape[1]
-    nz_flat = np.flatnonzero(labels_flat)
-    if len(nz_flat) == 0 or n_nodes <= 1:
-        return {}, {}
-
-    lbl_vals = labels_flat[nz_flat]
-    order = np.argsort(lbl_vals, kind="mergesort")
-    sorted_flat = nz_flat[order]
-    sorted_lbl = lbl_vals[order]
-    counts = np.bincount(sorted_lbl, minlength=n_nodes)
-    splits = np.cumsum(counts)
-
-    ys = sorted_flat // width
-    xs = sorted_flat % width
-    sum_x = np.bincount(sorted_lbl, weights=xs, minlength=n_nodes)
-    sum_y = np.bincount(sorted_lbl, weights=ys, minlength=n_nodes)
-
-    anchors = {}
-    node_pixels = {}
-    for nid in range(1, n_nodes):
-        c = int(counts[nid])
-        if c == 0:
-            continue
-        anchors[nid] = (float(sum_x[nid] / c), float(sum_y[nid] / c))
-        lo = int(splits[nid - 1])
-        hi = int(splits[nid])
-        node_pixels[nid] = sorted_flat[lo:hi].tolist()
-    return anchors, node_pixels
 
 
 def traverse_graph(skel, include_topology=False):
@@ -305,40 +255,6 @@ def _polyline_arc_length(points):
         return 0.0
     diffs = np.diff(points, axis=0)
     return float(np.hypot(diffs[:, 0], diffs[:, 1]).sum())
-
-
-def _make_8_minimal(skel):
-    """Remove pixels de canto L redundantes preservando a conectividade-8 exata.
-
-    O afinamento de Zhang-Suen deixa degraus 4-conexos (ex.: pixel central
-    com N=1 e E=1 sem vizinhos opostos), onde N e E já são 8-vizinhos entre
-    si. Esses triângulos criam falsos nós de grau 3 ao longo de círculos e
-    retângulos alinhados aos eixos, partindo laços fechados em dezenas de
-    arcos curtos. Remover cada orientação sequencialmente preserva a
-    topologia 8-conexa e reduz curvas simples a grau 2 puro.
-    """
-    s = skel.copy()
-    for rot in range(4):
-        p = np.pad(s, 1, constant_values=False)
-        c = p[1:-1, 1:-1]
-        n = p[0:-2, 1:-1]
-        so = p[2:, 1:-1]
-        e = p[1:-1, 2:]
-        w = p[1:-1, 0:-2]
-        nw = p[0:-2, 0:-2]
-        ne = p[0:-2, 2:]
-        sw = p[2:, 0:-2]
-        se = p[2:, 2:]
-        if rot == 0:
-            rem = c & n & e & (~w) & (~so) & (~sw) & (~(nw & se))
-        elif rot == 1:
-            rem = c & e & so & (~n) & (~w) & (~nw) & (~(ne & sw))
-        elif rot == 2:
-            rem = c & so & w & (~n) & (~e) & (~ne) & (~(nw & se))
-        else:
-            rem = c & w & n & (~so) & (~e) & (~se) & (~(ne & sw))
-        s[rem] = False
-    return s
 
 
 def prune_skeleton_spurs(skel, ink, max_spur_ratio=2.4, min_spur_px=7.0, passes=2):
