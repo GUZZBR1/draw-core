@@ -1796,3 +1796,22 @@ def test_seam_bridge_reads_both_levels_from_the_chain_when_the_back_trace_is_emp
     # sem nível de origem observável (nem na cadeia): abstém
     nodes, tid = _chain([(288, 293)] * 30, 600)
     assert not ruling._seam_bridge(nodes, tid, 640, 1, split, [])
+
+
+@pytest.mark.parametrize(
+    ("offset", "tops"),
+    [(4, [281, 282, 282, 283]), (4, [281, 282, 283]), (5, [281, 282, 283, 284])],
+)
+def test_a_gradual_pen_bend_between_slightly_offset_rules_is_kept(offset, tops):
+    """Review #139 (18127fb): com desnível pequeno, duas colunas do traço que
+    engordam só por encostar na pauta sombreada (espessura + poucos px) não
+    são remendo de sombra. A dobra suave de 1 linha por coluna fica inteira."""
+    prob = _fold_page(split_x=600, offset_r=offset)
+    y = 280
+    prob[y : y + 6, 530:598] = 0.95
+    for i, top in enumerate(tops):
+        prob[top : top + 6, 598 + i] = 0.95
+    prob[y + offset : y + offset + 6, 598 + len(tops) : 660] = 0.95
+    box = (slice(278, 296), slice(562, 638))
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert ((out > 0.5)[box]).sum() == ((prob > 0.5)[box]).sum()

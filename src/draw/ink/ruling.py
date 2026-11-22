@@ -1065,8 +1065,12 @@ def _seam_bridge(nodes, tid, band_edge, direction, split, src_tops):
     h = [n.bot - n.top + 1 for n in near]
     if max(h) >= base + gap:
         return True
-    # remendo escalonado: duas colunas seguidas cobrem o desnível (menos a margem)
-    tall = [x >= base + gap - _THIN_MARGIN for x in h]
+    # remendo escalonado: duas colunas seguidas cobrem o desnível (menos a
+    # margem) E passam de 1,5 espessura. O piso evita que uma dobra suave,
+    # cujo intervalo só engorda ao encostar na pauta sombreada (espessura +
+    # poucos px), passe por remendo quando o desnível é pequeno
+    thr = max(base + gap - _THIN_MARGIN, 1.5 * base)
+    tall = [x >= thr for x in h]
     return any(a and b for a, b in zip(tall, tall[1:], strict=False))
 
 
