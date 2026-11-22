@@ -129,10 +129,6 @@ class InkConfig:
     # vez com a mao presente; um traco revelado so depois da saida fica
     # aquem do voto e o descanso total o congela (Devin Review PR #122).
     post_exit_full_window: bool = False
-    # Referencia page-clean opcional: a mascara inicial da pagina e ignorada
-    # como tinta nova e capturada apenas em regioes visiveis.
-    baseline: bool = False
-    baseline_margin_px: int = 1
     # Faixa de guarda (px) na borda externa da grade da pagina antes do
     # voto: 0 desliga (legado); None deriva do tamanho retificado em
     # grades de pagina inteira (>= 200 px).
@@ -145,6 +141,16 @@ class InkConfig:
     # MediaPipe. Incerteza congela.
     paper_guard: bool = True
     occlusion_hold_passes: int = 3
+    # Modelo persistente da pagina limpa (draw.ink.page_model, opt-in):
+    # referencia por pixel na grade da ancora, semeada por blocos que a
+    # passada viu limpos. Pixels ainda sem referencia nao entregam
+    # evidencia (regiao pendente) e evidencia que nao e conteudo novo
+    # contra a referencia e suprimida — pauta impressa, desenho antigo
+    # e sombra de vinco deixam de parecer tinta sem depender da regra
+    # de pauta (#132) nem de o modelo ver a mao (#129). O delta de
+    # "novo" ainda nao foi calibrado em corpus real — ligar para
+    # replay/mesa, nao para o preset validado.
+    page_model: bool = False
 
     def __post_init__(self):
         if not 0.0 < self.t_low < self.t_high <= 1.0:
@@ -162,11 +168,6 @@ class InkConfig:
             raise ValueError(
                 f"pass_interval_s fora de (0, 5] s: {self.pass_interval_s!r}"
             )
-        if (
-            not isinstance(self.baseline_margin_px, int)
-            or not 0 <= self.baseline_margin_px <= 4
-        ):
-            raise ValueError("baseline_margin_px deve ser um inteiro entre 0 e 4")
         if self.border_guard_px is not None and self.border_guard_px < 0:
             raise ValueError(
                 f"border_guard_px deve ser >= 0 ou None: {self.border_guard_px!r}"
@@ -224,7 +225,6 @@ class InkConfig:
         vote_level=PRODUCTION_VOTE_LEVEL,
         pass_interval_s=PRODUCTION_PASS_INTERVAL_S,
         ruling_removal=True,
-        baseline=False,
     ):
         """Preset de producao do motor de tinta: voto estrito (0,85), remocao
         de pauta, histerese, veto por movimento e passadas a 0,15 s.
@@ -242,7 +242,6 @@ class InkConfig:
             hysteresis=True,
             motion_veto=True,
             pass_interval_s=pass_interval_s,
-            baseline=baseline,
             border_guard_px=None,
         )
 

@@ -193,8 +193,6 @@ class WarpedPage:
     as máscaras são lidas na grade do próprio warp, como antes.
     captured_at é o carimbo monotônico (s) do quadro de câmera que
     originou o warp, ou None.
-    baseline_stable indica que o quad passou pela estabilizacao da
-    pipeline; False por padrao para chamadas antigas e testes.
     """
 
     image: np.ndarray
@@ -203,7 +201,6 @@ class WarpedPage:
     visible: np.ndarray | None = None
     coverage: np.ndarray | None = None
     captured_at: float | None = None
-    baseline_stable: bool = False
 
     def __post_init__(self):
         if self.captured_at is not None and not (
@@ -212,8 +209,6 @@ class WarpedPage:
             raise ValueError(
                 f"captured_at precisa ser float finito: {self.captured_at!r}"
             )
-        if not isinstance(self.baseline_stable, bool):
-            raise ValueError("baseline_stable precisa ser bool")
         if not isinstance(self.image, np.ndarray) or self.image.ndim not in (2, 3):
             raise ValueError("image precisa ser um ndarray 2D ou (H, W, 3)")
         if self.image.ndim == 3 and (
@@ -247,21 +242,6 @@ class WarpedPage:
             view = mask.view()
             view.flags.writeable = False
             object.__setattr__(self, name, view)
-
-
-@dataclass(frozen=True, slots=True)
-class InkBaselineState:
-    """Immutable readiness snapshot for the optional page-clean baseline."""
-
-    enabled: bool
-    started: bool
-    ready: bool
-    complete: bool
-    captured_px: int
-    target_px: int
-    pending_px: int
-    fraction: float
-    phase: str
 
 
 @dataclass(frozen=True, slots=True)

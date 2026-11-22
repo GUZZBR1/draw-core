@@ -114,3 +114,46 @@ def test_telemetry_snapshot_is_a_copy(monkeypatch):
         assert len(fresh["records"]) == 1
     finally:
         worker.stop()
+
+
+def test_telemetry_pass_s_includes_page_model_and_registration_work(monkeypatch):
+    """Issue 8: pass_s inclui o trabalho de registro e PageModel apos a inferencia."""
+    from draw.ink import page_model as pm_mod
+    from draw.ink.config import InkConfig
+
+    now = [100.0]
+
+    class _InstantInk:
+        threshold = 0.7
+
+        def ink_mask(self, _warped):
+            now[0] += 0.010
+            return np.zeros((H, W), dtype=np.uint8)
+
+    orig_observe = pm_mod.PageModel.observe
+
+    def _timed_observe(self, *args, **kwargs):
+        now[0] += 0.045
+        return orig_observe(self, *args, **kwargs)
+
+    monkeypatch.setattr(pm_mod.PageModel, "observe", _timed_observe)
+    worker = worker_mod.PageCleanWorker(
+        _InstantInk(),
+        clock=lambda: now[0],
+        config=InkConfig(page_model=True),
+    )
+    generation = worker.new_generation()
+    warp = np.full((H, W, 3), 235, dtype=np.uint8)
+    worker.submit(WarpedPage(warp, generation))
+    assert worker.pump()
+    record = worker.telemetry_snapshot()["records"][-1]
+    assert record["pass_s"] >= 0.055 - 1e-6
+    assert record["pass_s"] == pytest.approx(
+        worker.stats()["pass_ms"] / 1000.0, abs=1e-4
+    )
+    assert (
+        record["submitted_at"]
+        <= record["pass_started_at"]
+        <= record["pass_ended_at"]
+        <= record["published_at"]
+    )

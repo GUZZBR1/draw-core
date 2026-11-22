@@ -5,35 +5,8 @@ from collections import deque
 import cv2
 import numpy as np
 
-from ..contracts import InkBaselineState
 from . import hysteresis, identity, registration, votes
 from .config import InkConfig
-
-_BASELINE_CHANGE_THRESHOLD = 0.15
-
-# Estado da referencia page-clean: o que reset_baseline zera e o que
-# take_baseline/restore_baseline movem juntos.
-_BASELINE_STATE = (
-    "_baseline_allowed",
-    "_baseline_capture_scratch",
-    "_baseline_change_threshold",
-    "_baseline_changed",
-    "_baseline_current_coverage",
-    "_baseline_effective",
-    "_baseline_exact_max",
-    "_baseline_guard",
-    "_baseline_has_guard",
-    "_baseline_kernel",
-    "_baseline_last_coverage_source",
-    "_baseline_not_guard",
-    "_baseline_pending_px",
-    "_baseline_reference_max",
-    "_baseline_removal_visible",
-    "_baseline_seen",
-    "_baseline_started",
-    "_baseline_target",
-    "_baseline_target_px",
-)
 
 
 class LayeredInkAccumulator:
@@ -62,7 +35,7 @@ class LayeredInkAccumulator:
         self._config = config if config is not None else InkConfig()
         self.reset()
 
-    def reset(self, *, preserve_hold=False):
+    def reset(self):
         self._window = deque(maxlen=votes._INK_VOTE_WINDOW)
         self._removal_streak = None
         self._confirmed = None
@@ -74,233 +47,7 @@ class LayeredInkAccumulator:
         self._score_buf = None
         self._hits_buf = None
         self._seen_buf = None
-        if not preserve_hold:
-            self._hold = None
-        self.reset_baseline()
-
-    def reset_baseline(self):
-        """Descarta a referencia sem tocar nas camadas da tinta."""
-        for name in _BASELINE_STATE:
-            setattr(self, name, None)
-        self._baseline_has_guard = False
-        self._baseline_started = False
-        self._baseline_target_px = 0
-        self._baseline_pending_px = 0
-
-    def take_baseline(self):
-        """Move a referencia para fora do acumulador (identidade pendente).
-
-        Devolve o estado para restore_baseline, ou None sem referencia.
-        """
-        if not self._config.baseline or self._baseline_seen is None:
-            self.reset_baseline()
-            return None
-        state = {name: getattr(self, name) for name in _BASELINE_STATE}
-        self.reset_baseline()
-        return state
-
-    def restore_baseline(self, state):
-        """Devolve a referencia movida por take_baseline (same_page)."""
-        if state is None:
-            return
-        for name, value in state.items():
-            setattr(self, name, value)
-
-    def baseline_state(self):
-        """Prontidao e cobertura capturada da referencia atual."""
-        if not self._config.baseline:
-            return InkBaselineState(
-                False, False, False, False, 0, 0, 0, 0.0, "disabled"
-            )
-        captured_px = self._baseline_target_px - self._baseline_pending_px
-        ready = captured_px > 0
-        complete = ready and self._baseline_pending_px == 0
-        phase = (
-            "stabilizing"
-            if not self._baseline_started
-            else "ready"
-            if complete
-            else "ready_partial"
-            if ready
-            else "waiting_visibility"
-        )
-        return InkBaselineState(
-            True,
-            self._baseline_started,
-            ready,
-            complete,
-            captured_px,
-            self._baseline_target_px,
-            self._baseline_pending_px,
-            0.0
-            if self._baseline_target_px == 0
-            else captured_px / self._baseline_target_px,
-            phase,
-        )
-
-    def _baseline_filter(self, prob, visible, capture_allowed, coverage):
-        """Captura areas visiveis e veta evidencia page-clean inalterada.
-
-        O mapa recebido ja esta registrado na grade ancora. A margem espacial
-        absorve residuos de registro; novos tracos que cruzam conteudo antigo
-        seguem elegiveis quando elevam a probabilidade sobre a referencia.
-        """
-        if not self._config.baseline:
-            return prob, visible
-
-        shape = prob.shape
-        if self._baseline_seen is None or self._baseline_seen.shape != shape:
-            self.reset_baseline()
-            self._baseline_seen = np.zeros(shape, dtype=bool)
-            self._baseline_guard = np.zeros(shape, dtype=bool)
-            self._baseline_allowed = np.zeros(shape, dtype=bool)
-            self._baseline_not_guard = np.ones(shape, dtype=bool)
-            self._baseline_exact_max = np.zeros(shape, dtype=np.float32)
-            self._baseline_reference_max = np.zeros(shape, dtype=np.float32)
-            self._baseline_change_threshold = np.full(shape, np.inf, dtype=np.float32)
-            self._baseline_changed = np.zeros(shape, dtype=bool)
-            self._baseline_removal_visible = np.zeros(shape, dtype=bool)
-            self._baseline_capture_scratch = np.zeros(shape, dtype=np.float32)
-            self._baseline_effective = np.zeros(shape, dtype=bool)
-
-        current_coverage = (
-            np.ones(shape, dtype=bool)
-            if coverage is None
-            else np.asarray(coverage, dtype=bool)
-        )
-        if current_coverage.shape != shape:
-            current_coverage = np.ones(shape, dtype=bool)
-        self._baseline_current_coverage = current_coverage
-
-        if capture_allowed and not self._baseline_started:
-            self._baseline_started = True
-            self._baseline_target = current_coverage.copy()
-            self._baseline_target_px = int(np.count_nonzero(self._baseline_target))
-            self._baseline_pending_px = self._baseline_target_px
-        elif (
-            capture_allowed
-            and self._baseline_started
-            and coverage is not None
-            and coverage is not self._baseline_last_coverage_source
-        ):
-            newly_covered = current_coverage & ~self._baseline_target
-            newly_covered_px = int(np.count_nonzero(newly_covered))
-            if newly_covered_px:
-                np.logical_or(
-                    self._baseline_target, newly_covered, out=self._baseline_target
-                )
-                self._baseline_target_px += newly_covered_px
-                self._baseline_pending_px += newly_covered_px
-        if capture_allowed:
-            self._baseline_last_coverage_source = coverage
-
-        if capture_allowed and self._baseline_started and self._baseline_pending_px:
-            candidates = current_coverage & self._baseline_target & ~self._baseline_seen
-            if visible is not None:
-                candidates &= visible
-            captured_px = int(np.count_nonzero(candidates))
-            if captured_px:
-                np.logical_or(self._baseline_seen, candidates, out=self._baseline_seen)
-                source = cv2.compare(prob, self._config.vote_hit, cv2.CMP_GE) > 0
-                np.logical_and(source, candidates, out=source)
-                source_pixels = int(np.count_nonzero(source))
-                if self._config.baseline_margin_px:
-                    margin = self._config.baseline_margin_px
-                    if self._baseline_kernel is None:
-                        self._baseline_kernel = np.ones(
-                            (2 * margin + 1, 2 * margin + 1), np.uint8
-                        )
-                    source = cv2.dilate(source.astype(np.uint8), self._baseline_kernel)
-                    self._baseline_has_guard |= source_pixels > 0
-                    source = source > 0
-                else:
-                    self._baseline_has_guard |= source_pixels > 0
-                np.logical_or(self._baseline_guard, source, out=self._baseline_guard)
-                np.copyto(self._baseline_capture_scratch, 0.0)
-                np.copyto(self._baseline_capture_scratch, prob, where=candidates)
-                if self._config.baseline_margin_px:
-                    neighborhood = cv2.dilate(
-                        self._baseline_capture_scratch, self._baseline_kernel
-                    )
-                else:
-                    neighborhood = self._baseline_capture_scratch
-                np.maximum(
-                    self._baseline_exact_max,
-                    self._baseline_capture_scratch,
-                    out=self._baseline_exact_max,
-                )
-                np.maximum(
-                    self._baseline_reference_max,
-                    neighborhood,
-                    out=self._baseline_reference_max,
-                )
-                np.logical_not(self._baseline_guard, out=self._baseline_not_guard)
-                np.logical_and(
-                    self._baseline_seen,
-                    self._baseline_not_guard,
-                    out=self._baseline_allowed,
-                )
-                np.logical_and(
-                    self._baseline_seen,
-                    self._baseline_guard,
-                    out=self._baseline_changed,
-                )
-                # Dois criterios. No pixel impresso o aumento vale
-                # contra a propria captura (exact + delta — um drift de
-                # centesimos nao reconfirma a impressao como tinta
-                # nova). Em paralelo todo pixel da guarda enfrenta a
-                # referencia da vizinhanca + delta — a margem contra
-                # drift de registro — com teto de 0.99 para nao vetar
-                # para sempre o traco que cruza a borda de uma
-                # impressao escura: 1.0 ainda passa.
-                np.copyto(self._baseline_change_threshold, np.inf)
-                np.add(
-                    self._baseline_exact_max,
-                    _BASELINE_CHANGE_THRESHOLD,
-                    out=self._baseline_change_threshold,
-                    where=self._baseline_changed,
-                )
-                np.add(
-                    self._baseline_reference_max,
-                    _BASELINE_CHANGE_THRESHOLD,
-                    out=self._baseline_capture_scratch,
-                    where=self._baseline_changed,
-                )
-                np.minimum(
-                    self._baseline_capture_scratch,
-                    np.float32(0.99),
-                    out=self._baseline_capture_scratch,
-                    where=self._baseline_changed,
-                )
-                np.maximum(
-                    self._baseline_change_threshold,
-                    self._baseline_capture_scratch,
-                    out=self._baseline_change_threshold,
-                    where=self._baseline_changed,
-                )
-                self._baseline_pending_px = max(
-                    0, self._baseline_pending_px - captured_px
-                )
-
-        if capture_allowed and self._baseline_started and self._baseline_has_guard:
-            np.greater(
-                prob,
-                self._baseline_change_threshold,
-                out=self._baseline_changed,
-            )
-            np.logical_or(
-                self._baseline_allowed,
-                self._baseline_changed,
-                out=self._baseline_effective,
-            )
-        else:
-            np.copyto(self._baseline_effective, self._baseline_allowed)
-        effective_visible = (
-            self._baseline_effective
-            if visible is None
-            else self._baseline_effective & visible
-        )
-        return prob, effective_visible
+        self._hold = None
 
     def restore_confirmed(self, confirmed):
         """Devolve uma copia confirmada ao canvas, unida ao que o
@@ -358,29 +105,12 @@ class LayeredInkAccumulator:
             np.logical_or(seen, item > self.threshold, out=seen)
         return score, hits, seen
 
-    def would_freeze(self, paper_ok, shape=None):
-        """Mascara booleana de pixels congelados por paper_ok/hold sem mutar estado."""
-        if paper_ok is None:
-            return None
-        paper_ok = np.asarray(paper_ok, dtype=bool)
-        if shape is not None and paper_ok.shape != shape:
-            return None
-        if self._hold is None or self._hold.shape != paper_ok.shape:
-            hold = np.zeros(paper_ok.shape, dtype=np.uint8)
-        else:
-            hold = self._hold.copy()
-            np.subtract(hold, 1, out=hold, where=hold > 0)
-        hold[~paper_ok] = self._config.occlusion_hold_passes + 1
-        return ~paper_ok | (hold > 0)
-
     def add(
         self,
         prob,
         visible=None,
         *,
         removal_allowed=True,
-        baseline_capture=False,
-        baseline_coverage=None,
         valid_mask=None,
         paper_ok=None,
     ):
@@ -435,10 +165,6 @@ class LayeredInkAccumulator:
             self._hold[~paper_ok] = self._config.occlusion_hold_passes + 1
             frozen = ~paper_ok | (self._hold > 0)
             visible = ~frozen if visible is None else visible & ~frozen
-        physical_visible = visible
-        prob, visible = self._baseline_filter(
-            prob, visible, baseline_capture, baseline_coverage
-        )
         confirmed_before = self._confirmed > 0
         canvas_before = int(np.count_nonzero(self._confirmed))
         # Oclusao e guarda: pixel que a passada nao pode julgar (a
@@ -550,78 +276,22 @@ class LayeredInkAccumulator:
             # real: a mascara de oclusao do chamador, ou o dominio
             # geometrico da guarda. O ~frozen dobrado no visible via
             # paper_ok nao e visao da passada — nao vale sozinho.
-            removal_inspected = inspected
-            reset_visible = visible
-            baseline_suppressed = None
-            if self._config.baseline:
-                # Com baseline o visible desta passada ja vem filtrado
-                # pela referencia: o dominio da remocao e o fisico
-                # (cobertura ou canvas, a vista, ja capturado), cruzado
-                # com a guarda geometrica.
-                removal_inspected = None
-                reset_visible = physical_visible
-                if had_visibility and physical_visible is not None and canvas_before:
-                    np.logical_or(
-                        self._baseline_current_coverage,
-                        confirmed_before,
-                        out=self._baseline_removal_visible,
-                    )
-                    np.logical_and(
-                        self._baseline_removal_visible,
-                        physical_visible,
-                        out=self._baseline_removal_visible,
-                    )
-                    np.logical_and(
-                        self._baseline_removal_visible,
-                        self._baseline_seen,
-                        out=self._baseline_removal_visible,
-                    )
-                    if valid_mask is not None:
-                        np.logical_and(
-                            self._baseline_removal_visible,
-                            valid_mask,
-                            out=self._baseline_removal_visible,
-                        )
-                    removal_inspected = self._baseline_removal_visible
-                    # "Ausente" e prob consistente com a referencia salva
-                    # (<= max da propria captura + delta ou da vizinhanca),
-                    # nao "fora do effective desta passada": nas passadas sem
-                    # captura o effective nao recebe o override de mudanca e
-                    # todo pixel do guard pareceria apagado — um traco vivo
-                    # sobre marca impressa ganharia streak de remocao.
-                    np.less_equal(
-                        prob,
-                        self._baseline_change_threshold,
-                        out=self._baseline_not_guard,
-                    )
-                    np.logical_and(
-                        self._baseline_seen,
-                        self._baseline_guard,
-                        out=self._baseline_changed,
-                    )
-                    np.logical_and(
-                        self._baseline_changed,
-                        self._baseline_not_guard,
-                        out=self._baseline_changed,
-                    )
-                    baseline_suppressed = self._baseline_changed
             if (
                 removal_allowed
                 and canvas_before
-                and removal_inspected is not None
                 and (had_visibility or valid_mask is not None)
             ):
-                retained = np.count_nonzero(
-                    confirmed_before & removal_inspected & mask_now
-                )
+                retained = np.count_nonzero(confirmed_before & inspected & mask_now)
                 witnessed = (
                     retained >= registration._REMOVAL_RETAINED_FRACTION * canvas_before
                     or retained >= registration._REMOVAL_WITNESS_FLOOR_PX
                 )
-                absent = np.isfinite(prob) & (prob <= registration._REMOVAL_LOW_PROB)
-                if baseline_suppressed is not None:
-                    absent |= np.isfinite(prob) & baseline_suppressed
-                missing = confirmed_before & removal_inspected & absent
+                missing = (
+                    confirmed_before
+                    & inspected
+                    & np.isfinite(prob)
+                    & (prob <= registration._REMOVAL_LOW_PROB)
+                )
                 # O reset NAO depende da testemunha: ela so governa o
                 # que conta como ausencia. Sem ela, pixel fora do
                 # dominio inspecionado (guarda que alargou por cima
@@ -639,8 +309,8 @@ class LayeredInkAccumulator:
                 # retained 1,5k~13,9k alternando no sim-hand, streak
                 # nunca completava).
                 resettable = ~missing
-                if reset_visible is not None:
-                    resettable &= reset_visible
+                if visible is not None:
+                    resettable &= visible
                 self._removal_streak[resettable] = 0
                 if witnessed:
                     self._removal_streak[missing] = np.minimum(

@@ -21,7 +21,6 @@ from draw.contracts import (
     HandOcclusion,
     HandPresenceResult,
     HandSample,
-    InkBaselineState,
     InkDisplaySnapshot,
 )
 from draw.ink import registration as registration_mod
@@ -86,10 +85,8 @@ class _FakeInkWorker:
         self.submitted = []  # (generation, corners, visible, coverage)
         self.new_generation_calls = []
         self.presence_calls = []
-        self.baseline_invalidations = 0
         self.pages = []
         self._display = display
-        self._baseline_state = None
 
     def new_generation(self, preserve_identity=False):
         self.generation += 1
@@ -117,12 +114,6 @@ class _FakeInkWorker:
 
     def set_hand_presence(self, present, moved=False):
         self.presence_calls.append((present, moved))
-
-    def invalidate_baseline(self):
-        self.baseline_invalidations += 1
-
-    def baseline_state(self):
-        return self._baseline_state
 
 
 class _FakeHandPresenceWorker:
@@ -238,108 +229,6 @@ def test_coverage_mask_gates_votes_off_sheet():
     assert gated[-1].shape == (720, 1280)
     assert not gated[-1][:, 320:].any()
     assert gated[-1][10:700, 50:280].all()
-
-
-def test_pipeline_marks_baseline_stable_after_corner_history_settles():
-    loop, _det, ink = _make_loop(
-        lambda _i: (QUAD.copy(), "paper", None),
-        config=PipelineConfig(ink=InkConfig(baseline=True), **_BASE),
-    )
-    _drive(loop, 40)
-    assert ink.pages
-    assert ink.pages[0].baseline_stable is False
-    assert any(page.baseline_stable for page in ink.pages)
-
-
-def test_pipeline_stabilizes_baseline_from_fresh_detections_without_hand():
-    results = [
-        HandPresenceResult(index, (index - 1) * 0.1, 0, HandSample(False, False))
-        for index in range(1, 40)
-    ]
-    hp = _FakeHandPresenceWorker(results=results)
-    loop, _det, ink = _make_loop(
-        lambda _i: (QUAD.copy(), "paper", None),
-        config=PipelineConfig(ink=InkConfig(baseline=True), **_BASE),
-        hand_presence=hp,
-    )
-
-    _drive(loop, 20)
-
-    assert loop.clean_hand_present is False
-    assert len(loop.corner_history) == 1  # normal ink geometry stays frozen
-    assert any(page.baseline_stable for page in ink.pages)
-
-
-def test_pipeline_recaptures_baseline_after_small_shift_without_hand():
-    results = [
-        HandPresenceResult(index, (index - 1) * 0.1, 0, HandSample(False, False))
-        for index in range(1, 50)
-    ]
-    hp = _FakeHandPresenceWorker(results=results)
-    shifted_quad = QUAD + np.float32([10.0, 0.0])
-
-    def detect(i):
-        return (QUAD.copy() if i < 6 else shifted_quad.copy()), "paper", None
-
-    loop, _det, ink = _make_loop(
-        detect,
-        config=PipelineConfig(ink=InkConfig(baseline=True), **_BASE),
-        hand_presence=hp,
-    )
-    ink._baseline_state = InkBaselineState(
-        True, True, True, True, 100, 100, 0, 1.0, "ready"
-    )
-    _drive(loop, 20)
-    ink._baseline_state = InkBaselineState(
-        True, False, False, False, 0, 0, 0, 0.0, "recapturing"
-    )
-    before = len(ink.pages)
-    _drive(loop, 40)
-    recapture_pages = [p for p in ink.pages[before:] if p.baseline_stable]
-    assert recapture_pages
-    assert recapture_pages[-1].corners[0, 0] > QUAD[0, 0] + 4.0
-
-
-def test_baseline_status_always_uses_the_same_frozen_contract():
-    disabled_loop, _det, _ink = _make_loop(lambda _i: (None, None, None))
-    disabled = disabled_loop.ink_baseline_state()
-    waiting_loop, _det, _ink = _make_loop(
-        lambda _i: (QUAD.copy(), "paper", None),
-        config=PipelineConfig(ink=InkConfig(baseline=True), **_BASE),
-    )
-    waiting = waiting_loop.ink_baseline_state()
-    _drive(waiting_loop, 10)
-    active = waiting_loop.ink_baseline_state()
-
-    assert all(
-        isinstance(state, InkBaselineState) for state in (disabled, waiting, active)
-    )
-    fields = tuple(InkBaselineState.__dataclass_fields__)
-    assert all(
-        tuple(state.__dataclass_fields__) == fields
-        for state in (disabled, waiting, active)
-    )
-    assert disabled.phase == "disabled"
-    assert waiting.phase == "waiting_page"
-    assert active.phase == "stabilizing"
-
-
-def test_pipeline_waits_for_moving_quad_to_settle_before_baseline_capture():
-    def moving_quad(index):
-        corners = QUAD.copy()
-        corners[:, 0] += min(index, 4) * 8.0
-        return corners, "paper", None
-
-    loop, _det, ink = _make_loop(
-        moving_quad,
-        config=PipelineConfig(ink=InkConfig(baseline=True), **_BASE),
-    )
-    _drive(loop, 20)
-    assert ink.pages
-    assert not any(page.baseline_stable for page in ink.pages)
-
-    _drive(loop, 90)
-    assert any(page.baseline_stable for page in ink.pages)
 
 
 def test_paper_mean_bgr_hits_integer_boundary():
@@ -982,7 +871,7 @@ def test_drop_clears_canvas_without_persist():
 def test_drop_keeps_canvas_with_persist():
     """canvas_persist: a queda congela o canvas — o usuário segue
     vendo o desenho enquanto a folha não é re-adquirida."""
-    loop, _det, ink = _make_loop(_seen_then_lost())
+    loop, _det, _ink = _make_loop(_seen_then_lost())
     _drive(loop, 8)
     canvas = np.ones((100, 100), np.uint8) * 255
     loop.clean_mask = canvas.copy()
@@ -990,7 +879,6 @@ def test_drop_keeps_canvas_with_persist():
     assert loop.generation_events["drop"] >= 1
     assert loop.clean_mask is not None
     np.testing.assert_array_equal(loop.clean_mask, canvas)
-    assert ink.baseline_invalidations >= 1
 
 
 def test_drop_arms_identity_recovery_for_the_reopen():
@@ -1407,7 +1295,6 @@ def test_reset_source_restarts_the_ink_as_a_new_page():
     opened = len(ink.new_generation_calls)
 
     loop.reset_source(since=1000.0)
-    assert ink.baseline_invalidations == 1
     assert loop.ink_session_open is False
     assert loop.clean_recovery_pending is False
     assert loop.clean_mask is None and loop.accumulated_canvas is None
