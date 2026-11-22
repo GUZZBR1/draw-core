@@ -2666,16 +2666,21 @@ def test_identity_clipped_rule_hand_on_shifted_stroke_keeps_hold():
     """worker.py:830: recorte fixo; a posicao salva (29-30) visivel e
     inconclusiva, a mao cobre so a posicao deslocada (27-28) dentro da
     pegada: o hold anterior persiste; sem a mao, o recorte sozinho nao
-    segura."""
+    segura. O hold vem de um quadro anterior com a mao sobre a regra
+    projetada ainda dentro da pegada."""
     run, vis = _clipped_rule_scene()
+    on_rule = vis.copy()
+    on_rule[32:34, :] = False
+    first = run(on_rule, vis)
+    assert first[6] == "occlusion" and first[7] is True
     clip = vis.copy()
     clip[32:, :] = False
     hand = clip.copy()
     hand[27:29, :] = False
-    covered = run(hand, clip, True)
+    covered = run(hand, clip, first[7])
     assert covered[5] is True and covered[6] == "occlusion"
     assert covered[7] is True
-    lifted = run(clip, clip, True)
+    lifted = run(clip, clip, covered[7])
     assert lifted[5] is True and lifted[7] is False
 
 
