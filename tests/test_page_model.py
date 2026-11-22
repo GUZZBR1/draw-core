@@ -2458,6 +2458,78 @@ def test_page_model_wide_shifted_band_clean_copy_rejects(monkeypatch):
         worker.stop()
 
 
+def test_saved_tone_evidence_hidden_projected_rule_stays_ambiguous():
+    """page_model.py:818: regra parada (95, linhas 34-35), alinhamento
+    medindo -2 e a mao sobre a posicao projetada (32-33): o veto depende
+    de amostra escondida — o traco (65 -> 85) nao e distinto nem casado."""
+    model = pm_mod.PageModel((H, W))
+    form = np.full((H, W), PAPER, dtype=np.float32)
+    form[34:36, 10:110] = 95.0
+    vis = np.ones((H, W), dtype=bool)
+    for _ in range(4):
+        model.observe(form, visible=vis, paper=vis)
+    levels = np.full((H, W), np.nan, dtype=np.float32)
+    levels[29:31, 25:105] = 65.0
+    at = np.zeros((H, W), dtype=bool)
+    at[29:31, 25:105] = True
+    gray = form.copy()
+    gray[29:31, 25:105] = 85.0
+    hand = vis.copy()
+    hand[32:34, :] = False
+    distinct, matched = model.saved_tone_evidence(
+        gray, levels, at, dy=-2, dx=0, near=3, visible=hand
+    )
+    assert not distinct[29:31, 25:105].any()
+    assert not matched.any()
+    # A mao sai: a regra provadamente ficou e o traco reaparece.
+    distinct, matched = model.saved_tone_evidence(
+        gray, levels, at, dy=-2, dx=0, near=3, visible=vis
+    )
+    assert distinct[29:31, 25:105].all()
+    assert matched[29:31, 25:105].all()
+
+
+def test_page_model_hidden_projected_rule_does_not_discard_canvas(monkeypatch):
+    """page_model.py:818: a mao cobre a posicao projetada da regra vizinha
+    durante todo o consenso de troca: a mesma folha nao vota new_page e
+    restaura quando a mao sai."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        form = _ruled_form()
+        written = form.copy()
+        written[29:31, 25:105] = 65.0
+        _, before = _saved_sheet(worker, form, written)
+        assert before >= 120
+
+        returned = np.full((H, W), PAPER, dtype=np.float32)
+        returned[34:36, 10:110] = 95.0
+        returned[64:66, 10:110] = 95.0
+        returned[80:82, 10:110] = 95.0
+        returned[29:31, 25:105] = 85.0
+        vis = np.ones((H, W), dtype=bool)
+        hand = vis.copy()
+        hand[32:34, :] = False
+        frames = identity_mod._PAGE_IDENTITY_SWITCH_CONSENSUS_FRAMES
+        gen2 = worker.new_generation(preserve_identity=True)
+        for _ in range(frames + 1):
+            _drive(worker, gen2, returned, visible=hand)
+        decisions = [
+            e["decision"] for e in worker.telemetry_snapshot()["page_identity_events"]
+        ]
+        assert "new_page" not in decisions
+        for _ in range(2):
+            _drive(worker, gen2, returned, visible=vis)
+        decisions = [
+            e["decision"] for e in worker.telemetry_snapshot()["page_identity_events"]
+        ]
+        assert "new_page" not in decisions
+        assert decisions[-1] == "same_page"
+        assert int(np.count_nonzero(_confirmed(worker, gen2)[29:31, 25:105])) == 160
+    finally:
+        worker.stop()
+
+
 def _ruled_form():
     form = np.full((H, W), PAPER, dtype=np.float32)
     form[34:36, 10:110] = 95.0

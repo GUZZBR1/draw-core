@@ -710,7 +710,9 @@ class PageModel:
           pauta deslocada, o reproduz. Lapis de 70 colado a pauta de
           40 e distinto (a pior aparencia vizinha nao o imita); traco
           de 40 colado a pauta de 40 nao. Tom desconhecido ou nenhuma
-          referencia alcancavel: False.
+          referencia alcancavel: False. Tambem False onde o unico veto
+          ao match vem de pauta do quadro medido cuja amostra esta
+          escondida — nem presenca nem ausencia provada (ambiguo).
         - matched_obs: posicoes observadas (a salva ou a deslocada, na
           grade atual) de pixel distinto onde o tom salvo reapareceu
           dentro de `novel_delta` — presenca provada pela aparencia.
@@ -747,6 +749,8 @@ class PageModel:
             else self._normalized(gray, visible)
         )
         vis = None if visible is None else np.asarray(visible, dtype=bool)
+        matched_saved = np.zeros(self.shape, dtype=bool)
+        unsure_saved = np.zeros(self.shape, dtype=bool)
         for oy, ox in {(0, 0), (int(dy), int(dx))}:
             qy, qx = ys + oy, xs + ox
             ok = (qy >= 0) & (qy < height) & (qx >= 0) & (qx < width)
@@ -769,8 +773,9 @@ class PageModel:
             # que tambem ficou.
             near_i = int(near)
             clean_gap = _nearest_reference_gap(ref_inf, py, px, obs, near_i)
+            unsure = None
             if (oy, ox) != (int(dy), int(dx)) and py.size:
-                moved_ref, my0, mx0 = self._moved_reference(
+                moved_ref, known_ref, my0, mx0 = self._moved_reference(
                     ref_inf,
                     norm_gray,
                     vis,
@@ -780,46 +785,67 @@ class PageModel:
                     int(dy),
                     int(dx),
                 )
+                ry, rx = py - int(dy) - my0, px - int(dx) - mx0
+                known_gap = np.minimum(
+                    clean_gap, _nearest_reference_gap(known_ref, ry, rx, obs, near_i)
+                )
                 np.minimum(
                     clean_gap,
-                    _nearest_reference_gap(
-                        moved_ref, py - int(dy) - my0, px - int(dx) - mx0, obs, near_i
-                    ),
+                    _nearest_reference_gap(moved_ref, ry, rx, obs, near_i),
                     out=clean_gap,
                 )
+                unsure = (saved_gap <= self.novel_delta) & (saved_gap < known_gap)
             hit = (saved_gap <= self.novel_delta) & (saved_gap < clean_gap)
             matched_obs[qy[hit], qx[hit]] = True
+            matched_saved[py[hit], px[hit]] = True
+            if unsure is not None:
+                # Veto so por referencia cuja amostra do quadro medido
+                # esta escondida (ou fora da grade): nem presenca nem
+                # ausencia provada — o pixel volta a ser ambiguo.
+                unsure &= ~hit
+                unsure_saved[py[unsure], px[unsure]] = True
+        distinct &= ~(unsure_saved & ~matched_saved)
         return distinct, matched_obs
 
     @staticmethod
     def _moved_reference(ref_inf, norm_gray, vis, cy, cx, reach, dy, dx):
-        """Recorte de `ref_inf` cobrindo (cy, cx) +- reach, com inf so onde
-        a aparencia limpa provadamente FICOU no lugar: a observacao em r
-        reproduz ref[r] mais de `_RETURN_TOL` melhor que a observacao em
-        r + (dy, dx), ambas visiveis. Amostra que nao distingue as duas
-        posicoes (faixa larga cobrindo ambas, oclusao, borda) mantem a
-        referencia. Devolve (recorte, y0, x0).
+        """Recortes de `ref_inf` cobrindo (cy, cx) +- reach para o quadro
+        medido (dy, dx). Devolve (moved, known, y0, x0):
+
+        - moved: inf so onde a aparencia limpa provadamente FICOU no
+          lugar — a observacao em r reproduz ref[r] mais de
+          `_RETURN_TOL` melhor que a em r + (dy, dx), ambas visiveis.
+          Amostra que nao distingue as duas posicoes (faixa larga
+          cobrindo ambas, oclusao, borda) mantem a referencia.
+        - known: `moved` tambem com inf onde alguma das duas amostras
+          esta escondida ou fora da grade — so a referencia julgada
+          pela aparencia visivel.
         """
         height, width = ref_inf.shape
         y0 = max(int(cy.min()) - reach, 0)
         y1 = min(int(cy.max()) + reach + 1, height)
         x0 = max(int(cx.min()) - reach, 0)
         x1 = min(int(cx.max()) + reach + 1, width)
-        sub = ref_inf[y0:y1, x0:x1].copy()
+        moved = ref_inf[y0:y1, x0:x1].copy()
+        known = np.full(moved.shape, np.inf, dtype=np.float32)
         ty0, ty1 = max(y0, -dy), min(y1, height - dy)
         tx0, tx1 = max(x0, -dx), min(x1, width - dx)
         if ty1 <= ty0 or tx1 <= tx0:
-            return sub, y0, x0
+            return moved, known, y0, x0
         ref = ref_inf[ty0:ty1, tx0:tx1]
         here = norm_gray[ty0:ty1, tx0:tx1]
         there = norm_gray[ty0 + dy : ty1 + dy, tx0 + dx : tx1 + dx]
         stayed = np.abs(here - ref) + _RETURN_TOL < np.abs(there - ref)
+        judged = np.ones(ref.shape, dtype=bool)
         if vis is not None:
-            stayed &= (
+            judged = (
                 vis[ty0:ty1, tx0:tx1] & vis[ty0 + dy : ty1 + dy, tx0 + dx : tx1 + dx]
             )
-        sub[ty0 - y0 : ty1 - y0, tx0 - x0 : tx1 - x0][stayed] = np.inf
-        return sub, y0, x0
+            stayed &= judged
+        win = (slice(ty0 - y0, ty1 - y0), slice(tx0 - x0, tx1 - x0))
+        moved[win][stayed] = np.inf
+        known[win] = np.where(judged & ~stayed, ref, np.inf)
+        return moved, known, y0, x0
 
     @property
     def observed_normalized_gray(self):
