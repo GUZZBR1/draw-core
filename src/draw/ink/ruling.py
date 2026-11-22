@@ -646,8 +646,8 @@ def _bulk_ext(vals):
 
 def _match_tracks(t_left, pass_left, t_right, pass_right):
     """Pares (k_left, k_right) com geometria próxima E toque vertical na costura."""
-    pat_l, yi_l, v_left, _ = pass_left
-    pat_r, yi_r, v_right, _ = pass_right
+    pat_l, yi_l, v_left = pass_left.pattern, pass_left.yi, pass_left.valid
+    pat_r, yi_r, v_right = pass_right.pattern, pass_right.yi, pass_right.valid
     y_l = t_left.paths[:, -1]
     y_r = t_right.paths[:, 0]
     tol = max(float(_R), 0.35 * min(t_left.period, t_right.period))
@@ -744,6 +744,49 @@ class _SideStats(NamedTuple):
     ext: np.ndarray | None  # (K,) int — extensão grossa por linha
     has_bulk: bool  # linhas bastantes p/ medir o ombro do conjunto
     bulk: int  # ombro típico DO conjunto medido
+
+
+class _Pass(NamedTuple):
+    """Passada de uma trilha: janela amostrada + alturas medidas."""
+
+    pattern: np.ndarray  # (K, X) padrão de bits da janela vertical
+    yi: np.ndarray  # (K, X) linha central do caminho
+    valid: np.ndarray  # (K, X) bool — caminho dentro da folha
+    run: np.ndarray  # (K, X) int — altura da tinta sobre o caminho
+
+
+@dataclass(frozen=True)
+class _PageFold:
+    """Carga da página para o veredito do vinco, conferida na fronteira.
+
+    A alfândega é o `__post_init__`: trilhas, passadas e mapas grossos
+    atravessam alinhados por índice (um por segmento); `matches` é por
+    divisa entre vizinhos (len == len(tracks) - 1). Carga fora de
+    compasso é recusada antes de qualquer veredito.
+    """
+
+    tracks: list  # _Track por segmento
+    passes: list  # _Pass alinhado a `tracks`
+    thick: list  # (K, X) bool — tinta acima da pauta, alinhado a `tracks`
+    matches: list  # pares (k_l, k_r) por divisa entre trilhas vizinhas
+
+    def __post_init__(self):
+        n = len(self.tracks)
+        aligned = (
+            len(self.passes) == n
+            and len(self.thick) == n
+            and len(self.matches) in (n - 1, 0)
+        )
+        if not aligned:
+            raise ValueError("carga do vinco desalinhada")
+
+    def check_joined(self, joined_list):
+        """Confere a saída do veredito: uma máscara por trilha, no shape da grossa."""
+        ok = len(joined_list) == len(self.thick) and all(
+            j.shape == r.shape for j, r in zip(joined_list, self.thick, strict=True)
+        )
+        if not ok:
+            raise ValueError("veredito do vinco desalinhado com a carga")
 
 
 def _trace_ink_run(ink, yc0, seam_col, limit, direction, stop_col, clip_r=2 * _R):
@@ -1078,7 +1121,7 @@ def _project_line(
     return True
 
 
-def _joined_through_bands(tracks, thick, valid_list, gutter_full, matches, ink, h_run):
+def _joined_through_bands(page, gutter_full, ink, h_run):
     """Lista de máscaras (K, X): trecho da linha na faixa que continua grosso fora dela.
 
     Cada faixa física de `gutter_full` é julgada uma vez só: linhas pareadas
@@ -1086,6 +1129,8 @@ def _joined_through_bands(tracks, thick, valid_list, gutter_full, matches, ink, 
     faixa usam a floresta conectada de `_project_forest`, marcando apenas as
     colunas efetivamente visitadas por caminhos com continuação qualificada.
     """
+    tracks, thick, matches = page.tracks, page.thick, page.matches
+    valid_list = [p.valid for p in page.passes]
     joined = [np.zeros_like(raw) for raw in thick]
     edges = np.flatnonzero(
         np.diff(np.concatenate([[0], gutter_full.view(np.uint8), [0]]))
@@ -1406,17 +1451,18 @@ def _shade_deviations(run, gutter, valid):
     return above, strong
 
 
-def _stroke_on_shade_tracks(tracks, passes, valid_list, gutter_full, matches):
+def _stroke_on_shade_tracks(page, gutter_full):
     """Lista de máscaras (K, X) de traços na sombra, contando desvios através da divisa."""
-    strokes = [np.zeros_like(v) for v in valid_list]
+    tracks, matches = page.tracks, page.matches
+    strokes = [np.zeros_like(p.valid) for p in page.passes]
     if not tracks or not gutter_full.any():
         return strokes
     devs = [None] * len(tracks)
-    for i, (t, (_p, _y, valid, run)) in enumerate(zip(tracks, passes, strict=True)):
+    for i, (t, p) in enumerate(zip(tracks, page.passes, strict=True)):
         gutter = gutter_full[t.x0 : t.x1]
         if not gutter.any():
             continue
-        above, strong = _shade_deviations(run, gutter, valid)
+        above, strong = _shade_deviations(p.run, gutter, p.valid)
         devs[i] = (above, strong)
         strokes[i] = _long_runs(above, _STROKE_RUN, _STROKE_RUN) | _long_runs(
             strong, _STROKE_SHORT_RUN, _STROKE_SHORT_RUN
@@ -1495,17 +1541,16 @@ def erase_tracks(prob, tracks, h_pauta):
                 shift_total += delta
                 pattern, yi, valid = track.window(ink)
                 run = np.where(valid, run_t[pattern], 0).astype(np.int16)
-        passes.append((pattern, yi, valid, run))
+        passes.append(_Pass(pattern, yi, valid, run))
     # Âncora = cruzamento de verdade: run vertical acima da pauta em
     # >= 2 colunas SEGUIDAS. Um ponto isolado é flutuação de espessura da
     # própria pauta (medido no e5: 14% dos pontos, runs de 6 a 13 px) e,
     # tratado como âncora, protegia 5 colunas e deixava a pauta tracejada.
-    thick = [run > h_run + _THIN_MARGIN for _p, _y, _v, run in passes]
-    valid_list = [v for _p, _y, v, _r in passes]
+    thick = [p.run > h_run + _THIN_MARGIN for p in passes]
     gutter_full = _gutter_mask(
         [
-            (t.x0, t.x1, raw, v)
-            for t, raw, v in zip(tracks, thick, valid_list, strict=True)
+            (t.x0, t.x1, raw, p.valid)
+            for t, raw, p in zip(tracks, thick, passes, strict=True)
         ],
         w,
     )
@@ -1520,30 +1565,28 @@ def erase_tracks(prob, tracks, h_pauta):
         if gutter_full.any()
         else []
     )
-    joined_list = _joined_through_bands(
-        tracks, thick, valid_list, gutter_full, matches, ink, h_run
-    )
-    shade_strokes = _stroke_on_shade_tracks(
-        tracks, passes, valid_list, gutter_full, matches
-    )
-    for i, (track, (pattern, yi, _valid, run), raw) in enumerate(
-        zip(tracks, passes, thick, strict=True)
+    page = _PageFold(tracks, passes, thick, matches)
+    joined_list = _joined_through_bands(page, gutter_full, ink, h_run)
+    page.check_joined(joined_list)
+    shade_strokes = _stroke_on_shade_tracks(page, gutter_full)
+    for i, (track, p, raw) in enumerate(
+        zip(page.tracks, page.passes, page.thick, strict=True)
     ):
-        jstar = jstar_t[pattern].astype(np.int64)
-        thin = (run >= 1) & (run <= h_run + _THIN_MARGIN)
+        jstar = jstar_t[p.pattern].astype(np.int64)
+        thin = (p.run >= 1) & (p.run <= h_run + _THIN_MARGIN)
         gutter = gutter_full[track.x0 : track.x1]
         if gutter.any():
-            shaded = (run >= 1) & (run <= cap) & gutter[None, :]
+            shaded = (p.run >= 1) & (p.run <= cap) & gutter[None, :]
             shaded &= ~joined_list[i]
             shaded &= ~shade_strokes[i]
             thin |= shaded
-            raw = raw & ~(gutter[None, :] & (run <= cap))
+            raw = raw & ~(gutter[None, :] & (p.run <= cap))
         anchor = np.zeros_like(raw)
         both = raw[:, 1:] & raw[:, :-1]
         anchor[:, 1:] |= both
         anchor[:, :-1] |= both
         protect = _dilate_cols(anchor, _ANCHOR_PAD)
-        centers = yi + jstar
+        centers = p.yi + jstar
         cols = (np.arange(track.paths.shape[1]) + track.x0)[None, :]
         peak = flat_prob.take(np.clip(centers, 0, h - 1) * w + cols)
         if track.base_level is None:
@@ -1560,8 +1603,8 @@ def erase_tracks(prob, tracks, h_pauta):
             continue
         # apaga a corrida (+1 linha de franja de cada lado) coluna a coluna,
         # uma passada por linha do span, por índice plano (1D)
-        up = up_t[pattern[ks, xs]].astype(np.int64)
-        length = run[ks, xs].astype(np.int64) + 2
+        up = up_t[p.pattern[ks, xs]].astype(np.int64)
+        length = p.run[ks, xs].astype(np.int64) + 2
         top = centers[ks, xs] - up - 1
         flat_cols = xs + track.x0
         for j in range(int(length.max())):
