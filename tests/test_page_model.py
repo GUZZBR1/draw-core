@@ -969,6 +969,50 @@ def test_page_model_resets_on_new_page_after_deferred_occlusion(monkeypatch):
         worker.stop()
 
 
+def test_page_model_clean_copy_does_not_inherit_hidden_sketch(monkeypatch):
+    """Review PR #145: folha limpa do mesmo formulario com a pauta
+    impressa vizinha do rascunho nao restaura o desenho velho — a
+    dilatacao do recall nao pode contar a pele da pauta como escrita."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        gen1 = worker.new_generation()
+        vis_all = np.ones((H, W), dtype=bool)
+        form = np.full((H, W), PAPER, dtype=np.float32)
+        # Marca impressa curta [40:42, 47:60], 2 px acima do rascunho.
+        form[40:42, 47:60] = 95.0
+        for _ in range(3):
+            _drive(worker, gen1, form, visible=vis_all)
+        assert np.count_nonzero(_confirmed(worker, gen1)) == 0
+
+        # Rascunho manuscrito de 15 px logo abaixo da marca.
+        with_dash = form.copy()
+        with_dash[44:47, 50:55] = INK
+        for _ in range(7):
+            _drive(worker, gen1, with_dash, visible=vis_all)
+        assert np.count_nonzero(_confirmed(worker, gen1)) == 15
+
+        # Copia limpa: mesma pauta, um pouco mais escura — a pele de
+        # 1 px fora da mascara aprendida entra em `seen`, a 2-3 px da
+        # posicao salva do rascunho (dentro do raio do recall).
+        clean_copy = np.full((H, W), PAPER, dtype=np.float32)
+        clean_copy[40:43, 47:60] = 95.0
+        gen2 = worker.new_generation(preserve_identity=True)
+        _drive(worker, gen2, clean_copy, visible=vis_all)
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] != "same_page"
+        assert np.count_nonzero(_confirmed(worker, gen2)) == 0
+
+        for _ in range(identity_mod._PAGE_IDENTITY_SWITCH_CONSENSUS_FRAMES):
+            _drive(worker, gen2, clean_copy, visible=vis_all)
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] == "new_page"
+        confirmed = _confirmed(worker, gen2)
+        assert np.count_nonzero(confirmed[44:47, 50:55]) == 0
+    finally:
+        worker.stop()
+
+
 def test_page_model_does_not_seed_synthetic_fill_when_coverage_expands(monkeypatch):
     """Issue 6: preenchimento sintetico fora de coverage nao semeia baseline."""
     monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)

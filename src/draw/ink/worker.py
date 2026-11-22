@@ -525,10 +525,9 @@ def _evaluate_page_identity(
             max(
                 1,
                 max(
-                    identity._IDENTITY_MIN_VISIBLE_PX,
+                    identity._IDENTITY_MIN_VISIBLE_PX - ambig_visible_px,
                     int(identity._IDENTITY_MIN_VISIBLE_FRACTION * prior_domain_px),
-                )
-                - ambig_visible_px,
+                ),
             ),
         )
         if prior_eval_px < min_eval_px:
@@ -609,6 +608,19 @@ def _evaluate_page_identity(
         )
     if inspected is not None:
         seen = seen & inspected
+    if has_baseline:
+        # A evidencia que sustenta o match tem de distinguir
+        # escrita de pauta: o pixel exato da tinta salva
+        # (re-observado) ou pixel fora do alcance dilatado da
+        # marca impressa. Pele da pauta vazada por alinhamento
+        # imperfeito entrava em `seen` e a dilatacao do recall a
+        # projetava sobre a escrita escondida — uma folha limpa
+        # do mesmo formulario herdava o desenho.
+        baseline_src = (
+            aligned_baseline if prior_excluded is not None else identity_baseline
+        )
+        baseline_d = cv2.dilate(baseline_src.astype(np.uint8), kernel) > 0
+        seen = seen & (~baseline_d | prior_eval)
     seen_d = cv2.dilate(seen.astype(np.uint8), kernel) > 0
     prior_d = cv2.dilate(prior_eval.astype(np.uint8), kernel) > 0
     recall = np.count_nonzero(prior_eval & seen_d) / prior_eval_px
@@ -618,17 +630,23 @@ def _evaluate_page_identity(
         recall >= identity._PAGE_IDENTITY_MIN_RECALL
         and containment >= identity._PAGE_IDENTITY_MIN_CONTAINMENT
     )
-    if keep_page and prior_domain_px < min(
-        prior_guard_px,
+    coverage_bound = max(
+        1,
         max(
-            1,
-            max(
-                identity._IDENTITY_MIN_VISIBLE_PX,
-                int(identity._PAGE_IDENTITY_MIN_REFERENCE_FRACTION * prior_guard_px),
-            )
-            - ambig_visible_px,
+            identity._IDENTITY_MIN_VISIBLE_PX - ambig_visible_px,
+            int(identity._PAGE_IDENTITY_MIN_REFERENCE_FRACTION * prior_guard_px),
         ),
-    ):
+    )
+    # Sem baseline impresso alinhado, o piso e o absoluto da
+    # referencia classica: tinta menor que a massa minima nao
+    # prova a folha. Com baseline, o alinhamento da pauta ancora
+    # a comparacao e o piso nao pode exigir mais do que a massa
+    # julgavel inteira — senao uma marca de 20 px nunca
+    # restauraria.
+    coverage_floor = (
+        min(prior_guard_px, coverage_bound) if has_baseline else coverage_bound
+    )
+    if keep_page and prior_domain_px < coverage_floor:
         # Fragmento: a pegada alcancou so uma fatia da referencia
         # julgavel — restaurar o resto seria aceitar como prova o
         # que a passada nunca comparou. Inconclusivo geometrico:
@@ -643,17 +661,7 @@ def _evaluate_page_identity(
             "no_overlap",
             False,
         )
-    if keep_page and prior_eval_px < min(
-        prior_guard_px,
-        max(
-            1,
-            max(
-                identity._IDENTITY_MIN_VISIBLE_PX,
-                int(identity._PAGE_IDENTITY_MIN_REFERENCE_FRACTION * prior_guard_px),
-            )
-            - ambig_visible_px,
-        ),
-    ):
+    if keep_page and prior_eval_px < coverage_floor:
         # A geometria alcancou a referencia, mas a mao cobre a
         # maior parte da tinta julgavel: o match na fatia visivel
         # nao distingue a mesma folha de uma substituta cujas
@@ -2984,6 +2992,14 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 if p.visible is None
                 else (p.visible if pm_coverage is None else (p.visible & pm_coverage))
             )
+            if p.sampled is not None:
+                # O PageModel aprende so onde a passada amostrou de
+                # verdade: o padding do registro nao pode semear a
+                # referencia de pagina limpa em regioes que o
+                # acumulador rejeita pela pegada.
+                obs_visible = (
+                    p.sampled if obs_visible is None else (obs_visible & p.sampled)
+                )
             # Papel coberto agora pela mao (mascara fisica), ainda sem
             # referencia: conta para a prontidao. Pixel visivel que a
             # guarda recusa como papel (logo escuro, impressao densa)
