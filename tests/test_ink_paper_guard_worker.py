@@ -6,7 +6,7 @@ import time
 import numpy as np
 
 from draw.contracts import WarpedPage
-from draw.ink import occlusion, votes
+from draw.ink import occlusion, registration, votes
 from draw.ink import worker as worker_mod
 from draw.ink.config import InkConfig
 
@@ -117,6 +117,48 @@ def test_control_without_guard_erases_under_the_same_hand(monkeypatch):
         for _ in range(14):
             _pass(worker, generation, _hand_image())
         assert not worker.poll(generation, 0).confirmed[COVERED].any()
+    finally:
+        worker.stop()
+
+
+def test_legacy_mode_holds_an_armed_streak_when_the_witness_dies(monkeypatch):
+    """Regressao (Devin Review do PR #144): o modo legado (paper_guard
+    desligado) entregava paper_exposed=True ao acumulador — lido como
+    "avaliacao fotometrica aprovada" — e um streak de remocao armado sob
+    testemunha viva drenava sozinho quando o modelo perdia o resto da
+    tinta (sombra cobrindo tudo), apagando traco confirmado sem nenhuma
+    prova de papel. Sem avaliacao o opt-out entrega None e o voto
+    pendurado segura (contrato legado), nao completa."""
+    worker, ink, generation = _run(monkeypatch, InkConfig(paper_guard=False))
+    try:
+        # Arma o streak: COVERED some da leitura e a testemunha segue —
+        # no modo legado isso ja basta para contar ausencias.
+        ink.content = _prob(covered_ink=False)
+        for _ in range(3):
+            _pass(worker, generation, _paper())
+        streak = worker._accumulator._removal_streak
+        assert streak is not None and int(streak[COVERED].max()) > 0
+        # A sombra espalha e o modelo perde o desenho inteiro: sem
+        # testemunha, o streak armado congela em vez de drenar — com
+        # paper_exposed=True ele completava a remocao no escuro.
+        ink.content = np.zeros((H, W), np.float32)
+        for _ in range(registration._REMOVAL_PASSES + 4):
+            _pass(worker, generation, _paper())
+        snap = worker.poll(generation, 0)
+        assert snap.confirmed[COVERED].all()
+        assert snap.confirmed[WITNESS].all()
+        assert (
+            int(worker._accumulator._removal_streak[COVERED].max())
+            < registration._REMOVAL_PASSES
+        )
+        # A sombra sai com a tinta intacta: a leitura volta e o streak
+        # pendurado zera — nada fica armado esperando a proxima falta.
+        ink.content = _prob()
+        for _ in range(3):
+            _pass(worker, generation, _paper())
+        snap = worker.poll(generation, 0)
+        assert snap.confirmed[COVERED].all()
+        assert snap.confirmed[WITNESS].all()
     finally:
         worker.stop()
 

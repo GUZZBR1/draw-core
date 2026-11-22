@@ -3683,11 +3683,16 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 )
         p.paper_ok = paper_ok
         # Sem a guarda o comportamento é o legado: a evidência
-        # de papel exposto não rege a remoção. Guarda ligada sem
-        # avaliação na passada (imagem fora do contrato fotométrico)
-        # falha fechada para a remoção: nada prova papel, a ausência
-        # não pode ser testemunhada — incerteza congela.
-        paper_exposed = True
+        # de papel exposto não rege a remoção — mas também não há
+        # avaliação fotométrica, então o opt-out entrega None (sem
+        # avaliação), não True: com True o acumulador lia "avaliação
+        # aprovada" e um streak de remoção armado drenava sem
+        # testemunha nem prova de papel (Devin Review do PR #144).
+        # Guarda ligada sem avaliação na passada (imagem fora do
+        # contrato fotométrico) falha fechada para a remoção: nada
+        # prova papel, a ausência não pode ser testemunhada —
+        # incerteza congela.
+        paper_exposed = None
         if self._config.paper_guard:
             paper_exposed = False
         physical_visible = p.visible
@@ -3722,9 +3727,12 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # As duas testemunhas de papel votam juntas na remocao:
             # so conta onde a guarda fotometrica E a referencia de
             # papel provam exposicao — fail-closed. Quem se abstem
-            # (paper_ok None, sem referencia ainda) deixa o outro
-            # falar sozinho; quem nega papel congela a regiao.
-            paper_exposed = paper_exposed & p.paper_ok
+            # (paper_ok None, sem referencia ainda, ou a guarda
+            # desligada no modo legado) deixa o outro falar sozinho;
+            # quem nega papel congela a regiao.
+            paper_exposed = (
+                p.paper_ok if paper_exposed is None else paper_exposed & p.paper_ok
+            )
         p.paper_exposed = paper_exposed
         last_reg = registration_used
         if self._config.page_model and p.pass_voted:
