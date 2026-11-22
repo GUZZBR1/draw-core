@@ -209,6 +209,44 @@ def _reg_triple(anchor, reg_corners, corners):
     )
 
 
+def _shift_bool_mask(mask, dy, dx):
+    if dy == 0 and dx == 0:
+        return mask
+    h, w = mask.shape
+    out = np.zeros_like(mask, dtype=bool)
+    src_y0 = max(0, -dy)
+    src_y1 = min(h, h - dy)
+    src_x0 = max(0, -dx)
+    src_x1 = min(w, w - dx)
+    if src_y1 <= src_y0 or src_x1 <= src_x0:
+        return out
+    out[src_y0 + dy : src_y1 + dy, src_x0 + dx : src_x1 + dx] = mask[
+        src_y0:src_y1, src_x0:src_x1
+    ]
+    return out
+
+
+def _align_identity_baseline(identity_baseline, seen, prior, radius):
+    base_nonprior = identity_baseline & ~prior
+    if radius <= 0 or not np.any(base_nonprior) or not np.any(seen):
+        return identity_baseline
+    best_overlap = int(np.count_nonzero(base_nonprior & seen))
+    best_dy, best_dx = 0, 0
+    best_dist = 0
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            if dy == 0 and dx == 0:
+                continue
+            shifted_nonprior = _shift_bool_mask(base_nonprior, dy, dx)
+            overlap = int(np.count_nonzero(shifted_nonprior & seen))
+            dist = abs(dy) + abs(dx)
+            if overlap > best_overlap or (overlap == best_overlap and dist < best_dist):
+                best_overlap = overlap
+                best_dy, best_dx = dy, dx
+                best_dist = dist
+    return _shift_bool_mask(identity_baseline, best_dy, best_dx)
+
+
 @dataclass(slots=True)
 class _Pass:
     """Scratch mutavel de uma passada da trabalhadora.
@@ -1792,25 +1830,31 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         (identity._IDENTITY_DILATION_KERNEL,) * 2, np.uint8
                     )
                     if has_baseline:
-                        baseline_d = (
-                            cv2.dilate(identity_baseline.astype(np.uint8), kernel) > 0
-                        )
-                        seen = seen & ~identity_baseline & ~(baseline_d & ~prior)
-                        seen_d = (
-                            cv2.dilate((seen & ~baseline_d).astype(np.uint8), kernel)
-                            > 0
-                        ) | seen
+                        prior_eval = prior & ~identity_baseline
+                        if not np.any(prior_eval):
+                            prior_eval = prior
+                        else:
+                            radius = identity._IDENTITY_DILATION_KERNEL // 2
+                            aligned_baseline = _align_identity_baseline(
+                                identity_baseline, seen, prior_eval, radius
+                            )
+                            seen = seen & ~aligned_baseline
                     else:
-                        seen_d = cv2.dilate(seen.astype(np.uint8), kernel) > 0
+                        prior_eval = prior
+                    prior_eval_px = int(np.count_nonzero(prior_eval))
+                    seen_d = cv2.dilate(seen.astype(np.uint8), kernel) > 0
                     if identity_visible is not None:
-                        prior_visible = prior & identity_visible
+                        prior_visible = prior_eval & identity_visible
                         prior_visible_px = int(np.count_nonzero(prior_visible))
                         p.identity_visible_reference_px = prior_visible_px
                         min_visible_px = min(
-                            prior_px,
+                            prior_eval_px,
                             max(
                                 identity._IDENTITY_MIN_VISIBLE_PX,
-                                int(identity._IDENTITY_MIN_VISIBLE_FRACTION * prior_px),
+                                int(
+                                    identity._IDENTITY_MIN_VISIBLE_FRACTION
+                                    * prior_eval_px
+                                ),
                             ),
                         )
                         if prior_visible_px < min_visible_px:
@@ -1845,8 +1889,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                                 >= identity._PAGE_IDENTITY_MIN_CONTAINMENT
                             )
                     else:
-                        prior_d = cv2.dilate(prior.astype(np.uint8), kernel) > 0
-                        p.identity_recall = np.count_nonzero(prior & seen_d) / prior_px
+                        prior_d = cv2.dilate(prior_eval.astype(np.uint8), kernel) > 0
+                        p.identity_recall = (
+                            np.count_nonzero(prior_eval & seen_d) / prior_eval_px
+                        )
                         seen_px = int(np.count_nonzero(seen))
                         p.identity_containment = (
                             0.0

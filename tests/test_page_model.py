@@ -439,13 +439,63 @@ def test_page_model_clean_replacement_with_adjacent_print_rejects_old_tick(
         assert events[-1]["decision"] == "same_page"
         assert np.count_nonzero(_confirmed(worker, gen2)[20:25, 55:57]) == 10
 
-        # Caso 2: copia limpa do formulario (sem o tick manuscrito) entra -> new_page limpa o tick
+        # Caso 1b (R1798-1802): a mesma folha retorna com residuo de 1 px para a esquerda
+        # (impresso em [20:25, 49:54], tick em [20:25, 54:56]) -> same_page preserva o tick
+        shifted_with_tick = np.full((H, W), PAPER, dtype=np.float32)
+        shifted_with_tick[20:25, 49:54] = INK
+        shifted_with_tick[10:15, 9:39] = INK
+        shifted_with_tick[20:25, 54:56] = INK
+        gen2b = worker.new_generation(preserve_identity=True)
+        _drive(worker, gen2b, shifted_with_tick, visible=vis_all)
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] == "same_page"
+        assert np.count_nonzero(_confirmed(worker, gen2b)[20:25, 55:57]) == 10
+
+        # Caso 2: copia limpa do formulario (sem o tick manuscrito, mesmo deslocada 1 px)
+        # entra -> new_page limpa o tick
+        shifted_form = np.full((H, W), PAPER, dtype=np.float32)
+        shifted_form[20:25, 49:54] = INK
+        shifted_form[10:15, 9:39] = INK
         gen3 = worker.new_generation(preserve_identity=True)
         for _ in range(identity_mod._PAGE_IDENTITY_SWITCH_CONSENSUS_FRAMES):
-            _drive(worker, gen3, form, visible=vis_all)
+            _drive(worker, gen3, shifted_form, visible=vis_all)
         events = worker.telemetry_snapshot()["page_identity_events"]
         assert events[-1]["decision"] == "new_page"
         assert np.count_nonzero(_confirmed(worker, gen3)) == 0
+    finally:
+        worker.stop()
+
+
+def test_page_model_reacquires_ink_traced_over_printed_guide_line(monkeypatch):
+    """R1798-1802: tinta desenhada sobre pauta impressa nao derruba recall na reaquisicao."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        gen1 = worker.new_generation()
+        vis_all = np.ones((H, W), dtype=bool)
+        # Pauta impressa com luminancia 95 (acima do limiar de tinta do stub, mas mais clara que INK=40)
+        PRINTED_GUIDE = 95.0
+        form = np.full((H, W), PAPER, dtype=np.float32)
+        form[30:36, 20:90] = PRINTED_GUIDE
+        for _ in range(3):
+            _drive(worker, gen1, form, visible=vis_all)
+        assert np.count_nonzero(_confirmed(worker, gen1)) == 0
+
+        # Usuario traca por cima da pauta impressa (70% sobre o baseline, 30% fora)
+        traced = form.copy()
+        traced[31:35, 30:65] = INK  # 140 px sobre a pauta impressa
+        traced[36:38, 40:60] = INK  # 40 px saindo da pauta
+        for _ in range(4):
+            _drive(worker, gen1, traced, visible=vis_all)
+        confirmed_before = int(np.count_nonzero(_confirmed(worker, gen1)))
+        assert confirmed_before == 180
+
+        # A mesma folha retorna -> same_page preserva toda a tinta confirmada
+        gen2 = worker.new_generation(preserve_identity=True)
+        _drive(worker, gen2, traced, visible=vis_all)
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] == "same_page"
+        assert int(np.count_nonzero(_confirmed(worker, gen2))) == confirmed_before
     finally:
         worker.stop()
 
