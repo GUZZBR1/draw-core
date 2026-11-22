@@ -745,23 +745,23 @@ def _trace_ink_run(ink, yc0, seam_col, limit, direction, stop_col, clip_r=2 * _R
 
 
 def _trace_branch_out(ink, x_start, top0, bot0, limit, direction, h_run, need, stop):
-    """(ok, ext, x_end, end_runs): continuação grossa fora da faixa até `stop` colunas.
+    """[(ext, x_end, top, bot)] por caminho conectado que completou a janela.
 
-    `x_end`/`end_runs` são a última coluna medida e os intervalos nela: a
-    evidência de "seguiu pauta" sai do próprio ramo, não da vizinhança.
+    Cada intervalo vivo carrega a própria sequência de espessura: quando a
+    continuação bifurca, cada ramo passa a responder pelo próprio fim — uma
+    ponta seguindo pauta não classifica o irmão que vai para o branco.
     """
     h = ink.shape[0]
-    active = [(top0, bot0)]
-    out_thick = []
-    last = (x_start, active)
+    active = [(top0, bot0, ())]
+    ends = []  # (hist, x_fim, top, bot) de cada caminho encerrado
+    x = x_start
     for x in range(x_start + direction, limit, direction):
         col = ink[:, x]
         nxt = []
-        for pt, pb in active:
+        for pt, pb, hist in active:
             pc = (pt + pb) // 2
             lo, hi = max(0, pt), min(h, pb + 1)
-            if not col[lo:hi].any():
-                continue
+            grew = False
             for hit in np.flatnonzero(col[lo:hi]) + lo:
                 if nxt and hit <= nxt[-1][1]:
                     continue
@@ -770,21 +770,33 @@ def _trace_branch_out(ink, x_start, top0, bot0, limit, direction, h_run, need, s
                     top -= 1
                 while bot + 1 < h and col[bot + 1] and (bot + 1) - pc <= 2 * _R:
                     bot += 1
-                nxt.append((top, bot))
+                nxt.append((top, bot, hist))
+                grew = True
+            if not grew:
+                ends.append((hist, x - direction, pt, pb))
         if not nxt:
+            active = []
             break
-        active = nxt
-        is_thick = any((b - t + 1) > h_run + _THIN_MARGIN for t, b in active)
-        out_thick.append(is_thick)
-        last = (x, active)
-        if len(out_thick) >= need and (not is_thick or len(out_thick) >= stop):
+        active = []
+        for top, bot, hist in nxt:
+            h2 = hist + ((bot - top + 1) > h_run + _THIN_MARGIN,)
+            if len(h2) >= need and (not h2[-1] or len(h2) >= stop):
+                ends.append((h2, x, top, bot))
+            else:
+                active.append((top, bot, h2))
+        if not active:
             break
-    if len(out_thick) < need:
-        return False, 0, None, []
-    arr = np.array(out_thick, bool)[None, :]
-    if arr[:, :need].mean() < _VOTE_FRAC:
-        return False, 0, None, []
-    return True, int(_extent(arr, need)[0]), last[0], last[1]
+    for top, bot, hist in active:
+        ends.append((hist, x, top, bot))
+    out = []
+    for hist, x_end, top_e, bot_e in ends:
+        if len(hist) < need:
+            continue
+        arr = np.array(hist, bool)[None, :]
+        if arr[:, :need].mean() < _VOTE_FRAC:
+            continue
+        out.append((int(_extent(arr, need)[0]), x_end, top_e, bot_e))
+    return out
 
 
 def _mark_visited_track(joined_track, track, valid_track, visited):
@@ -836,11 +848,12 @@ def _project_forest(
 ):
     """(visited_src, visited_dst): traça floresta na costura e filtra ramos terminais.
 
-    O veto de ombro é por ramo: só vale quando a continuação do próprio ramo
-    aterrissa numa pauta do destino — na ponta da faixa ou no fim da
-    continuação — e não passa do ombro comum daquele lado. Ramos terminando
-    em espaço em branco não têm ombro de referência e não são vetados. A
-    janela exigida nunca passa do espaço observável (`min(need, espaço)`).
+    O veto de ombro é por caminho conectado: só vale quando a continuação
+    do próprio caminho acaba numa pauta do destino sem passar do ombro
+    comum daquele lado. Caminhos terminando em espaço em branco não têm
+    ombro de referência e não são vetados — uma ponta irmã seguindo pauta
+    não decide por eles. A janela exigida é sempre `need`: sem espaço para
+    medi-la, quem decide é o chamador (abster), não a continuação parcial.
     """
     if not valid_src[seam_col - t_src.x0]:
         return [], []
@@ -853,19 +866,25 @@ def _project_forest(
     qual_tips = []
     for tid in tips:
         x_e, top_e, bot_e, _ = nodes[tid]
-        ok, ext, x_end, end_runs = _trace_branch_out(
+        paths = _trace_branch_out(
             ink, x_e, top_e, bot_e, limit_dst, direction, h_run, need, stop_dst
         )
-        if not ok:
+        # o veto de ombro decide por caminho: só descarta quando TODA
+        # continuação qualificada acaba curta sobre pauta do destino — um
+        # irmão de sombra não veta o ramo que termina em espaço em branco
+        clean = False
+        for ext, x_end, top_e, bot_e in paths:
+            shadow = (
+                has_dst
+                and t_dst is not None
+                and ext <= bulk_dst + _GUTTER_EDGE_RUN
+                and _lands_on_track(t_dst, valid_dst, x_end, top_e, bot_e)
+            )
+            if not shadow:
+                clean = True
+                break
+        if not clean:
             continue
-        if has_dst and t_dst is not None:
-            lands = _lands_on_track(t_dst, valid_dst, x_e, top_e, bot_e)
-            if not lands and x_end is not None:
-                lands = any(
-                    _lands_on_track(t_dst, valid_dst, x_end, t, b) for t, b in end_runs
-                )
-            if lands and ext <= bulk_dst + _GUTTER_EDGE_RUN:
-                continue
         qual_tips.append(tid)
         cur = tid
         while cur != -1:
@@ -893,10 +912,9 @@ def _project_forest(
             )
             for tb in tips_b:
                 x_b, t_b, b_b, _ = nodes_b[tb]
-                ok, _e, _x, _r = _trace_branch_out(
+                if not _trace_branch_out(
                     ink, x_b, t_b, b_b, limit_src, -direction, h_run, need, need + 1
-                )
-                if not ok:
+                ):
                     continue
                 cur = tb
                 while cur != -1:
@@ -1076,10 +1094,15 @@ def _joined_through_bands(tracks, thick, valid_list, gutter_full, matches, ink, 
                     ok_l &= cl
                 if vr is not None and l_edge and cr is not None:
                     ok_r &= cr
-            if l_edge and ok_l is None:
-                ok_l = np.ones(kl.size, bool)
-            if r_edge and ok_r is None:
-                ok_r = np.ones(kl.size, bool)
+            if l_edge and r_edge:
+                # nenhum lado observável: sem evidência não há isenção —
+                # sombra cobrindo o crop inteiro sai por completo
+                ok_l = ok_r = np.zeros(kl.size, bool)
+            else:
+                if l_edge and ok_l is None:
+                    ok_l = np.ones(kl.size, bool)
+                if r_edge and ok_r is None:
+                    ok_r = np.ones(kl.size, bool)
 
             if not (l_short or r_short):
                 # os dois lados decididos por voto/borda: protege o trecho
@@ -1232,19 +1255,18 @@ def _joined_through_bands(tracks, thick, valid_list, gutter_full, matches, ink, 
 
         # 2. Linhas sem par na divisa (esq -> dir e dir -> esq)
         if i_l != i_r:
-            for i_s, i_d, matched_s, v_s, e_s, has_s, b_s, has_d, b_d, d in (
-                (i_l, i_r, kl, vote_l, ext_l, has_l, bulk_l, has_r, bulk_r, 1),
-                (i_r, i_l, kr, vote_r, ext_r, has_r, bulk_r, has_l, bulk_l, -1),
+            for i_s, i_d, matched_s, has_d, b_d, d in (
+                (i_l, i_r, kl, has_r, bulk_r, 1),
+                (i_r, i_l, kr, has_l, bulk_l, -1),
             ):
                 unmatched = np.setdiff1d(
                     np.arange(tracks[i_s].paths.shape[0]), matched_s
                 )
                 for k in unmatched:
-                    if v_s is not None and not v_s[k]:
-                        continue
-                    # ombro comum do próprio lado já descreve a linha: sombra
-                    if has_s and e_s[k] <= b_s + _GUTTER_EDGE_RUN:
-                        continue
+                    # o veredito sai do traço do destino: o ombro da origem é
+                    # provisório — um traco com comprimento de ombro pode
+                    # continuar em branco (ombro de verdade não passa do veto
+                    # por ramo)
                     _project_line(
                         ink,
                         tracks,

@@ -1446,3 +1446,48 @@ def test_a_fold_reaching_the_image_edge_with_a_short_tail_is_erased():
     prob2[y : y + 6, 0:1200] = 0.95  # traco real encostando na borda esquerda
     out = ruling.RulingFilter().apply(prob2.copy())
     assert (out[:, 6:1200] > 0.5).sum() == 0
+
+
+def test_unmatched_rule_with_source_shoulder_length_keeps_blank_continuation():
+    """Review: pautas defasadas (sem par na divisa) com ombros de 13 col na
+    origem; um traco entra com a mesma extensao de ombro (13 col) e continua
+    26 col em branco do lado do destino. O ombro da origem e provisorio —
+    a continuacao qualificada protege o trecho na pauta."""
+    prob = _fold_page(split_x=600, offset_r=20, left_sh=13)
+    y = 80 + 40 * 5  # 280: linha esquerda sem par na direita
+    prob[y : y + 6, 547:666] = 0.95  # 13 a esquerda, 26 em branco a direita
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[y : y + 6, 547:666] > 0.5).all()
+
+
+def test_fork_past_the_fold_keeps_blank_sibling_when_shadow_sibling_ends_on_a_rule():
+    """Review: traco segue a pauta pelo vinco, desce na faixa ate encostar na
+    pauta vizinha (que tem ombro de 13 col a direita) e termina 13 col depois
+    do vinco em espaco em branco. A ponta do irmao de sombra nao veta o ramo
+    independente do traco."""
+    prob = _fold_page(right_sh=13)
+    y = 80 + 40 * 5  # 280
+    stroke = np.zeros(prob.shape, bool)
+    stroke[y : y + 6, 540:600] = True
+    for x in range(600, 640):  # desce 1 px/col na faixa ate a pauta 320
+        dy = x - 600
+        stroke[y + dy : y + dy + 6, x] = True
+    for x in range(640, 654):  # 13 col de saida descendo para o branco
+        dy = 40 - (x - 640)
+        stroke[y + dy : y + dy + 6, x] = True
+    prob[stroke] = 0.95
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[stroke] > 0.5).all()
+
+
+def test_full_width_thick_ruling_without_observable_side_is_erased():
+    """Review: faixa cobrindo o crop inteiro ([0, w) - nenhum lado
+    observavel) nao pode ser isenta por voto de borda: sem evidencia de
+    continuacao, a pauta engrossada de ponta a ponta sai."""
+    prob = np.zeros((600, 1200), np.float32)
+    for k in range(12):
+        y = 80 + 40 * k
+        th = 7 if k % 3 != 0 else 2
+        prob[y : y + th, :] = 0.95
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out > 0.5).sum() == 0
