@@ -1833,3 +1833,9 @@ def test_a_midpoint_stroke_between_small_offset_rules_is_kept_by_policy():
     box = (slice(278, 296), slice(562, 638))
     out = ruling.RulingFilter().apply(prob.copy())
     assert ((out > 0.5)[box]).sum() == ((prob > 0.5)[box]).sum()
+    # o filtro RODOU: a sombra das outras pautas dentro da faixa sai, então a
+    # preservação acima é proteção de traço e não remoção pulada
+    others = (out > 0.5)[:, 562:638].copy()
+    others[278:296, :] = False
+    assert others.sum() == 0
+    assert (prob > 0.5)[:, 562:638].sum() > (out > 0.5)[:, 562:638].sum()
