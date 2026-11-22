@@ -726,7 +726,7 @@ class _Continuation(NamedTuple):
     cauda fina onde o traço parou não decide pousio nem veto de ombro.
     """
 
-    thick_cols: int  # colunas grossas dentro da janela de voto
+    ext: int  # extensão grossa medida por `_extent` (não é contagem de colunas)
     x: int
     top: int
     bot: int
@@ -761,21 +761,23 @@ class _PageFold:
 
     A alfândega é o `__post_init__`: trilhas, passadas e mapas grossos
     atravessam alinhados por índice (um por segmento); `matches` é por
-    divisa entre vizinhos (len == len(tracks) - 1). Carga fora de
-    compasso é recusada antes de qualquer veredito.
+    divisa entre vizinhos e só pode faltar quando `has_shade` é falso.
+    Carga fora de compasso é recusada antes de qualquer veredito.
     """
 
     tracks: list  # _Track por segmento
     passes: list  # _Pass alinhado a `tracks`
     thick: list  # (K, X) bool — tinta acima da pauta, alinhado a `tracks`
     matches: list  # pares (k_l, k_r) por divisa entre trilhas vizinhas
+    has_shade: bool  # sombra detectada: obriga uma entrada por divisa
 
     def __post_init__(self):
         n = len(self.tracks)
+        # com sombra, cada divisa entre vizinhas exige uma entrada (mesmo
+        # vazia); sem sombra, a carga de pares é vazia
+        want = n - 1 if self.has_shade else 0
         aligned = (
-            len(self.passes) == n
-            and len(self.thick) == n
-            and len(self.matches) in (n - 1, 0)
+            len(self.passes) == n and len(self.thick) == n and len(self.matches) == want
         )
         if not aligned:
             raise ValueError("carga do vinco desalinhada")
@@ -882,14 +884,21 @@ def _trace_branch_out(ink, x_start, top0, bot0, limit, direction, h_run, need, s
             active = []
             break
         active = []
+        seen = set()
         for top, bot, hist, lt in nxt:
             thick = (bot - top + 1) > h_run + _THIN_MARGIN
             h2 = hist + (thick,)
             lt2 = (x, top, bot) if thick else lt
             if len(h2) >= need and (not h2[-1] or len(h2) >= stop):
                 ends.append((h2, lt2))
-            else:
-                active.append((top, bot, h2, lt2))
+                continue
+            state = (top, bot, h2, lt2)
+            # reencontros repetidos podem produzir estados idênticos: sem
+            # dedup, cada cópia refaz o mesmo traço e dobra na próxima
+            # bifurcação (16 ciclos medidos: 65.536 caminhos, >2 s)
+            if state not in seen:
+                seen.add(state)
+                active.append(state)
         if not active:
             break
     for _top, _bot, hist, lt in active:
@@ -902,7 +911,7 @@ def _trace_branch_out(ink, x_start, top0, bot0, limit, direction, h_run, need, s
         if arr[:, :need].mean() < _VOTE_FRAC:
             continue
         out.append(_Continuation(int(_extent(arr, need)[0]), *lt))
-    return out
+    return list(dict.fromkeys(out))
 
 
 def _mark_visited_track(joined_track, track, valid_track, visited):
@@ -983,7 +992,7 @@ def _project_forest(
             shadow = (
                 has_dst
                 and t_dst is not None
-                and cont.thick_cols <= bulk_dst + _GUTTER_EDGE_RUN
+                and cont.ext <= bulk_dst + _GUTTER_EDGE_RUN
                 and _lands_on_track(t_dst, valid_dst, cont.x, cont.top, cont.bot)
             )
             if not shadow:
@@ -1565,7 +1574,7 @@ def erase_tracks(prob, tracks, h_pauta):
         if gutter_full.any()
         else []
     )
-    page = _PageFold(tracks, passes, thick, matches)
+    page = _PageFold(tracks, passes, thick, matches, bool(gutter_full.any()))
     joined_list = _joined_through_bands(page, gutter_full, ink, h_run)
     page.check_joined(joined_list)
     shade_strokes = _stroke_on_shade_tracks(page, gutter_full)

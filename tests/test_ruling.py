@@ -1526,3 +1526,42 @@ def test_thin_tip_off_the_rule_does_not_rescue_a_shadow_shoulder():
     out = ruling.RulingFilter().apply(prob.copy())
     assert (out[y : y + 6, 562:600] > 0.5).sum() == 0
     assert (out[320:326, 600:630] > 0.5).sum() == 0
+
+
+def test_repeated_reunions_do_not_duplicate_paths(monkeypatch):
+    """Review: separa/reencontra a cada ciclo produzia estados identicos que
+    dobravam por bifurcacao (16 ciclos -> 65.536 caminhos, >2 s por passada).
+    Estados iguais sao o mesmo caminho: o traco conta cada fim uma vez."""
+    calls = 0
+    extent = ruling._extent
+
+    def counting(arr, need):
+        nonlocal calls
+        calls += 1
+        return extent(arr, need)
+
+    monkeypatch.setattr(ruling, "_extent", counting)
+    h, w = 90, 46
+    ink = np.zeros((h, w), np.uint8)
+    ink[40:46, :] = 1  # pauta grossa
+    ink[48:54, :] = 1  # traco paralelo 2 px abaixo
+    ink[46:48, ::2] = 1  # ponte vertical: reencontro a cada 2 col
+    paths = ruling._trace_branch_out(ink, 0, 40, 53, w - 1, 1, 3, 12, 33)
+    assert paths  # a continuação grossa existe e qualifica
+    assert calls <= 16  # sem dedup seriam ~2^22 fins de caminho
+
+
+def test_thin_branch_after_reunion_does_not_borrow_thickness():
+    """Review: so a ponta fina sai da pauta depois do reencontro. Com
+    historias por camada ela nao herda as colunas grossas do traco: a
+    sombra nao tem continuacao qualificada e sai do vinco."""
+    prob = _fold_page()
+    y = 80 + 40 * 5  # 280
+    prob[y : y + 6, 540:600] = 0.95
+    for x in range(600, 640):  # dobra ate a pauta 320 na borda da faixa
+        dy = x - 600
+        prob[y + dy : y + dy + 6, x] = 0.95
+    prob[320:329, 640:643] = 0.95  # reencontro: bolha grossa traco+pauta
+    prob[323:325, 643:662] = 0.95  # so o esporro fino sai da pauta
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[320:326, 600:630] > 0.5).sum() == 0
