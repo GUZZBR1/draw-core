@@ -821,4 +821,138 @@ def test_baseline_recapture_uses_new_anchor_grid_after_reanchor(monkeypatch):
     current = worker._accumulator._baseline_current_coverage
     assert not np.any(current[8:56, 19:25])
     assert np.all(current[8:56, 31:35])
+    # A mascara registrada atualiza em qualquer add; o alvo da
+    # captura so cresce quando a recaptura roda — prova de que a
+    # grade nova alimentou o baseline, nao apenas a mascara.
+    assert np.all(worker._accumulator._baseline_target[8:56, 31:35])
     worker.stop()
+
+
+def test_recovery_keeps_partially_occluded_medium_sketch(monkeypatch):
+    """Rabisco de 34 px com 4 px sob o dedo: o piso proporcional
+    nao salta para 32 px exigidos logo acima da fronteira."""
+    from draw.ink import worker as worker_module
+
+    monkeypatch.setattr(worker_module, "_PAGE_CLEAN_INTERVAL_SECONDS", 0)
+    config = InkConfig(
+        baseline=True,
+        removal=False,
+        anchor_arbitration=False,
+        anchor_follow=False,
+    )
+    printed = np.zeros((H, W), dtype=np.float32)
+    printed[8:12, 4:44] = 0.95
+    model = _MutablePageClean(printed.copy())
+    worker = PageCleanWorker(model, config=config).start()
+    generation = worker.new_generation()
+    _submit_and_wait(worker, generation)
+
+    # Rabisco de 34 px: 17 linhas x 2 colunas.
+    drawing = printed.copy()
+    drawing[20:37, 22:24] = 0.95
+    model.prob = drawing
+    for _ in range(3):
+        _submit_and_wait(worker, generation)
+    saved_canvas = worker.poll(generation, 0).confirmed.copy()
+    assert np.any(saved_canvas)
+
+    # 4 px sob o dedo: 30 visiveis — um piso absoluto de 32 px
+    # adiaria a decisao ate o timeout; 25% de 34 pede so 8.
+    same_gen = worker.new_generation(preserve_identity=True)
+    occluded = np.ones((H, W), dtype=bool)
+    occluded[33:37, 23] = False
+    _submit_and_wait(worker, same_gen, visible=occluded)
+    assert np.array_equal(worker.poll(same_gen, 0).confirmed, saved_canvas)
+    assert (
+        worker.telemetry_snapshot()["page_identity_events"][-1]["decision"]
+        == "same_page"
+    )
+    worker.stop()
+
+
+def test_recovery_rejects_clean_copy_with_sketch_hidden_near_print(
+    monkeypatch,
+):
+    """Copia limpa com o dedo sobre a area do rabisco: a impressao
+    comum nao pode sustentar o recall — a evidencia de caligrafia
+    exclui o que a referencia de impressao salva explica."""
+    from draw.ink import worker as worker_module
+
+    monkeypatch.setattr(worker_module, "_PAGE_CLEAN_INTERVAL_SECONDS", 0)
+    config = InkConfig(
+        baseline=True,
+        removal=False,
+        anchor_arbitration=False,
+        anchor_follow=False,
+    )
+    printed = np.zeros((H, W), dtype=np.float32)
+    printed[8:12, 4:44] = 0.95
+    model = _MutablePageClean(printed.copy())
+    worker = PageCleanWorker(model, config=config).start()
+    generation = worker.new_generation()
+    _submit_and_wait(worker, generation)
+
+    # Traco a 2 px da linha impressa: fora da guarda da baseline
+    # (1 px de margem), dentro do raio de dilatacao do recall.
+    drawing = printed.copy()
+    drawing[13:21, 22:25] = 0.95
+    model.prob = drawing
+    for _ in range(3):
+        _submit_and_wait(worker, generation)
+    assert np.any(worker.poll(generation, 0).confirmed)
+
+    # Copia limpa da mesma folha impressa com o dedo cobrindo
+    # quase todo o traco: os 6 px expostos ficam a ate 3 px da
+    # impressao — sem a exclusao eles casariam com a impressao
+    # dilatada e manteriam o rabisco de outra folha.
+    clean_gen = worker.new_generation(preserve_identity=True)
+    occluded = np.ones((H, W), dtype=bool)
+    occluded[15:21, 22:25] = False
+    model.prob = printed.copy()
+    for _ in range(3):
+        _submit_and_wait(worker, clean_gen, visible=occluded)
+    decisions = [
+        event["decision"]
+        for event in worker.telemetry_snapshot()["page_identity_events"]
+    ]
+    assert "same_page" not in decisions
+    assert decisions[-1] == "new_page"
+    assert not np.any(worker.poll(clean_gen, 0).confirmed)
+    worker.stop()
+
+
+def test_crossing_stroke_over_dark_print_edge_confirms():
+    """A exigencia no pixel impresso e contra a propria captura +
+    delta e, em paralelo, contra o maximo da vizinhanca — sem
+    segunda margem: o traco que cruza a borda de uma impressao
+    escura nao fica vetado acima de 1.0."""
+    config = InkConfig(baseline=True, removal=False)
+    accumulator = LayeredInkAccumulator(config.seen_threshold, config)
+    visible = np.ones((H, W), dtype=bool)
+    coverage = np.ones((H, W), dtype=bool)
+    printed = np.zeros((H, W), dtype=np.float32)
+    printed[20:22, 5:43] = 0.95
+    printed[22, 5:43] = 0.80
+    accumulator.add(
+        printed,
+        visible,
+        baseline_capture=True,
+        baseline_coverage=coverage,
+    )
+
+    # O traco cruza a borda (0.80 -> 1.00): aumento local de 0.20
+    # passa de delta, e 1.00 supera o maximo da vizinhanca (0.95).
+    # Vizinhanca + delta pediria 1.10 — veto permanente.
+    crossing = printed.copy()
+    crossing[22, 5:43] = 1.0
+    for _ in range(3):
+        result = accumulator.add(
+            crossing,
+            visible,
+            baseline_capture=True,
+            baseline_coverage=coverage,
+        )
+    assert np.all(result["confirmed"][22, 5:43])
+    # O nucleo segue suprimido: drift sobre a propria captura
+    # escura continua insuficiente.
+    assert not np.any(result["confirmed"][20:22, 5:43])

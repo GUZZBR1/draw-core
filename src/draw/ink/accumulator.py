@@ -217,16 +217,27 @@ class LayeredInkAccumulator:
                 )
                 np.copyto(self._baseline_change_threshold, np.inf)
                 np.add(
-                    self._baseline_reference_max,
+                    self._baseline_exact_max,
                     _BASELINE_CHANGE_THRESHOLD,
                     out=self._baseline_change_threshold,
                     where=self._baseline_changed,
                 )
-                # Evita veto permanente em pixels vizinhos a impressao escura:
-                # o teto de 0.99 so vale para a margem dilatada. No proprio
-                # pixel impresso a exigencia segue reference_max + delta —
+                # Dois criterios, sem margem dupla: no pixel impresso o
+                # aumento vale contra a propria captura (exact + delta —
                 # um drift de centesimos nao reconfirma a impressao como
-                # tinta nova.
+                # tinta nova), e qualquer pixel da guarda ainda precisa
+                # superar o maximo da vizinhanca, que e a protecao contra
+                # drift de registro. Um traco que cruza a borda de uma
+                # impressao escura passa: exigir vizinhanca + delta
+                # colocaria a exigencia acima de 1.0.
+                np.maximum(
+                    self._baseline_change_threshold,
+                    self._baseline_reference_max,
+                    out=self._baseline_change_threshold,
+                    where=self._baseline_changed,
+                )
+                # Evita veto permanente em pixels vizinhos a impressao escura:
+                # o teto de 0.99 so vale para a margem dilatada.
                 np.less(
                     self._baseline_exact_max,
                     self._config.vote_hit,
@@ -485,10 +496,10 @@ class LayeredInkAccumulator:
                 )
                 removal_visible = self._baseline_removal_visible
                 # "Ausente" e prob consistente com a referencia salva
-                # (<= max da vizinhanca + delta), nao "fora do
-                # effective desta passada": nas passadas sem captura o
-                # effective nao recebe o override de mudanca e todo
-                # pixel do guard pareceria apagado — um traco vivo
+                # (<= max da propria captura + delta ou da vizinhanca),
+                # nao "fora do effective desta passada": nas passadas sem
+                # captura o effective nao recebe o override de mudanca e
+                # todo pixel do guard pareceria apagado — um traco vivo
                 # sobre marca impressa ganharia streak de remocao.
                 np.less_equal(
                     prob,

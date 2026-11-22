@@ -177,21 +177,17 @@ def _provisional_for_display(provisional, min_px):
 def _identity_required_visible_px(prior_px):
     """Piso de evidencia visivel para a decisao de identidade.
 
-    Referencias menores que o piso absoluto usam a fracao
-    proporcional: exigir todos os pixels de um rabisco pequeno
-    adiava a decisao ate o timeout apagar o canvas — um dedo
-    sobre a ponta do traco bastava para nunca sair da quarentena.
+    A fracao proporcional vale em qualquer tamanho de referencia:
+    exigir o rabisco inteiro visivel adiava a decisao ate o
+    timeout apagar o canvas (um dedo na ponta bastava), e um piso
+    absoluto saltava de ~25% para ~100% logo acima dele — um
+    rabisco de 34 px com 4 px cobertos tambem apodrecia na
+    quarentena.
     """
-    required = max(
-        identity._IDENTITY_MIN_VISIBLE_PX,
+    return max(
         int(identity._IDENTITY_MIN_VISIBLE_FRACTION * prior_px),
+        1,
     )
-    if required > prior_px:
-        required = max(
-            int(identity._IDENTITY_MIN_VISIBLE_FRACTION * prior_px),
-            1,
-        )
-    return required
 
 
 def _crop_all_visible(visible, corners):
@@ -1858,6 +1854,16 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     )
                     seen_d = cv2.dilate(seen.astype(np.uint8), kernel) > 0
                     seen_px = int(np.count_nonzero(seen))
+                    if prior_hw_px > 0 and np.any(prior_bl):
+                        # Evidencia de caligrafia: tinta que a
+                        # referencia de impressao salva nao explica.
+                        # Na copia limpa a impressao comum cobria o
+                        # rabisco via dilatacao e forjava o recall.
+                        seen_hw_d = (
+                            cv2.dilate((seen & ~prior_bl).astype(np.uint8), kernel) > 0
+                        )
+                    else:
+                        seen_hw_d = seen_d
                     if identity_visible is not None:
                         all_visible = prior_all & identity_visible
                         all_visible_px = int(np.count_nonzero(all_visible))
@@ -1897,7 +1903,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         if prior_hw_px > 0:
                             p.identity_visible_reference_px = hw_visible_px
                             p.identity_recall = (
-                                np.count_nonzero(hw_visible & seen_d) / hw_visible_px
+                                np.count_nonzero(hw_visible & seen_hw_d) / hw_visible_px
                             )
                         else:
                             p.identity_visible_reference_px = all_visible_px
