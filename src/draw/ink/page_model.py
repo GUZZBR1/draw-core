@@ -147,6 +147,8 @@ class PageModel:
         self._has_chroma_ref = False
         self._seeded = np.zeros((height, width), dtype=bool)
         self._occluder_hold = np.zeros((height, width), dtype=np.uint8)
+        self._hold_mask = np.zeros((height, width), dtype=bool)
+        self._recovering_px = 0
         self._seeding_remaining = 0
         self._streak = np.zeros(
             (-(-height // self.block), -(-width // self.block)), dtype=np.uint8
@@ -177,6 +179,16 @@ class PageModel:
         seguram o descanso da trabalhadora.
         """
         return self._seeding_remaining
+
+    @property
+    def recovering_px(self):
+        """Pixels onde o papel ja reapareceu mas segue retido pelo hold."""
+        return self._recovering_px
+
+    @property
+    def hold_mask(self):
+        """Mascara bool HxW dos pixels retidos exclusivamente pelo hold atual."""
+        return self._hold_mask
 
     @property
     def seeded_fraction(self):
@@ -299,16 +311,64 @@ class PageModel:
                 f"visible na grade {input_vis.shape}, modelo na {self.shape}"
             )
         if not np.any(self._seeded):
+            self._recovering_px = 0
+            self._hold_mask.fill(False)
             return np.ones(self.shape, dtype=bool)
         height, width = self.shape
         step = paper_evidence._REDUCE_PX
         cells = max(1, self.block // step)
         kernel = np.ones((cells, cells), np.uint8)
         ref_grid = np.where(self._seeded, self._ref, 0.0)[::step, ::step]
+        gray_grid = gray_f[::step, ::step]
         ref_peak = cv2.dilate(ref_grid, kernel)
-        gray_peak = cv2.dilate(gray_f[::step, ::step], kernel)
+        gray_peak = cv2.dilate(gray_grid, kernel)
         has_ref = ref_peak > 1.0
-        ok = ~has_ref | (gray_peak >= min_ratio * ref_peak)
+        gain = 1.0
+        seeded_vis_grid = (self._seeded & input_vis)[::step, ::step] & (ref_grid > 1.0)
+        seeded_total = int(np.count_nonzero(self._seeded[::step, ::step]))
+        min_samples = min(
+            paper_evidence._MIN_SAMPLES,
+            max(16, seeded_total // 2),
+        )
+        if int(np.count_nonzero(seeded_vis_grid)) >= min_samples:
+            ref_cut = float(np.percentile(ref_grid[seeded_vis_grid], 50))
+            paper_keep = seeded_vis_grid & (ref_grid >= ref_cut)
+            if int(np.count_nonzero(paper_keep)) >= max(8, min_samples // 2):
+                ratios = gray_grid[paper_keep] / ref_grid[paper_keep]
+                gain_p90 = float(np.percentile(ratios, 90))
+                gray_p90 = float(np.percentile(gray_grid[paper_keep], 90))
+                if 0.35 <= gain_p90 < 1.0 and gray_p90 >= 60.0:
+                    plateau = (ratios >= 0.85 * gain_p90) & (ratios <= 1.15 * gain_p90)
+                    if int(np.count_nonzero(plateau)) >= 0.25 * ratios.size:
+                        chroma_valid = True
+                        if (
+                            self._has_chroma_ref
+                            and bgr is not None
+                            and getattr(bgr, "ndim", 0) == 3
+                            and bgr.shape[:2] == self.shape
+                            and bgr.shape[2] >= 3
+                        ):
+                            bgr_s = bgr[::step, ::step]
+                            b_s = bgr_s[..., 0][paper_keep][plateau].astype(np.float32)
+                            r_s = bgr_s[..., 2][paper_keep][plateau].astype(np.float32)
+                            b_ref_s = self._blue_ref[::step, ::step][paper_keep][
+                                plateau
+                            ]
+                            r_ref_s = self._red_ref[::step, ::step][paper_keep][plateau]
+                            r_mean = float(r_s.mean())
+                            r_ref_mean = float(r_ref_s.mean())
+                            if r_ref_mean > 1.0:
+                                ref_ratio = float(b_ref_s.mean()) / r_ref_mean
+                                spread_g = chroma_tol * max(ref_ratio, 1e-3) + 1e-6
+                                cur_ratio = (
+                                    float(b_s.mean()) / r_mean if r_mean > 1.0 else 0.0
+                                )
+                                chroma_valid = (r_mean > 1.0) and (
+                                    abs(cur_ratio - ref_ratio) <= spread_g
+                                )
+                        if chroma_valid:
+                            gain = gain_p90
+        ok = ~has_ref | (gray_peak >= (min_ratio * gain) * ref_peak)
         if (
             self._has_chroma_ref
             and bgr is not None
@@ -354,9 +414,15 @@ class PageModel:
             release = raw_exposed & (hold > 0)
             if np.any(release):
                 hold[release] -= 1
-            return ~self._seeded | (raw_exposed & (hold == 0))
+            self._recovering_px = int(
+                np.count_nonzero(self._seeded & input_vis & release)
+            )
+            self._hold_mask = self._seeded & input_vis & release
+            return ~self._seeded | (raw_exposed & ~release)
         if np.any(hold):
             hold.fill(0)
+        self._recovering_px = 0
+        self._hold_mask.fill(False)
         return ~self._seeded | raw_exposed
 
     def admissible(self, visible=None):

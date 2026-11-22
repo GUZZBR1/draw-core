@@ -286,7 +286,8 @@ class _Pass:
     coverage_matches_last_reg: bool = False
     pm_seeding_remaining: int = 0
     pm_confirm_obs: int = 0
-    pm_has_hold: bool = False
+    pm_recovering_px: int = 0
+    pm_hold_pending_px: int = 0
     reg_info: dict = field(default_factory=dict)
 
 
@@ -2100,15 +2101,16 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # geometria que nunca chegou ao canvas.
             p.last_reg = None
         p.pm_epoch = (self._canvas_epoch, self._pm_reset_seq)
-        confirmed = self._accumulator._confirmed
-        p.confirmed_ink = (
-            (confirmed > 0).copy()
-            if confirmed is not None and confirmed.shape == p.prob.shape
-            else np.zeros(p.prob.shape, dtype=bool)
-        )
-        p.pm_baseline_ink = (
-            None if self._pm_baseline_ink is None else self._pm_baseline_ink.copy()
-        )
+        if self._config.page_model and p.pass_voted:
+            confirmed = self._accumulator._confirmed
+            p.confirmed_ink = (
+                (confirmed > 0).copy()
+                if confirmed is not None and confirmed.shape == p.prob.shape
+                else np.zeros(p.prob.shape, dtype=bool)
+            )
+            p.pm_baseline_ink = (
+                None if self._pm_baseline_ink is None else self._pm_baseline_ink.copy()
+            )
 
     def _pass_paper_and_page_model(self, p):
         """Registro da guarda de papel e PageModel, fora do lock."""
@@ -2278,7 +2280,14 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     visible=obs_visible,
                     hold_passes=self._config.occlusion_hold_passes,
                 )
-                p.pm_has_hold = bool(np.any(pm._occluder_hold > 0))
+                p.pm_recovering_px = pm.recovering_px
+                p.pm_hold_pending_px = int(
+                    np.count_nonzero(
+                        pm.hold_mask
+                        & ~p.confirmed_ink
+                        & (p.prob > self._accumulator.threshold)
+                    )
+                )
                 p.visible = (
                     exposed_mask if p.visible is None else (p.visible & exposed_mask)
                 )
@@ -2286,6 +2295,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     exposed_mask
                     if obs_visible is None
                     else (obs_visible & exposed_mask)
+                )
+            if p.paper_ok is not None:
+                obs_visible = (
+                    p.paper_ok if obs_visible is None else (obs_visible & p.paper_ok)
                 )
             pm.observe(
                 gray,
@@ -2303,6 +2316,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             )
             p.pm_seeding_remaining = pm.seeding_remaining
             p.visible = pm.admissible(p.visible)
+            obs_admissible = pm.admissible(obs_visible)
             confirmed_ink = p.confirmed_ink
             novel_mask = pm.novel(gray)
             suppress = pm.seeded & ~novel_mask & ~confirmed_ink
@@ -2314,12 +2328,12 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             p.reg_info["pm_suppressed_px"] = int(np.count_nonzero(suppress & voting_px))
             p.reg_info["pm_pending_px"] = int(np.count_nonzero(pm.pending(obs_visible)))
             baseline_seen = (
-                suppress & p.visible & (p.prob > self._accumulator.threshold)
+                suppress & obs_admissible & (p.prob > self._accumulator.threshold)
             )
             if np.any(baseline_seen):
                 p.next_baseline_ink[baseline_seen] = True
-            baseline_erased = (
-                pm.seeded & p.visible & (p.prob <= registration._REMOVAL_LOW_PROB)
+            baseline_erased = obs_admissible & (
+                p.prob <= registration._REMOVAL_LOW_PROB
             )
             if np.any(baseline_erased):
                 p.next_baseline_ink[baseline_erased] = False
@@ -2392,9 +2406,13 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             hold_needed = (
                 result["frozen_pending_px"] > 0
                 or result["recovering_px"] >= _RECOVERY_MIN_PX
+                or p.pm_hold_pending_px > 0
+                or p.pm_recovering_px >= _RECOVERY_MIN_PX
             )
             max_skips = (
-                2 * votes._INK_VOTE_WINDOW + self._config.occlusion_hold_passes + 1
+                2 * max(votes._INK_VOTE_WINDOW, pm_cap)
+                + self._config.occlusion_hold_passes
+                + 1
             )
             if self._config.page_model:
                 max_skips = max(max_skips, 2 * pm_cap + votes._INK_VOTE_WINDOW)
