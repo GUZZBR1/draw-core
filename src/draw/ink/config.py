@@ -133,11 +133,29 @@ class InkConfig:
     # voto: 0 desliga (legado); None deriva do tamanho retificado em
     # grades de pagina inteira (>= 200 px).
     border_guard_px: int | None = 0
-    # Guarda fotometrica de oclusao (draw.ink.occlusion, issue #129): a
-    # regiao que nao parece papel exposto (mao, braco, caneta, sombra)
-    # fica congelada — sem remocao de tinta confirmada e sem voto novo.
+    # Guarda fotometrica de oclusao (issue #129): a regiao que nao
+    # parece papel exposto (mao, braco, caneta, sombra) fica congelada —
+    # sem remocao de tinta confirmada e sem voto novo. Duas testemunhas
+    # independentes: draw.ink.occlusion (PaperExposureGuard, veto de
+    # adicao e testemunha da remocao) e draw.ink.paper_evidence
+    # (referencia de papel que alimenta p.paper_ok e o PageModel).
     # Independente do MediaPipe. Incerteza congela.
     paper_guard: bool = True
+    # Hold de oclusor do PageModel (draw.ink.page_model): o pixel
+    # semeado que sai de oclusao segue vetado por esta quantidade de
+    # passadas — queda curta de deteccao nao libera a regiao (o hold
+    # da guarda fotometrica mora na PaperExposureGuard, nao aqui).
+    occlusion_hold_passes: int = 3
+    # Modelo persistente da pagina limpa (draw.ink.page_model, opt-in):
+    # referencia por pixel na grade da ancora, semeada por blocos que a
+    # passada viu limpos. Pixels ainda sem referencia nao entregam
+    # evidencia (regiao pendente) e evidencia que nao e conteudo novo
+    # contra a referencia e suprimida — pauta impressa, desenho antigo
+    # e sombra de vinco deixam de parecer tinta sem depender da regra
+    # de pauta (#132) nem de o modelo ver a mao (#129). O delta de
+    # "novo" ainda nao foi calibrado em corpus real — ligar para
+    # replay/mesa, nao para o preset validado.
+    page_model: bool = False
 
     def __post_init__(self):
         if not 0.0 < self.t_low < self.t_high <= 1.0:
@@ -149,6 +167,8 @@ class InkConfig:
             raise ValueError("provisional_min_px deve ser >= 1")
         if not self.motion_veto_px > 0.0:
             raise ValueError("motion_veto_px deve ser > 0")
+        if not 0 <= self.occlusion_hold_passes <= 10:
+            raise ValueError("occlusion_hold_passes fora de [0, 10]")
         if self.pass_interval_s is not None and not 0.0 < self.pass_interval_s <= 5.0:
             raise ValueError(
                 f"pass_interval_s fora de (0, 5] s: {self.pass_interval_s!r}"
