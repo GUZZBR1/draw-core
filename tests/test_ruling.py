@@ -1815,3 +1815,21 @@ def test_a_gradual_pen_bend_between_slightly_offset_rules_is_kept(offset, tops):
     box = (slice(278, 296), slice(562, 638))
     out = ruling.RulingFilter().apply(prob.copy())
     assert ((out > 0.5)[box]).sum() == ((prob > 0.5)[box]).sum()
+
+
+def test_a_midpoint_stroke_between_small_offset_rules_is_kept_by_policy():
+    """Review #139 (734ed7a): com desnivel de 4 px, um traço de 6 px parado na
+    altura intermediária (topos 282) tem EXATAMENTE a tinta de um remendo de
+    sombra escalonado de 8 px (intervalos 80-87 e 82-89). Nenhuma medida local
+    de altura ou progressão separa os dois; a política é conservadora: com
+    traço conectado entrando e saindo da faixa, preserva a tinta. Perder
+    caneta custa mais que deixar sombra."""
+    prob = _fold_page(split_x=600, offset_r=4)
+    y = 280
+    prob[y : y + 6, 530:598] = 0.95
+    for x in range(598, 602):
+        prob[y + 2 : y + 8, x] = 0.95  # traço parado 2 linhas abaixo da pauta
+    prob[y + 4 : y + 10, 602:660] = 0.95
+    box = (slice(278, 296), slice(562, 638))
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert ((out > 0.5)[box]).sum() == ((prob > 0.5)[box]).sum()
