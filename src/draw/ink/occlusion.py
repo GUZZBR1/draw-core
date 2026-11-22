@@ -20,6 +20,21 @@ _TEXTURE_MIN_PAPER_FRACTION = 0.6
 # textura aprendida.
 _TEXTURE_NEW_INK_FRACTION = 0.01
 _TEXTURE_NEW_INK_MAX_FRACTION = 0.18
+# Fração de pixels de tinta em LUGARES NOVOS que já veta o tile: a
+# régua com ticks menores que o traço derrubava a fração total e o
+# veto por fração não disparava — comparar o total não vê que a tinta
+# mudou de lugar. Marcas novas fora da máscara aprendida (dilatada
+# para o jitter de borda) são tinta do oclusor, não apagamento
+# parcial (Devin Review do PR #144).
+_TEXTURE_NEW_MARK_FRACTION = 0.02
+_TEXTURE_MARK_DILATE = 3
+# A textura aprendida num tile de borda de lâmpada vem de um degrau
+# de luma: a maioria dos pixels fica abaixo da média do tile (o lado
+# escuro domina). Textura de impressão é o contrário — marcas
+# esparsas escuras sobre papel claro, minoria abaixo da média. O
+# resgate do mismatch pelo deslocamento de luz só vale para textura
+# de degrau (Devin Review do PR #144).
+_TEXTURE_STEP_DARK_SHARE = 0.6
 # Um deslocamento fotométrico da página inteira (luz da sala caindo,
 # auto-exposição da câmera, balanço de branco) move a quase totalidade
 # dos tiles de uma vez — não é oclusão local. Quando a parcela anômala
@@ -55,6 +70,16 @@ _CHROMA_REFERENCE_MAX = 255.0 / _CHROMA_LUMA_FLOOR
 _FILL_INK_PIXEL_THRESHOLD = 0.7
 _FILL_INK_TILE_SUPPORT = 0.15
 _FILL_INK_TILE_MEAN = 0.25
+# Semente densa do componente: o teste 2-D mede o retângulo do
+# componente, e duas faixas finas se encontrando num canto (o "L" da
+# sombra) passavam por preenchimento. A semente exige um blob de
+# suporte que ocupe bem o PRÓPRIO retângulo: um traço ou contorno
+# fino de tinta enche o bbox (contorno de 4px ~34%, traço ~100%),
+# enquanto o L oco das faixas de sombra fica em ~18%. Faixas finas
+# só podem ESTENDER a partir de uma semente, não semear sozinhas
+# (Devin Review do PR #144).
+_FILL_SEED_MIN_DIM_PX = 4
+_FILL_SEED_MIN_FILL = 0.28
 _FILL_RECOVERY_PASSES = 4
 # Piso absoluto de papel exposto: a absorção de deslocamento global
 # segue a iluminação, mas uma página mediana abaixo deste nível não
@@ -107,6 +132,9 @@ class PaperExposureGuard:
         self._last_fill_adoption = False
         self._recovering = None
         self._was_anomalous = None
+        self._was_texture_anomaly = None
+        self._texture_ink_mask = None
+        self._texture_dark_share = None
 
     @property
     def pending_fill_recovery(self):
@@ -283,6 +311,22 @@ class PaperExposureGuard:
         texture = np.sqrt(
             np.maximum(texture_mean_square - texture_mean * texture_mean, 0.0)
         ) / np.maximum(texture_mean, _CHROMA_LUMA_FLOOR)
+        # Parcela dos pixels amostrados abaixo da média do tile: degrau
+        # de luma (lâmpada) tem o lado escuro dominante; impressão é
+        # marca escura esparsa sobre fundo claro.
+        tile_mean_px = cv2.resize(
+            texture_mean, (width, height), interpolation=cv2.INTER_NEAREST
+        )
+        dark_share = np.divide(
+            cv2.resize(
+                ((gray < tile_mean_px) & (texture_weights > 0)).astype(np.float32),
+                size,
+                interpolation=cv2.INTER_AREA,
+            ),
+            paper_fraction,
+            out=np.zeros_like(texture_mean),
+            where=paper_fraction > 0.0,
+        )
 
         if visible is None:
             updateable = np.ones(current.shape, dtype=bool)
@@ -321,6 +365,9 @@ class PaperExposureGuard:
             self._texture_ink_baseline = np.full(
                 current.shape, np.nan, dtype=np.float32
             )
+            self._texture_ink_mask = np.zeros((height, width), dtype=bool)
+            self._texture_dark_share = np.full(current.shape, np.nan, dtype=np.float32)
+            self._was_texture_anomaly = np.zeros(current.shape, dtype=bool)
             self._ink_streak = np.zeros(current.shape, dtype=np.uint8)
             self._fill_adopted = np.zeros(current.shape, dtype=bool)
             self._recovering = np.zeros(current.shape, dtype=np.uint8)
@@ -413,15 +460,39 @@ class PaperExposureGuard:
         # não vira papel, e tinta retida não é "nova" (Devin Review
         # do PR #144). Cobertura insuficiente barra só o aprendizado
         # (texture_valid ali), não o veto por pixel.
+        # Tinta em lugares novos: a máscara aprendida dilatada cobre o
+        # jitter de borda do traço retido; pixels de tinta fora dela
+        # são marcas do oclusor (o tick da régua) mesmo quando a fração
+        # total CAI — cobertura não é o teste, posição é (Devin Review
+        # do PR #144).
+        ink_mask = texture_weights == 0.0
+        learned_marks = cv2.dilate(
+            self._texture_ink_mask.astype(np.uint8),
+            np.ones((2 * _TEXTURE_MARK_DILATE + 1,) * 2, dtype=np.uint8),
+        )
+        new_marks_fraction = cv2.resize(
+            (ink_mask & (learned_marks == 0)).astype(np.float32),
+            size,
+            interpolation=cv2.INTER_AREA,
+        )
         new_ink = (
             texture_known
             & self._texture_learned_clean
-            & (ink_fraction > self._texture_ink_baseline + _TEXTURE_NEW_INK_FRACTION)
-            & (ink_fraction <= _TEXTURE_NEW_INK_MAX_FRACTION)
+            & (
+                (
+                    (
+                        ink_fraction
+                        > self._texture_ink_baseline + _TEXTURE_NEW_INK_FRACTION
+                    )
+                    | (new_marks_fraction > _TEXTURE_NEW_MARK_FRACTION)
+                )
+                & (ink_fraction <= _TEXTURE_NEW_INK_MAX_FRACTION)
+            )
         )
         texture_anomaly = texture_mismatch | new_ink
 
         anomalous = darkened | color_anomaly
+        flattened = np.zeros(current.shape, dtype=bool)
         updateable_px = int(np.count_nonzero(updateable))
         shifted = int(np.count_nonzero(anomalous & updateable))
         if (
@@ -496,12 +567,29 @@ class PaperExposureGuard:
             # JUNTO com a página — não é `anomalous` por luma e nem
             # chega aqui: o veto de textura fica em `paper_grid` e
             # segura a remoção sob a capa (Devin Review do PR #144).
-            flattened = (
+            flattened |= (
                 updateable
                 & anomalous
                 & ~color_anomaly
                 & ~new_ink
                 & (~texture_anomaly | local_texture_match)
+                & (current >= page_reference - page_drop)
+            )
+            # O tile de borda de lâmpada aprendeu textura de gradiente:
+            # quando a luz nivela a luma escala junto com a página
+            # (não é `anomalous`) mas a textura some — mismatch que o
+            # próprio deslocamento criou. Sem resgate ele vetava a
+            # remoção para sempre: `flattened` exigia `anomalous` e o
+            # refresh exige `~texture_anomaly`. Só a anomalia FRESCA
+            # resgata — a capa lisa já era anômala antes do shift e
+            # segue vetada (Devin Review do PR #144).
+            flattened |= (
+                updateable
+                & ~anomalous
+                & texture_mismatch
+                & ~new_ink
+                & ~self._was_texture_anomaly
+                & (self._texture_dark_share >= _TEXTURE_STEP_DARK_SHARE)
                 & (current >= page_reference - page_drop)
             )
             if np.any(flattened):
@@ -562,17 +650,52 @@ class PaperExposureGuard:
             # a borda de sombra que o modelo lê como tinta — não tinha
             # nada a recuperar e não pode ser adotada como fill
             # (Devin Review do PR #144).
+            #
+            # A semente é medida no blob de pixels, não na fração por
+            # tile: um traço sólido cruzando a fronteira de dois tiles
+            # lê ~30% em cada um — indistinguível por fração de uma
+            # faixa fina de sombra. O que separa é a forma: a semente
+            # precisa de um blob preenchendo _FILL_SEED_MIN_FILL do
+            # próprio bbox com >= _FILL_SEED_MIN_DIM_PX de lado menor.
+            # O L das faixas de sombra é oco (~18% do bbox) e não semeia;
+            # o contorno fino de tinta (~34%) e o traço sólido semeiam.
             if np.any(tile_support):
+                tile_h = height / size[1]
+                tile_w = width / size[0]
                 count, labels = cv2.connectedComponents(
                     tile_support.astype(np.uint8), connectivity=8
                 )
                 for index in range(1, count):
                     rows, cols = np.where(labels == index)
                     if (
-                        rows.max() - rows.min() + 1 >= 2
-                        and cols.max() - cols.min() + 1 >= 2
+                        rows.max() - rows.min() + 1 < 2
+                        or cols.max() - cols.min() + 1 < 2
                     ):
-                        supported |= labels == index
+                        continue
+                    region = pixel_support[
+                        int(rows.min() * tile_h) : int(
+                            np.ceil((rows.max() + 1) * tile_h)
+                        ),
+                        int(cols.min() * tile_w) : int(
+                            np.ceil((cols.max() + 1) * tile_w)
+                        ),
+                    ]
+                    if not np.any(region):
+                        continue
+                    _, _, stats, _ = cv2.connectedComponentsWithStats(
+                        region.astype(np.uint8), connectivity=8
+                    )
+                    for stat in stats[1:]:
+                        blob_w = stat[cv2.CC_STAT_WIDTH]
+                        blob_h = stat[cv2.CC_STAT_HEIGHT]
+                        if (
+                            blob_w >= _FILL_SEED_MIN_DIM_PX
+                            and blob_h >= _FILL_SEED_MIN_DIM_PX
+                            and stat[cv2.CC_STAT_AREA]
+                            >= _FILL_SEED_MIN_FILL * blob_w * blob_h
+                        ):
+                            supported |= labels == index
+                            break
         self._ink_streak[supported] = np.minimum(
             self._ink_streak[supported].astype(np.uint16) + 1, 255
         ).astype(np.uint8)
@@ -630,7 +753,26 @@ class PaperExposureGuard:
         # (Devin Review do PR #144).
         texture_learned = texture_initialize | texture_refresh
         self._texture_learned_clean[texture_learned] = True
-        self._texture_ink_baseline[texture_learned] = ink_fraction[texture_learned]
+        # Tiles reancorados no shift já escreveram baseline em mínimo
+        # acima: regravar com a fração corrente SUBIRIA o piso quando o
+        # oclusor traz marcas junto com a mudança de luz (Devin Review
+        # do PR #144).
+        self._texture_ink_baseline[texture_learned & ~flattened] = ink_fraction[
+            texture_learned & ~flattened
+        ]
+        # A máscara aprendida guarda ONDE a tinta estava quando a
+        # referência aprendeu — marca em lugar novo é do oclusor mesmo
+        # com a fração total menor (régua com tick fino).
+        learned_pixels = (
+            cv2.resize(
+                texture_learned.astype(np.uint8),
+                (width, height),
+                interpolation=cv2.INTER_NEAREST,
+            )
+            > 0
+        )
+        self._texture_ink_mask[learned_pixels] = ink_mask[learned_pixels]
+        self._texture_dark_share[texture_learned] = dark_share[texture_learned]
 
         # A clean first sample can seed and use its own tile immediately;
         # anomalously dark tiles remain unknown and cannot authorize votes.
@@ -737,6 +879,7 @@ class PaperExposureGuard:
         self._recovering[anomalous] = 0
         self._recovering[self._was_anomalous & ~anomalous] = _RECOVERY_HOLD_PASSES
         self._was_anomalous = anomalous.copy()
+        self._was_texture_anomaly = texture_anomaly.copy()
         return ExposureAssessment(
             visible=unblocked,
             paper_exposed=paper_exposed,

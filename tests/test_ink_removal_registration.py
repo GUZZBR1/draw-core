@@ -1448,3 +1448,162 @@ def test_wrong_shape_visible_returns_none_and_keeps_recovery_state():
     assert streak.any()
     assert guard.observe(page, np.ones((8, 8), bool), ink_prob=ink_prob) is None
     np.testing.assert_array_equal(guard._ink_streak, streak)
+
+
+def test_moved_marks_hold_the_new_ink_veto_when_total_coverage_drops():
+    """Régua com ticks MENORES que o traço aprendido: a fração total
+    de tinta cai abaixo da baseline e o veto por fração não dispara.
+    A posição é o teste: ticks em pixels novos são marcas do oclusor
+    e o traço coberto segue protegido (Devin Review do PR #144)."""
+    guard = occlusion_mod.PaperExposureGuard()
+    shape = (120, 160)
+    paper = np.full((*shape, 3), 220, dtype=np.uint8)
+    visible = np.ones(shape, dtype=bool)
+    stroke = (slice(30, 33), slice(50, 68))  # 3x18px no tile (1,2)
+    page = paper.copy()
+    page[stroke] = 60
+    prob = np.zeros(shape, np.float32)
+    prob[stroke] = 0.95
+    for _ in range(3):
+        guard.observe(page, visible, ink_prob=prob, ink_support_threshold=0.7)
+    # tile (1,2): linhas 24:48, colunas ~46:69 — aprendeu limpo com o
+    # traço (~10% de baseline).
+    assert guard._texture_learned_clean[1, 2]
+
+    ruler = paper.copy()
+    ticks = np.zeros(shape, dtype=bool)
+    ticks[30:46, 55] = True
+    ticks[30:46, 60] = True  # ticks finos: ~32px < 54px do traço
+    ruler[ticks] = 60
+    marked = np.zeros(shape, np.float32)
+    marked[ticks] = 0.9  # o traço some da leitura; só os ticks ficam
+    for _ in range(6):
+        assessment = guard.observe(
+            ruler, visible, ink_prob=marked, ink_support_threshold=0.7
+        )
+    assert not np.asarray(assessment.paper_exposed)[stroke].any()
+
+
+def test_l_shaped_shadow_corner_cannot_seed_fill_recovery():
+    """Duas faixas finas se encontrando num canto têm bbox 3x3 e
+    passavam no portão 2-D: sem um tile denso de semente o componente
+    não pode adotar (Devin Review do PR #144)."""
+    guard = occlusion_mod.PaperExposureGuard()
+    shape = (120, 168)  # grade exata de 24px
+    paper = np.full((*shape, 3), 220, dtype=np.uint8)
+    visible = np.ones(shape, dtype=bool)
+    for _ in range(2):
+        guard.observe(paper, visible)
+
+    shadowed = paper.copy()
+    shadowed[24:96, 24:96] = 150  # sombra 3x3 tiles
+    bands = np.zeros(shape, np.float32)
+    bands[24:31, 24:96] = 0.95  # faixa de 7px no topo
+    bands[24:96, 24:31] = 0.95  # faixa de 7px na esquerda (L)
+    # tile reto de faixa: 7/24 = 29% de suporte (mean ~0,28) — passa
+    # no piso de suporte; tile de canto: 287/576 = 49,8% < 50% denso.
+    for _ in range(6):
+        guard.observe(shadowed, visible, ink_prob=bands, ink_support_threshold=0.7)
+    assert not guard._ink_streak.any()
+    assert not guard._fill_adopted.any()
+
+
+def test_lamp_edge_tile_reanchors_when_the_light_flattens():
+    """Tile de borda de lâmpada: textura aprendida veio de um degrau
+    de luma (maioria dos pixels no lado escuro). Quando a luz nivela a
+    luma escala junto com a página mas a textura some — mismatch
+    explicado pelo próprio deslocamento, e o tile reancora em vez de
+    vetar remoção para sempre. A baseline de tinta gravada não sobe
+    no reancoramento (Devin Review do PR #144)."""
+    guard = occlusion_mod.PaperExposureGuard()
+    shape = (120, 160)
+    visible = np.ones(shape, dtype=bool)
+    lit = np.full((*shape, 3), 220, dtype=np.uint8)
+    # tile (2,3): linhas 48:72, colunas ~69:92 — degrau de luma:
+    # 2 colunas a 250, o resto a 190 (lado escuro domina).
+    lit[:, 69:71] = 250
+    lit[:, 71:92] = 190
+    lit[46:52, 71:92] = 60  # linha de tinta ~15% do tile
+    prob = np.zeros(shape, np.float32)
+    prob[46:52, 71:92] = 0.9
+    for _ in range(3):
+        guard.observe(lit, visible, ink_prob=prob, ink_support_threshold=0.7)
+    assert guard._texture_learned_clean[2, 3]
+    baseline = float(guard._texture_ink_baseline[2, 3])
+    assert 0.0 < baseline < 0.18
+
+    # Lâmpada apaga: a página inteira nivela e o degrau some — a
+    # textura que cai foi criada pelo próprio deslocamento.
+    dim = np.full_like(lit, 140)
+    dim[46:53, 71:92] = 40  # a tinta cresce um fio dentro do jitter
+    dim_prob = np.zeros(shape, np.float32)
+    dim_prob[46:53, 71:92] = 0.9
+    assessment = guard.observe(
+        dim, visible, ink_prob=dim_prob, ink_support_threshold=0.7
+    )
+    # A região do tile SEM tinta reabre (os pixels de tinta seguem
+    # protegidos pelo veto dark_ink, por desenho).
+    assert np.asarray(assessment.paper_exposed)[55:72, 71:92].all()
+    # O reancoramento faz mínimo, não sobrescrita: a baseline gravada
+    # não pode subir para a cobertura corrente (Devin Review #144).
+    assert guard._texture_ink_baseline[2, 3] <= baseline
+
+
+def test_moved_marks_keep_veto_through_the_worker():
+    """Cenário do review na trabalhadora: traço confirmado coberto
+    por régua cujos ticks somam menos área que o traço — a remoção
+    não pode contar o apagamento falso (Devin Review do PR #144)."""
+    shape = (120, 160)
+    paper = np.full((*shape, 3), 220, dtype=np.uint8)
+    target = (slice(30, 33), slice(50, 68))  # traço coberto
+    witness = (slice(80, 92), slice(8, 20))  # testemunha
+    page = paper.copy()
+    page[target] = 60
+    page[witness] = 60
+
+    prob_strokes = np.zeros(shape, np.float32)
+    prob_strokes[target] = 0.95
+    prob_strokes[witness] = 0.95
+
+    ruler = paper.copy()
+    ticks = np.zeros(shape, dtype=bool)
+    ticks[30:46, 55] = True
+    ticks[30:46, 60] = True
+    ruler[ticks] = 60
+    prob_ruler = np.zeros(shape, np.float32)
+    prob_ruler[ticks] = 0.9
+    prob_ruler[witness] = 0.95
+
+    class _MutablePageClean:
+        threshold = 0.7
+
+        def __init__(self):
+            self.prob = prob_strokes
+
+        def ink_prob(self, _image):
+            return self.prob
+
+    clock = rr.SceneClock()
+    page_clean = _MutablePageClean()
+    worker = rr.make_ink_worker(page_clean, clock)
+    generation = worker.new_generation()
+    corners = rr.base_quad(shape)
+    for _ in range(4):
+        clock.now += 1
+        worker.submit(WarpedPage(paper, generation, corners))
+        assert worker.pump()
+        assert worker.error is None
+    for _ in range(16):
+        clock.now += 1
+        worker.submit(WarpedPage(page, generation, corners))
+        assert worker.pump()
+        assert worker.error is None
+    assert worker._accumulator._confirmed[target].all()
+
+    page_clean.prob = prob_ruler
+    for _ in range(registration_mod._REMOVAL_PASSES * 2):
+        clock.now += 1
+        worker.submit(WarpedPage(ruler, generation, corners))
+        assert worker.pump()
+        assert worker.error is None
+    assert worker._accumulator._confirmed[target].all()
