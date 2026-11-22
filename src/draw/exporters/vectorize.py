@@ -43,11 +43,13 @@ import cv2
 import numpy as np
 
 from .export_vectors import (
-    _degree,
     _dp_open,
-    _index_node_components,
     filter_microfragments,
     simplify,
+    traverse_graph,
+)
+from .export_vectors import (
+    _index_node_components as _index_node_components,
 )
 from .export_vectors import (
     make_8_minimal as _make_8_minimal,
@@ -65,17 +67,6 @@ THINNING_TYPES = {
     "zhangsuen": cv2.ximgproc.THINNING_ZHANGSUEN,
     "guohall": cv2.ximgproc.THINNING_GUOHALL,
 }
-
-_NEIGHBORS = (
-    (-1, -1),
-    (-1, 0),
-    (-1, 1),
-    (0, -1),
-    (0, 1),
-    (1, -1),
-    (1, 0),
-    (1, 1),
-)
 
 
 def load_ink(path):
@@ -106,148 +97,6 @@ def thin(ink, thinning="zhangsuen"):
     src = ink.astype(np.uint8) * np.uint8(255)
     skel = cv2.ximgproc.thinning(src, None, THINNING_TYPES[thinning])
     return skel > 0
-
-
-def _skeleton_neighbors(flat_idx, skel_flat, width, height):
-    """Índices planos dos vizinhos de 8 que também são esqueleto."""
-    y, x = divmod(flat_idx, width)
-    out = []
-    for dy, dx in _NEIGHBORS:
-        ny, nx = y + dy, x + dx
-        if 0 <= ny < height and 0 <= nx < width:
-            nidx = ny * width + nx
-            if skel_flat[nidx]:
-                out.append(nidx)
-    return out
-
-
-def traverse_graph(skel, include_topology=False):
-    """Percorre o esqueleto como grafo e devolve as polilinhas brutas.
-
-    Cada polilinha é um dict {"points": array Nx2 (x, y) em px,
-    "closed": bool}. Com `include_topology=True`, inclui também
-    `start_node`, `end_node` e `pixel_indices` para poda e costura O(E).
-    """
-    height, width = skel.shape
-    deg = _degree(skel)
-    node_mask = skel & (deg != 2)
-    n_nodes, labels = cv2.connectedComponents(
-        node_mask.astype(np.uint8), connectivity=8
-    )
-    labels_flat = labels.ravel()
-    skel_flat = skel.ravel()
-    anchors, node_pixels = _index_node_components(labels, n_nodes)
-    node_degrees = {
-        nid: int(deg.ravel()[pix].max()) for nid, pix in node_pixels.items()
-    }
-
-    polylines = []
-    visited = set()
-
-    def walk_edge(start_pixel, first_step, start_nid, start_anchor):
-        path = [first_step]
-        visited.add((start_pixel, first_step))
-        visited.add((first_step, start_pixel))
-        prev, cur = start_pixel, first_step
-        end_anchor = None
-        end_nid = None
-        while labels_flat[cur] == 0:
-            nbrs = [
-                n
-                for n in _skeleton_neighbors(cur, skel_flat, width, height)
-                if n != prev
-            ]
-            if len(nbrs) != 1:
-                end_anchor = (float(cur % width), float(cur // width))
-                break
-            nxt = nbrs[0]
-            visited.add((cur, nxt))
-            visited.add((nxt, cur))
-            path.append(nxt)
-            prev, cur = cur, nxt
-        if end_anchor is None:
-            end_nid = int(labels_flat[cur])
-            end_anchor = anchors[end_nid]
-        points = [start_anchor]
-        points += [(float(p % width), float(p // width)) for p in path]
-        points.append(end_anchor)
-        closed = points[0] == points[-1] and len(path) >= 2
-        item = {"points": np.array(points, dtype=np.float64), "closed": closed}
-        if include_topology:
-            item["start_node"] = start_nid
-            item["end_node"] = end_nid
-            item["start_deg"] = node_degrees.get(start_nid, 0)
-            item["end_deg"] = node_degrees.get(end_nid, 0)
-            item["flat_pixels"] = [start_pixel] + path
-        return item
-
-    for nid in range(1, n_nodes):
-        if nid not in anchors:
-            continue
-        anchor = anchors[nid]
-        has_external = False
-        for p in node_pixels[nid]:
-            for q in _skeleton_neighbors(p, skel_flat, width, height):
-                if labels_flat[q] == nid:
-                    continue
-                has_external = True
-                if (p, q) in visited:
-                    continue
-                polylines.append(walk_edge(p, q, nid, anchor))
-        if not has_external:
-            item = {
-                "points": np.array([anchor], dtype=np.float64),
-                "closed": False,
-            }
-            if include_topology:
-                item["start_node"] = nid
-                item["end_node"] = nid
-                item["start_deg"] = 0
-                item["end_deg"] = 0
-                item["flat_pixels"] = list(node_pixels[nid])
-            polylines.append(item)
-
-    covered = np.zeros(skel_flat.shape, dtype=bool)
-    for a, b in visited:
-        covered[a] = True
-        covered[b] = True
-    remaining = np.nonzero(skel_flat & ~covered & (labels_flat == 0))[0]
-    seen = set()
-    for start in remaining:
-        start = int(start)
-        if start in seen:
-            continue
-        path = [start]
-        seen.add(start)
-        prev, cur = None, start
-        while True:
-            nbrs = [
-                n
-                for n in _skeleton_neighbors(cur, skel_flat, width, height)
-                if n != prev
-            ]
-            if not nbrs:
-                break
-            nxt = nbrs[0]
-            if nxt == start and len(path) >= 3:
-                break
-            if nxt in seen:
-                break
-            path.append(nxt)
-            seen.add(nxt)
-            prev, cur = cur, nxt
-        points = [(float(p % width), float(p // width)) for p in path]
-        closed = len(path) >= 3
-        item = {"points": np.array(points, dtype=np.float64), "closed": closed}
-        if include_topology:
-            item["start_node"] = None
-            item["end_node"] = None
-            item["start_deg"] = 2
-            item["end_deg"] = 2
-            item["flat_pixels"] = path
-        polylines.append(item)
-
-    return polylines
 
 
 def _polyline_arc_length(points):
