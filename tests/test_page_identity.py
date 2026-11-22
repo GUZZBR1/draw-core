@@ -317,6 +317,44 @@ def test_quarter_coverage_holds_instead_of_restoring(worker):
     np.testing.assert_array_equal(worker.poll(gen, 0).confirmed, canvas_a)
 
 
+def test_near_quarter_coverage_still_holds(worker):
+    # O canto que a cascata deixava aberto de verdade: dominio
+    # alcancado pouco acima do piso de fragmento (~58% da
+    # referencia julgavel) e visivel pouco acima de metade disso
+    # (~51% do dominio → ~30% da referencia). Abaixo de ~25%
+    # nao ha cenario: o dominio cai sob o piso geometrico e a
+    # passada ja adia por no_overlap — so a banda entre um
+    # quarto e metade era aceita como match. Aqui a referencia
+    # segura como hold ate a mao revelar o resto.
+    ink_a = np.zeros(SHAPE, np.float32)
+    ink_a[10:65, 10:36] = 0.95  # 1430 px — fora da pegada
+    ink_a[10:65, 60:96] = 0.95  # 1980 px — dentro da pegada
+    for _ in range(4):
+        drive(worker, 0, prob=ink_a)
+    canvas_a = worker._accumulator._confirmed.copy()
+    gen = worker.new_generation(preserve_identity=True)
+    part_quad = np.float32([[60, 0], [100, 0], [100, 120], [60, 120]])
+    # Mao cobre a faixa esquerda inteira (band A) e o topo da
+    # banda da pegada: sobram 1008 px = ~30% da referencia
+    # julgavel (~51% do dominio) — a cascata restaurava.
+    visible = np.ones(SHAPE, bool)
+    visible[10:65, 0:60] = False
+    visible[10:37, 60:99] = False
+    for _ in range(3):
+        drive(worker, gen, prob=ink_a, corners=part_quad, visible=visible)
+        event = last_event(worker)
+        assert event["decision"] == "deferred_occlusion"
+        assert event["quarantine_reason"] == "occlusion"
+        assert event["quarantine_frames"] == 0
+        np.testing.assert_array_equal(worker._identity_reference, canvas_a)
+        assert not np.any(worker.poll(gen, 0).confirmed)
+    # Sem a mao: o dominio inteiro e comparado — same_page
+    # restaura o desenho salvo exato.
+    drive(worker, gen, prob=ink_a, corners=part_quad)
+    assert last_event(worker)["decision"] == "same_page"
+    np.testing.assert_array_equal(worker.poll(gen, 0).confirmed, canvas_a)
+
+
 def test_reanchored_auto_guard_keeps_recovery(monkeypatch):
     # Cobertura com a guarda AUTOMATICA e mudanca real de ancora
     # (o estado que o follow deixa: canvas intacto, ancora nova).
