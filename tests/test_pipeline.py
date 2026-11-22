@@ -21,6 +21,7 @@ from draw.contracts import (
     HandOcclusion,
     HandPresenceResult,
     HandSample,
+    InkBaselineState,
     InkDisplaySnapshot,
 )
 from draw.ink import registration as registration_mod
@@ -1675,3 +1676,36 @@ def test_hand_occlusion_reaches_ink_only_on_its_own_capture(different):
         assert visible[350, 450]
     else:
         assert visible is None
+
+
+class _BaselineInk(_FakeInkWorker):
+    def __init__(self):
+        super().__init__()
+        self.rezero_calls = 0
+
+    def rezero_baseline(self):
+        self.rezero_calls += 1
+        return True
+
+    def baseline_state(self):
+        return InkBaselineState(True, True, 1.0, 0, "ready")
+
+
+def test_baseline_state_and_rezero_need_page_model_and_active_sheet():
+    off, _, off_ink = _make_loop([], ink=_BaselineInk())
+    assert off.ink_baseline_state().phase == "disabled"
+    assert off.rezero_ink_baseline() is False
+    assert off_ink.rezero_calls == 0
+
+    config = PipelineConfig(ink=InkConfig(page_model=True), **_BASE)
+    loop, _, ink = _make_loop([], config=config, ink=_BaselineInk())
+    # Sem folha ativa: a interface espera a folha e a tecla z nao age.
+    assert loop.ink_baseline_state().phase == "waiting_page"
+    assert loop.rezero_ink_baseline() is False
+    assert ink.rezero_calls == 0
+
+    loop.sheet_present = True
+    loop.ink_session_open = True
+    assert loop.ink_baseline_state() == InkBaselineState(True, True, 1.0, 0, "ready")
+    assert loop.rezero_ink_baseline() is True
+    assert ink.rezero_calls == 1

@@ -5,6 +5,7 @@ neural+classico com veto de presenca e extras de mascara, a checagem
 de modelos do --check e a validacao de argumentos do main().
 """
 
+import dataclasses
 import os
 import re
 import shutil
@@ -25,6 +26,7 @@ from draw import config  # noqa: E402
 from draw import paper as paper_module  # noqa: E402
 from draw import selfcheck as selfcheck_module  # noqa: E402
 from draw import ui as ui_module  # noqa: E402
+from draw.contracts import InkBaselineState  # noqa: E402
 from draw.infra import manifest as manifest_module  # noqa: E402
 from draw.perception import PRESENCE_VETO_LOGIT  # noqa: E402
 
@@ -1132,6 +1134,40 @@ def test_main_legacy_ink_volta_ao_comportamento_anterior(monkeypatch):
     )
 
 
+def test_main_ink_baseline_liga_o_page_model_no_preset_de_producao(monkeypatch):
+    pipeline = _run_main(monkeypatch, "--ink-baseline")["pipeline_config"]
+    assert pipeline.ink == dataclasses.replace(
+        app_module.InkConfig.production(), page_model=True
+    )
+
+
+def test_main_ink_baseline_coexiste_com_legacy_e_preset(monkeypatch):
+    legacy = _run_main(monkeypatch, "--legacy-ink", "--ink-baseline")["pipeline_config"]
+    ruled = _run_main(monkeypatch, "--preset", "ruled", "--ink-baseline")[
+        "pipeline_config"
+    ]
+    assert legacy.ink == app_module.InkConfig(paper_guard=False, page_model=True)
+    assert ruled.ink == dataclasses.replace(
+        app_module.InkConfig.production(), page_model=True
+    )
+
+
+def test_baseline_parcial_nao_promete_que_todas_as_areas_estao_prontas():
+    state = InkBaselineState(True, True, 0.5, 120, "ready_partial")
+    text, color = app_module._ink_baseline_status_text(state)
+    assert text == "Referencia parcial (50%); aguarde antes de desenhar"
+    assert color == (0, 255, 255)
+    assert "Pronto" not in text
+
+
+def test_baseline_pronto_so_sem_area_pendente():
+    state = InkBaselineState(True, True, 1.0, 0, "ready")
+    assert app_module._ink_baseline_status_text(state) == (
+        "Pronto para desenhar",
+        (0, 255, 0),
+    )
+
+
 def test_main_no_ink_ruling_tira_so_a_pauta(monkeypatch):
     pipeline = _run_main(monkeypatch, "--no-ink-ruling")["pipeline_config"]
     assert pipeline.ink == app_module.InkConfig.production(ruling_removal=False)
@@ -1219,6 +1255,7 @@ def test_main_markers_sem_flags_usa_o_preset_legado(monkeypatch):
         ["--markers", "--ink-interval", "0.15"],
         ["--markers", "--no-ink-ruling"],
         ["--markers", "--legacy-ink"],
+        ["--markers", "--ink-baseline"],
         ["--legacy-ink", "--no-ink-ruling"],
         ["--ink-interval", "0"],
         ["--ink-vote", "1.5"],

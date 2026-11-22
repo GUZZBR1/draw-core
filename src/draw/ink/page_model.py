@@ -73,13 +73,20 @@ _UPDATE_RATE = 0.125
 # ser "conteudo novo", em unidades de luminancia. Semente para
 # traco escuro sobre papel claro; a calibracao real sai do corpus.
 # A literatura canonica testa sombra por RAZAO (MOG2 Tau, penumbra e o
-# caso dificil — docs/research/nota-page-model-literatura.md); o delta
+# caso dificil — docs/research/nota-page-model-literatura.md no repo
+# GUZZBR1/-draw-site-); o delta
 # absoluto falha justamente no gradiente de sombra movel do #133. E o
 # erro mais seguro p/ prototipo: falso `novel` cai na pipeline normal
 # (status quo), falso `~novel` suprime traco claro para sempre — mas a
 # decisao delta vs razao vs entrada `division_normalize` e medicao,
 # nao chute: pendente de clipes reais.
 _NOVEL_DELTA = 24.0
+# Tolerancia de "voltou a referencia", em luminancia normalizada. Bem
+# mais apertada que _NOVEL_DELTA de proposito: histerese de limiar duplo
+# (Rosin, BMVC 1995) — acima de NOVEL e conteudo novo, abaixo de RETURN
+# e o fundo de volta, e entre os dois e incerto e nao decide nada. Sem
+# isso um traco que perdeu contraste (reflexo) pareceria apagado.
+_RETURN_TOL = 8.0
 
 
 def _block_fraction(mask, block, raw=False):
@@ -100,6 +107,27 @@ def _block_fraction(mask, block, raw=False):
     if raw:
         return sums
     return sums / _block_fraction(np.ones((height, width), dtype=bool), block, raw=True)
+
+
+def _nearest_reference_gap(ref_inf, ys, xs, values, reach):
+    """min |ref_inf[q] - value| sobre q a ate `reach` px (Chebyshev) de
+    cada (ys, xs); inf onde nenhuma referencia semeada e alcancavel.
+
+    Varre os vizinhos por indice: os pontos sao poucos perto da grade
+    (fora dela, ou inf, nao reproduz nada).
+    """
+    height, width = ref_inf.shape
+    gap_min = np.full(ys.shape, np.inf, dtype=np.float32)
+    for oy in range(-reach, reach + 1):
+        qy = ys + oy
+        in_y = (qy >= 0) & (qy < height)
+        qy = np.clip(qy, 0, height - 1)
+        for ox in range(-reach, reach + 1):
+            qx = xs + ox
+            inside = in_y & (qx >= 0) & (qx < width)
+            gap = np.abs(ref_inf[qy, np.clip(qx, 0, width - 1)] - values)
+            np.minimum(gap_min, np.where(inside, gap, np.inf), out=gap_min)
+    return gap_min
 
 
 def _expand(blocks, shape, block):
@@ -151,7 +179,16 @@ class PageModel:
         self._all_seeded = False
         self._last_chroma_ok = True
         self._last_visible = None
+        self._last_norm = None
+        # Ultima aparencia normalizada VISTA por pixel (NaN = nunca
+        # visto): o que a mao cobriu na ultima passada guarda o tom
+        # da ultima observacao valida, nao o da mao.
+        self._observed_norm = np.full((height, width), np.nan, dtype=np.float32)
+        self._observed_shared = False
         self._seeded = np.zeros((height, width), dtype=bool)
+        # Referencia com inf fora do semeado: derivada, refeita sob
+        # demanda depois de cada observe (que a altera).
+        self._ref_inf = None
         self._occluder_hold = np.zeros((height, width), dtype=np.uint8)
         self._hold_mask = np.zeros((height, width), dtype=bool)
         self._recovering_px = 0
@@ -203,6 +240,11 @@ class PageModel:
             return 0.0
         return float(np.count_nonzero(self._seeded) / self._seeded.size)
 
+    def _reference_inf(self):
+        if self._ref_inf is None:
+            self._ref_inf = np.where(self._seeded, self._norm_ref, np.float32(np.inf))
+        return self._ref_inf
+
     def observe(self, gray, visible=None, paper=None, bgr=None):
         """Alimenta o modelo com a luminancia desta passada (grade da ancora).
 
@@ -251,8 +293,20 @@ class PageModel:
         self._last_chroma_ok = chroma_ok
         self._last_visible = visible
         norm_gray = gray if abs(gain - 1.0) <= 1e-4 else (gray / np.float32(gain))
+        self._last_norm = norm_gray
+        if visible.all():
+            # Sem copia: a passada inteira vista E o ultimo visto.
+            self._observed_norm = norm_gray
+            self._observed_shared = True
+        else:
+            if self._observed_shared:
+                # Nunca escrever no gray de uma passada anterior.
+                self._observed_norm = self._observed_norm.copy()
+                self._observed_shared = False
+            np.copyto(self._observed_norm, norm_gray, where=visible)
         if has_seed_now:
             self._ref[seed_now] = gray[seed_now]
+            self._ref_inf = None
             self._norm_ref[seed_now] = norm_gray[seed_now]
             self._seeded |= seed_now
             self._has_seeded = True
@@ -273,6 +327,7 @@ class PageModel:
                 np.subtract(gray, self._ref, out=diff, where=update)
                 np.multiply(diff, rate, out=diff, where=update)
                 np.add(self._ref, diff, out=self._ref, where=update)
+                self._ref_inf = None
                 np.subtract(norm_gray, self._norm_ref, out=diff, where=update)
                 np.multiply(diff, rate, out=diff, where=update)
                 np.add(self._norm_ref, diff, out=self._norm_ref, where=update)
@@ -488,6 +543,25 @@ class PageModel:
             return self._seeded.copy()
         return self._seeded & np.asarray(visible, dtype=bool)
 
+    def normalize(self, gray, visible=None):
+        """`gray` no dominio normalizado pela iluminacao da passada.
+
+        O ganho e estimado na folha inteira (o custo dominante): quem
+        compara a mesma passada varias vezes normaliza uma vez e passa
+        `prenormalized=True` aos metodos de comparacao.
+        """
+        return self._normalized(gray, visible)
+
+    def _normalized(self, gray, visible=None):
+        gray = np.asarray(gray, dtype=np.float32)
+        if gray.shape != self.shape:
+            raise ValueError(f"gray na grade {gray.shape}, modelo na {self.shape}")
+        vis = self._last_visible if visible is None else visible
+        gain = (
+            self._estimate_gain(gray, visible=vis)[0] if self._last_chroma_ok else 1.0
+        )
+        return gray if abs(gain - 1.0) <= 1e-4 else (gray / np.float32(gain))
+
     def novel(self, gray, visible=None):
         """Pixels mais escuros que a referencia alem de `novel_delta`.
 
@@ -495,17 +569,367 @@ class PageModel:
         iluminacao do papel exposto: escurecimento global da folha nao
         transforma marca impressa ja semeada em tinta nova.
         """
-        gray = np.asarray(gray, dtype=np.float32)
-        if gray.shape != self.shape:
-            raise ValueError(f"gray na grade {gray.shape}, modelo na {self.shape}")
+        norm_gray = self._normalized(gray, visible)
         if not self._has_seeded:
             return np.zeros(self.shape, dtype=bool)
-        vis = self._last_visible if visible is None else visible
-        gain = (
-            self._estimate_gain(gray, visible=vis)[0] if self._last_chroma_ok else 1.0
-        )
-        norm_gray = gray if abs(gain - 1.0) <= 1e-4 else (gray / np.float32(gain))
         return self._seeded & (self._norm_ref - norm_gray > self.novel_delta)
+
+    def appearance(self, gray, visible=None):
+        """(novel, returned) numa unica normalizacao de iluminacao.
+
+        A estimativa de ganho e o custo dominante de ambos; o caminho
+        quente da trabalhadora precisa dos dois por passada.
+        """
+        norm_gray = self._normalized(gray, visible)
+        if not self._has_seeded:
+            none = np.zeros(self.shape, dtype=bool)
+            return none, none.copy()
+        diff = self._norm_ref - norm_gray
+        return (
+            self._seeded & (diff > self.novel_delta),
+            self._seeded & (np.abs(diff) <= _RETURN_TOL),
+        )
+
+    def returned(self, gray, visible=None):
+        """Pixels de volta a aparencia semeada, dentro de `_RETURN_TOL`.
+
+        E o outro lado da histerese de `novel`: so quem casa com a
+        referencia de perto e evidencia de ausencia. Pixel entre as duas
+        tolerancias (traco com contraste reduzido) nao e nem novo nem
+        de volta.
+        """
+        norm_gray = self._normalized(gray, visible)
+        if not self._has_seeded:
+            return np.zeros(self.shape, dtype=bool)
+        return self._seeded & (np.abs(self._norm_ref - norm_gray) <= _RETURN_TOL)
+
+    def darker_than_reference(
+        self,
+        gray,
+        *,
+        dy=0,
+        dx=0,
+        near=0,
+        visible=None,
+        region=None,
+        prenormalized=False,
+        with_expected=True,
+    ):
+        """Pixels mais escuros que a aparencia limpa ALINHADA, alem de `novel_delta`.
+
+        Compara `gray` (grade da ancora) a `_norm_ref` na posicao
+        deslocada de (dy, dx) — a mesma translacao que a pauta mede —
+        no dominio normalizado pela iluminacao da passada, entao um
+        escurecimento global nao vira marca nova. Cada pixel julga
+        contra a pior aparencia limpa que poderia ocupar o lugar: a
+        referencia semeada mais escura a ate `near` px — a variacao
+        de borda da marca impressa deslocada. Pixel sem referencia
+        alcancavel nao prova nada (False).
+
+        `region`=(y0, y1, x0, x1) restringe a computacao pesada: a
+        margem necessaria (near + |deslocamento|) e acrescentada por
+        dentro, e posicoes fora dela voltam darker=False, expected=inf.
+        Em folha A4 a comparacao full-frame dominava a avaliacao de
+        identidade.
+
+        Devolve (darker, expected): `expected` e a aparencia limpa
+        propagada usada no julgamento (float32; inf onde nenhuma
+        referencia semeada alcanca). A comparacao com o nivel de
+        cinza da tinta salva (`expected - level` dentro de
+        `novel_delta`) e o que separa "indistinguivel" de
+        "aparencia de pauta provando ausencia". `with_expected=False`
+        devolve expected=None (evita a grade float inteira);
+        `prenormalized=True` recebe `gray` ja vindo de `normalize`."""
+        # O ganho de iluminacao e global — medido na folha inteira,
+        # nao no recorte.
+        norm_gray = (
+            np.asarray(gray, dtype=np.float32)
+            if prenormalized
+            else self._normalized(gray, visible)
+        )
+        height, width = self.shape
+        if not self._has_seeded:
+            return (
+                np.zeros(self.shape, dtype=bool),
+                np.full(self.shape, np.inf, dtype=np.float32)
+                if with_expected
+                else None,
+            )
+        if region is None:
+            cy0, cy1, cx0, cx1 = 0, height, 0, width
+        else:
+            pad = near + max(abs(dy), abs(dx))
+            cy0 = max(0, int(region[0]) - pad)
+            cy1 = min(height, int(region[1]) + pad)
+            cx0 = max(0, int(region[2]) - pad)
+            cx1 = min(width, int(region[3]) + pad)
+        ref = self._reference_inf()[cy0:cy1, cx0:cx1]
+        if dy or dx:
+            ch, cw = ref.shape
+            shifted = np.full(ref.shape, np.inf, dtype=np.float32)
+            src_y0, src_y1 = max(0, -dy), min(ch, ch - dy)
+            src_x0, src_x1 = max(0, -dx), min(cw, cw - dx)
+            if src_y1 > src_y0 and src_x1 > src_x0:
+                shifted[src_y0 + dy : src_y1 + dy, src_x0 + dx : src_x1 + dx] = ref[
+                    src_y0:src_y1, src_x0:src_x1
+                ]
+            ref = shifted
+        if near > 0:
+            ref = cv2.erode(ref, np.ones((2 * near + 1, 2 * near + 1), dtype=np.uint8))
+        darker = np.zeros(self.shape, dtype=bool)
+        darker[cy0:cy1, cx0:cx1] = np.isfinite(ref) & (
+            ref - norm_gray[cy0:cy1, cx0:cx1] > self.novel_delta
+        )
+        if not with_expected:
+            return darker, None
+        expected = np.full(self.shape, np.inf, dtype=np.float32)
+        expected[cy0:cy1, cx0:cx1] = ref
+        return darker, expected
+
+    def saved_tone_evidence(
+        self,
+        gray,
+        levels,
+        at,
+        *,
+        dy=0,
+        dx=0,
+        near=0,
+        visible=None,
+        region=None,
+        prenormalized=False,
+        with_unsure=False,
+        sampled=None,
+    ):
+        """Evidencia fotometrica da tinta salva nas posicoes `at`.
+
+        `levels` (float32 HxW, NaN = desconhecido) e o tom normalizado
+        da tinta salva; (dy, dx) a translacao medida da folha. Devolve
+        (distinct, matched_obs), bool HxW:
+
+        - distinct: posicao de `at` cujo tom salvo difere alem de
+          `novel_delta` de TODA aparencia limpa semeada a ate
+          near + |deslocamento| px — nenhuma copia limpa, nem com a
+          pauta deslocada, o reproduz. Lapis de 70 colado a pauta de
+          40 e distinto (a pior aparencia vizinha nao o imita); traco
+          de 40 colado a pauta de 40 nao. Tom desconhecido ou nenhuma
+          referencia alcancavel: False. Tambem False onde o unico veto
+          ao match vem de pauta do quadro medido cuja amostra esta
+          escondida — nem presenca nem ausencia provada (ambiguo).
+        - matched_obs: posicoes observadas (a salva ou a deslocada, na
+          grade atual) de pixel distinto onde o tom salvo reapareceu
+          dentro de `novel_delta` — presenca provada pela aparencia.
+
+        `region`=(y0, y1, x0, x1) e um bbox que contem `at` (evita a
+        varredura da grade inteira); `prenormalized` como em
+        `darker_than_reference`. `with_unsure` acrescenta dois masks:
+        unsure, as posicoes de `at` tiradas de `distinct` so pela
+        amostra escondida — nao julgaveis nesta passada — e occluded,
+        o subconjunto cujo veto depende de amostra escondida DENTRO de
+        `sampled` (a pegada do registro; None = grade inteira): mao
+        sobre a folha, nao recorte geometrico.
+        """
+        height, width = self.shape
+        distinct = np.zeros(self.shape, dtype=bool)
+        matched_obs = np.zeros(self.shape, dtype=bool)
+        unsure_saved = np.zeros(self.shape, dtype=bool)
+        occluded_saved = np.zeros(self.shape, dtype=bool)
+
+        def result():
+            if with_unsure:
+                return distinct, matched_obs, unsure_saved, occluded_saved
+            return distinct, matched_obs
+
+        if not self._has_seeded or levels is None or levels.shape != self.shape:
+            return result()
+        y0, y1, x0, x1 = (0, height, 0, width) if region is None else region
+        ys, xs = np.nonzero(np.asarray(at, dtype=bool)[y0:y1, x0:x1])
+        ys = ys + y0
+        xs = xs + x0
+        lv = levels[ys, xs]
+        known = np.isfinite(lv)
+        ys, xs, lv = ys[known], xs[known], lv[known]
+        if ys.size == 0:
+            return result()
+        reach = int(near) + max(abs(int(dy)), abs(int(dx)))
+        ref_inf = self._reference_inf()
+        min_gap = _nearest_reference_gap(ref_inf, ys, xs, lv, reach)
+        keep = np.isfinite(min_gap) & (min_gap > self.novel_delta)
+        ys, xs, lv = ys[keep], xs[keep], lv[keep]
+        if ys.size == 0:
+            return result()
+        distinct[ys, xs] = True
+        norm_gray = (
+            np.asarray(gray, dtype=np.float32)
+            if prenormalized
+            else self._normalized(gray, visible)
+        )
+        vis = None if visible is None else np.asarray(visible, dtype=bool)
+        foot = None if sampled is None else np.asarray(sampled, dtype=bool)
+        matched_saved = np.zeros(self.shape, dtype=bool)
+        for oy, ox in {(0, 0), (int(dy), int(dx))}:
+            qy, qx = ys + oy, xs + ox
+            ok = (qy >= 0) & (qy < height) & (qx >= 0) & (qx < width)
+            if vis is not None:
+                ok[ok] = vis[qy[ok], qx[ok]]
+            py, px = ys[ok], xs[ok]
+            qy, qx, lq = qy[ok], qx[ok], lv[ok]
+            obs = norm_gray[qy, qx]
+            saved_gap = np.abs(obs - lq)
+            # A observacao tem de ser melhor explicada pela tinta salva
+            # que pela aparencia limpa: pauta de uma copia limpa um
+            # pouco mais escura (85 vs 95) cai dentro do delta da
+            # escrita salva (65), mas segue mais perto da pauta. A
+            # referencia mora na grade salva e cada quadro so alcanca
+            # `near`: o do candidato (q volta para a posicao salva) e
+            # o da folha medida (q - (dy, dx)) — o traco no lugar
+            # salvo nao prova que a pauta tambem nao andou. O
+            # deslocamento e global: a pauta vizinha que provadamente
+            # ficou no lugar sai do quadro medido e nao veta o traco
+            # que tambem ficou.
+            near_i = int(near)
+            clean_gap = _nearest_reference_gap(ref_inf, py, px, obs, near_i)
+            unsure = occluded = None
+            if (oy, ox) != (int(dy), int(dx)) and py.size:
+                moved_ref, known_ref, occl_ref, my0, mx0 = self._moved_reference(
+                    ref_inf,
+                    norm_gray,
+                    vis,
+                    foot,
+                    py - int(dy),
+                    px - int(dx),
+                    near_i,
+                    int(dy),
+                    int(dx),
+                )
+                ry, rx = py - int(dy) - my0, px - int(dx) - mx0
+                if known_ref is not None:
+                    known_gap = np.minimum(
+                        clean_gap,
+                        _nearest_reference_gap(known_ref, ry, rx, obs, near_i),
+                    )
+                    occl_gap = np.minimum(
+                        clean_gap,
+                        _nearest_reference_gap(occl_ref, ry, rx, obs, near_i),
+                    )
+                np.minimum(
+                    clean_gap,
+                    _nearest_reference_gap(moved_ref, ry, rx, obs, near_i),
+                    out=clean_gap,
+                )
+                if known_ref is not None:
+                    fits = saved_gap <= self.novel_delta
+                    unsure = fits & (saved_gap < known_gap)
+                    occluded = fits & (saved_gap < occl_gap)
+            hit = (saved_gap <= self.novel_delta) & (saved_gap < clean_gap)
+            matched_obs[qy[hit], qx[hit]] = True
+            matched_saved[py[hit], px[hit]] = True
+            if unsure is not None:
+                # Veto so por referencia cuja amostra do quadro medido
+                # esta escondida (ou fora da grade): nem presenca nem
+                # ausencia provada — o pixel volta a ser ambiguo.
+                unsure &= ~hit
+                unsure_saved[py[unsure], px[unsure]] = True
+                occluded &= unsure
+                occluded_saved[py[occluded], px[occluded]] = True
+        unsure_saved &= ~matched_saved
+        occluded_saved &= unsure_saved
+        distinct &= ~unsure_saved
+        return result()
+
+    @staticmethod
+    def _moved_reference(ref_inf, norm_gray, vis, foot, cy, cx, reach, dy, dx):
+        """Recortes de `ref_inf` cobrindo (cy, cx) +- reach para o quadro
+        medido (dy, dx). Devolve (moved, known, occluded, y0, x0):
+
+        - moved: inf so onde a aparencia limpa provadamente FICOU no
+          lugar — a observacao em r reproduz ref[r] mais de
+          `_RETURN_TOL` melhor que a em r + (dy, dx), ambas visiveis.
+          Amostra que nao distingue as duas posicoes (faixa larga
+          cobrindo ambas, oclusao, borda) mantem a referencia.
+        - known: `moved` tambem com inf onde alguma das duas amostras
+          esta escondida ou fora da grade — so a referencia julgada
+          pela aparencia visivel.
+        - occluded: `moved` com inf so onde a amostra escondida esta
+          dentro da grade e de `foot` (mao, nao recorte do registro):
+          o veto que sobra nele independe da oclusao.
+        """
+        height, width = ref_inf.shape
+        y0 = max(int(cy.min()) - reach, 0)
+        y1 = min(int(cy.max()) + reach + 1, height)
+        x0 = max(int(cx.min()) - reach, 0)
+        x1 = min(int(cx.max()) + reach + 1, width)
+        moved = ref_inf[y0:y1, x0:x1].copy()
+        ty0, ty1 = max(y0, -dy), min(y1, height - dy)
+        tx0, tx1 = max(x0, -dx), min(x1, width - dx)
+        if ty1 <= ty0 or tx1 <= tx0:
+            known = np.full(moved.shape, np.inf, dtype=np.float32)
+            return moved, known, moved.copy(), y0, x0
+        full = (ty0, ty1, tx0, tx1) == (y0, y1, x0, x1)
+        ref = ref_inf[ty0:ty1, tx0:tx1]
+        here = norm_gray[ty0:ty1, tx0:tx1]
+        there = norm_gray[ty0 + dy : ty1 + dy, tx0 + dx : tx1 + dx]
+        stayed = np.abs(here - ref) + _RETURN_TOL < np.abs(there - ref)
+        judged = np.ones(ref.shape, dtype=bool)
+        if vis is not None:
+            judged = (
+                vis[ty0:ty1, tx0:tx1] & vis[ty0 + dy : ty1 + dy, tx0 + dx : tx1 + dx]
+            )
+            stayed &= judged
+        win = (slice(ty0 - y0, ty1 - y0), slice(tx0 - x0, tx1 - x0))
+        moved[win][stayed] = np.inf
+        if full and (vis is None or judged.all()):
+            # Toda amostra visivel e na grade: nenhum veto depende de
+            # oclusao — sem os recortes extras.
+            return moved, None, None, y0, x0
+        known = np.full(moved.shape, np.inf, dtype=np.float32)
+        occluded = ref_inf[y0:y1, x0:x1].copy()
+        known[win] = np.where(judged & ~stayed, ref, np.inf)
+        hidden = ~judged
+        if foot is not None:
+            hidden &= (
+                foot[ty0:ty1, tx0:tx1] & foot[ty0 + dy : ty1 + dy, tx0 + dx : tx1 + dx]
+            )
+        occluded[win] = np.where(stayed | hidden, np.inf, ref)
+        return moved, known, occluded, y0, x0
+
+    @property
+    def observed_normalized_gray(self):
+        """Ultimo tom normalizado VISTO por pixel (float32, NaN = nunca visto).
+
+        A referencia fotometrica da tinta salva: diferente de
+        `last_normalized_gray`, o pixel coberto pela mao (ou recusado
+        pela guarda) na ultima passada guarda a ultima observacao
+        valida, nao o tom do oclusor.
+        """
+        return self._observed_norm
+
+    @property
+    def last_normalized_gray(self):
+        """O gray normalizado pela iluminacao da ultima observacao.
+
+        None antes do primeiro observe — a referencia fotometrica
+        que a maquina de identidade guarda junto da mascara de
+        tinta salva.
+        """
+        return self._last_norm
+
+    def seeding_pending(self, visible=None):
+        """Visivel sem referencia em bloco com semeadura em curso.
+
+        So blocos que ja contam observacoes (0 < streak < confirm_obs):
+        bloco com menos de `_SEEN_FRACTION` de papel visivel nunca conta
+        e nunca semeia — esperar por ele seria esperar para sempre. E o
+        que a prontidao precisa: "falta pouco", nao "falta tudo".
+        """
+        if visible is None:
+            visible = np.ones(self.shape, dtype=bool)
+        active = _expand(
+            (self._streak > 0) & (self._streak < self.confirm_obs),
+            self.shape,
+            self.block,
+        )
+        return ~self._seeded & np.asarray(visible, dtype=bool) & active
 
     def pending(self, visible=None):
         """Pixels visiveis ainda sem referencia (diagnostico/telemetria)."""
