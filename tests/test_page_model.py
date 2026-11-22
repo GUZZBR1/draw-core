@@ -375,6 +375,55 @@ def test_page_model_reacquisition_control_rejects_different_sheet(monkeypatch):
         worker.stop()
 
 
+def test_page_model_reacquires_small_stroke_with_printed_baseline_and_visible_mask(
+    monkeypatch,
+):
+    """R1767-1774: referencia confirmada < 32 px com baseline impresso e visible nao defere."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        gen1 = worker.new_generation()
+        vis_all = np.ones((H, W), dtype=bool)
+        image = np.full((H, W), PAPER, dtype=np.float32)
+        # 900 px de baseline impresso
+        image[10:20, 10:55] = INK
+        image[24:34, 10:55] = INK
+        for _ in range(3):
+            _drive(worker, gen1, image, visible=vis_all)
+        assert np.count_nonzero(_confirmed(worker, gen1)) == 0
+
+        # Ponto manuscrito de 20 px (< _IDENTITY_MIN_VISIBLE_PX = 32)
+        image[60:64, 80:85] = INK
+        for _ in range(4):
+            _drive(worker, gen1, image, visible=vis_all)
+        assert np.count_nonzero(_confirmed(worker, gen1)) == 20
+
+        gen2 = worker.new_generation(preserve_identity=True)
+        _drive(worker, gen2, image, visible=vis_all)
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] == "same_page"
+        assert events[-1]["deferred"] is False
+        assert np.count_nonzero(_confirmed(worker, gen2)[60:64, 80:85]) == 20
+    finally:
+        worker.stop()
+
+
+def test_page_model_reference_stays_within_camera_range_after_large_brightness_jump():
+    """page_model.py:170: salto grande de brilho rejeitado por _estimate_gain nao estoura 255."""
+    model = pm_mod.PageModel((H, W), confirm_obs=1, rate=0.5)
+    dim = np.full((H, W), 90.0, dtype=np.float32)
+    paper_mask = np.ones((H, W), dtype=bool)
+    model.observe(dim, paper=paper_mask)
+    assert float(model.reference.max()) == pytest.approx(90.0)
+
+    # Salto de 90 -> 245 (gain_p90 = 2.72 > 2.0, rejeitado pelo _estimate_gain)
+    bright = np.full((H, W), 245.0, dtype=np.float32)
+    for _ in range(10):
+        model.observe(bright, paper=paper_mask)
+        assert float(model.reference.max()) <= 255.0
+    np.testing.assert_allclose(model.reference, 245.0, atol=1.0)
+
+
 def test_page_model_supports_consecutive_cornerless_submissions(monkeypatch):
     """Issue 2: submissoes consecutivas sem cantos usam identidade sem crashar."""
     monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)

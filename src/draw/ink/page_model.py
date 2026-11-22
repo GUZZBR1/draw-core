@@ -142,13 +142,15 @@ class PageModel:
         self.novel_delta = float(novel_delta)
         height, width = self.shape
         self._ref = np.zeros((height, width), dtype=np.float32)
-        self._base_level = 0.0
-        self._paper_level = 0.0
+        self._norm_ref = np.zeros((height, width), dtype=np.float32)
+        self._diff_buf = np.empty((height, width), dtype=np.float32)
         self._blue_ref = np.zeros((height, width), dtype=np.float32)
         self._red_ref = np.zeros((height, width), dtype=np.float32)
         self._has_chroma_ref = False
         self._has_seeded = False
+        self._all_seeded = False
         self._last_chroma_ok = True
+        self._last_visible = None
         self._seeded = np.zeros((height, width), dtype=bool)
         self._occluder_hold = np.zeros((height, width), dtype=np.uint8)
         self._hold_mask = np.zeros((height, width), dtype=bool)
@@ -167,10 +169,6 @@ class PageModel:
     @property
     def reference(self):
         """Luminancia de referencia do papel limpo (float32, grade da ancora)."""
-        if self._base_level > 1.0 and self._paper_level > 1.0:
-            scale = self._paper_level / self._base_level
-            if abs(scale - 1.0) > 1e-4:
-                return self._ref * np.float32(scale)
         return self._ref
 
     @property
@@ -243,21 +241,22 @@ class PageModel:
             np.uint8
         )
         streak[~seen] = 0
-        ready = _expand(streak >= self.confirm_obs, self.shape, self.block)
-        seed_now = ready & visible & ~self._seeded
-        has_seed_now = bool(np.any(seed_now))
-        gain, chroma_ok, cur_paper = self._estimate_gain(gray, bgr=bgr, visible=visible)
+        seed_now = None
+        has_seed_now = False
+        if not self._all_seeded:
+            ready = _expand(streak >= self.confirm_obs, self.shape, self.block)
+            seed_now = ready & visible & ~self._seeded
+            has_seed_now = bool(np.any(seed_now))
+        gain, chroma_ok = self._estimate_gain(gray, bgr=bgr, visible=visible)
         self._last_chroma_ok = chroma_ok
+        self._last_visible = visible
         norm_gray = gray if abs(gain - 1.0) <= 1e-4 else (gray / np.float32(gain))
         if has_seed_now:
-            self._ref[seed_now] = norm_gray[seed_now]
+            self._ref[seed_now] = gray[seed_now]
+            self._norm_ref[seed_now] = norm_gray[seed_now]
             self._seeded |= seed_now
             self._has_seeded = True
-            if self._base_level <= 1.0:
-                seeded_vals = self._ref[::8, ::8][self._seeded[::8, ::8]]
-                if seeded_vals.size > 0:
-                    self._base_level = float(np.percentile(seeded_vals, 90))
-                    self._paper_level = self._base_level
+            self._all_seeded = bool(np.all(self._seeded))
         update = None
         has_update = False
         if paper is not None:
@@ -269,14 +268,14 @@ class PageModel:
             update = self._seeded & visible & paper
             has_update = bool(np.any(update))
             if has_update:
-                self._ref[update] += self.rate * (norm_gray[update] - self._ref[update])
-                if cur_paper > 1.0:
-                    if self._paper_level <= 1.0:
-                        self._paper_level = cur_paper
-                    else:
-                        self._paper_level += self.rate * (cur_paper - self._paper_level)
-                    if self._base_level <= 1.0:
-                        self._base_level = self._paper_level
+                diff = self._diff_buf
+                rate = np.float32(self.rate)
+                np.subtract(gray, self._ref, out=diff, where=update)
+                np.multiply(diff, rate, out=diff, where=update)
+                np.add(self._ref, diff, out=self._ref, where=update)
+                np.subtract(norm_gray, self._norm_ref, out=diff, where=update)
+                np.multiply(diff, rate, out=diff, where=update)
+                np.add(self._norm_ref, diff, out=self._norm_ref, where=update)
         if (
             (has_seed_now or has_update)
             and bgr is not None
@@ -297,13 +296,17 @@ class PageModel:
                 self._red_ref[update] += self.rate * (
                     red[update] - self._red_ref[update]
                 )
-        unseeded_vis_blocks = (
-            _block_fraction(~self._seeded & visible, self.block, raw=True) > 0
-        )
-        active = (streak > 0) & (streak < self.confirm_obs) & unseeded_vis_blocks
-        self._seeding_remaining = (
-            int(np.max(self.confirm_obs - streak[active])) if np.any(active) else 0
-        )
+        active_streak = (streak > 0) & (streak < self.confirm_obs)
+        if not self._all_seeded and np.any(active_streak):
+            unseeded_vis_blocks = (
+                _block_fraction(~self._seeded & visible, self.block, raw=True) > 0
+            )
+            active = active_streak & unseeded_vis_blocks
+            self._seeding_remaining = (
+                int(np.max(self.confirm_obs - streak[active])) if np.any(active) else 0
+            )
+        else:
+            self._seeding_remaining = 0
 
     def _estimate_gain(
         self,
@@ -313,12 +316,12 @@ class PageModel:
         visible=None,
         chroma_tol=paper_evidence._CHROMA_TOL,
     ):
-        """Estima (gain, chroma_valid, gray_p90) da iluminacao global contra _ref."""
+        """Estima (gain, chroma_valid) da iluminacao global contra _norm_ref."""
         if not self._has_seeded:
-            return 1.0, True, 0.0
+            return 1.0, True
         stride = paper_evidence._SAMPLE_STRIDE
         seeded_s = self._seeded[::stride, ::stride]
-        ref_s = self._ref[::stride, ::stride]
+        ref_s = self._norm_ref[::stride, ::stride]
         gray_s = gray_f[::stride, ::stride]
         if visible is None:
             seeded_vis_grid = seeded_s & (ref_s > 1.0)
@@ -330,19 +333,19 @@ class PageModel:
             max(8, seeded_total // 2),
         )
         if int(np.count_nonzero(seeded_vis_grid)) < min_samples:
-            return 1.0, True, 0.0
+            return 1.0, True
         ref_cut = float(np.percentile(ref_s[seeded_vis_grid], 50))
         paper_keep = seeded_vis_grid & (ref_s >= ref_cut)
         if int(np.count_nonzero(paper_keep)) < max(4, min_samples // 2):
-            return 1.0, True, 0.0
+            return 1.0, True
         ratios = gray_s[paper_keep] / ref_s[paper_keep]
         gain_p90 = float(np.percentile(ratios, 90))
         gray_p90 = float(np.percentile(gray_s[paper_keep], 90))
         if not (0.35 <= gain_p90 <= 2.0 and gray_p90 >= 60.0):
-            return 1.0, True, gray_p90
+            return 1.0, True
         plateau = (ratios >= 0.85 * gain_p90) & (ratios <= 1.15 * gain_p90)
         if int(np.count_nonzero(plateau)) < 0.25 * ratios.size:
-            return 1.0, True, gray_p90
+            return 1.0, True
         chroma_valid = True
         if (
             self._has_chroma_ref
@@ -366,8 +369,8 @@ class PageModel:
                     abs(cur_ratio - ref_ratio) <= spread_g
                 )
         if not chroma_valid:
-            return 1.0, False, gray_p90
-        return gain_p90, True, gray_p90
+            return 1.0, False
+        return gain_p90, True
 
     def exposed(
         self,
@@ -407,13 +410,13 @@ class PageModel:
         cells = max(1, self.block // step)
         kernel = np.ones((cells, cells), np.uint8)
         ref_grid = np.where(
-            self._seeded[::step, ::step], self._ref[::step, ::step], 0.0
+            self._seeded[::step, ::step], self._norm_ref[::step, ::step], 0.0
         )
         gray_grid = gray_f[::step, ::step]
         ref_peak = cv2.dilate(ref_grid, kernel)
         gray_peak = cv2.dilate(gray_grid, kernel)
         has_ref = ref_peak > 1.0
-        gain, chroma_ok, _ = self._estimate_gain(
+        gain, chroma_ok = self._estimate_gain(
             gray_f, bgr=bgr, visible=input_vis, chroma_tol=chroma_tol
         )
         self._last_chroma_ok = chroma_ok
@@ -485,7 +488,7 @@ class PageModel:
             return self._seeded.copy()
         return self._seeded & np.asarray(visible, dtype=bool)
 
-    def novel(self, gray):
+    def novel(self, gray, visible=None):
         """Pixels mais escuros que a referencia alem de `novel_delta`.
 
         Compara `gray` e a referencia no mesmo dominio normalizado pela
@@ -497,9 +500,12 @@ class PageModel:
             raise ValueError(f"gray na grade {gray.shape}, modelo na {self.shape}")
         if not self._has_seeded:
             return np.zeros(self.shape, dtype=bool)
-        gain = self._estimate_gain(gray)[0] if self._last_chroma_ok else 1.0
+        vis = self._last_visible if visible is None else visible
+        gain = (
+            self._estimate_gain(gray, visible=vis)[0] if self._last_chroma_ok else 1.0
+        )
         norm_gray = gray if abs(gain - 1.0) <= 1e-4 else (gray / np.float32(gain))
-        return self._seeded & (self._ref - norm_gray > self.novel_delta)
+        return self._seeded & (self._norm_ref - norm_gray > self.novel_delta)
 
     def pending(self, visible=None):
         """Pixels visiveis ainda sem referencia (diagnostico/telemetria)."""

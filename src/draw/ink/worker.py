@@ -1802,10 +1802,14 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         prior_visible = prior & identity_visible
                         prior_visible_px = int(np.count_nonzero(prior_visible))
                         p.identity_visible_reference_px = prior_visible_px
-                        if prior_visible_px < max(
-                            identity._IDENTITY_MIN_VISIBLE_PX,
-                            int(identity._IDENTITY_MIN_VISIBLE_FRACTION * prior_px),
-                        ):
+                        min_visible_px = min(
+                            prior_px,
+                            max(
+                                identity._IDENTITY_MIN_VISIBLE_PX,
+                                int(identity._IDENTITY_MIN_VISIBLE_FRACTION * prior_px),
+                            ),
+                        )
+                        if prior_visible_px < min_visible_px:
                             # Tinta anterior quase toda
                             # coberta: decidir agora seria
                             # condenar a pagina pela mao.
