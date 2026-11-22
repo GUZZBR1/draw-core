@@ -56,6 +56,17 @@ _IDENTITY_DILATION_KERNEL = 2 * votes._INK_FRONTIER_RADIUS + 1
 _IDENTITY_MIN_VISIBLE_FRACTION = 0.25
 _IDENTITY_MIN_VISIBLE_PX = 32
 
+# Admissao de re-observacao por aparencia: dentro da margem da
+# pauta, a posicao salva so vale como evidencia de escrita se o
+# pixel estiver mais escuro que a pauta observada nesta passada.
+# Dois limites: o traco tem de ficar abaixo de
+# _IDENTITY_PRINT_INK_RATIO da luminancia impressa medida, e a
+# pauta so e consultada quando esta clara o bastante para a razao
+# discriminar — impressao escura como tinta (< min) rejeitaria a
+# propria escrita, e ai a evidencia posicional e tudo o que existe.
+_IDENTITY_PRINT_INK_RATIO = 0.7
+_IDENTITY_PRINT_GRAY_MIN = 64
+
 # Julgamento de virada sob oclusao: a cobertura e medida sobre a
 # tinta confirmada VISIVEL; com menos que isto de tinta visivel, a
 # passada se abstem — nem avanca nem zera a sequencia de virada.

@@ -405,6 +405,7 @@ def _evaluate_page_identity(
     identity_guard,
     hold_seen,
     threshold,
+    identity_gray=None,
 ):
     """Compara a passada com a referencia de identidade, fora do lock.
 
@@ -445,6 +446,10 @@ def _evaluate_page_identity(
         )
 
     seen = candidate > threshold
+    # Evidencia bruta antes da subtracao de pauta: a admissao de
+    # re-observacao la embaixo volta a incluir pixels removidos por
+    # ~aligned_baseline — mas so onde a aparencia prova escrita.
+    seen_raw = seen
     # Marca impressa nao carrega escrita: sai da referencia julgavel
     # E da evidencia vista (alinhada sub-pixel antes de subtrair).
     if has_baseline:
@@ -643,7 +648,37 @@ def _evaluate_page_identity(
             reobserved = prior_eval | _shift_bool_mask(
                 prior_eval, baseline_dy, baseline_dx
             )
-        seen = seen & (~baseline_d | reobserved)
+        # Posicao salva nao basta: dentro da margem impressa a
+        # admissao exige evidencia de ESCRITA — o pixel tem de estar
+        # mais escuro que a aparencia limpa da propria pauta, medida
+        # aqui nos pixels impressos longe de qualquer tinta salva
+        # (nos dois quadros, para a tinta deslocada nao contaminar a
+        # medida). Na copia limpa e a propria pauta — ou a pele e a
+        # engorda dela — que aterrissa na posicao do traco, e
+        # admiti-la herdava o desenho inteiro; na mesma folha o
+        # traco escurece alem da pauta e segue contando. O OR final
+        # tambem devolve os tracos desenhados INTEIROS sobre a pauta
+        # (toda a tinta salva sob baseline): a subtracao de aligned
+        # os apagou da evidencia, mas eles escurecem o impresso e a
+        # aparencia os readmite — na copia limpa a pauta ali nao
+        # escureceu e nada e admitido.
+        admitted = reobserved & seen_raw
+        if inspected is not None:
+            admitted &= inspected
+        if identity_gray is not None:
+            print_probe = aligned_baseline & ~prior & seen_raw
+            if baseline_dy != 0 or baseline_dx != 0:
+                print_probe &= ~_shift_bool_mask(prior, baseline_dy, baseline_dx)
+            if np.any(print_probe):
+                print_gray = float(np.median(identity_gray[print_probe]))
+                if print_gray > identity._IDENTITY_PRINT_GRAY_MIN:
+                    # A pauta escura como tinta nao discrimina por
+                    # aparencia — o piso dela rejeitaria a propria
+                    # escrita; sobra a evidencia posicional.
+                    admitted = admitted & (
+                        identity_gray < print_gray * identity._IDENTITY_PRINT_INK_RATIO
+                    )
+        seen = (seen & ~baseline_d) | admitted
     seen_d = cv2.dilate(seen.astype(np.uint8), kernel) > 0
     prior_d = cv2.dilate(prior_eval.astype(np.uint8), kernel) > 0
     recall = np.count_nonzero(prior_eval & seen_d) / prior_eval_px
@@ -653,6 +688,39 @@ def _evaluate_page_identity(
         recall >= identity._PAGE_IDENTITY_MIN_RECALL
         and containment >= identity._PAGE_IDENTITY_MIN_CONTAINMENT
     )
+    # O desconto de ambiguidade abriu a banda para a fatia clara
+    # tentar match e entrar em hold — mas um mismatch medido com
+    # evidencia abaixo do piso SEM desconto nao e prova de troca:
+    # tinta nova na fatia vista ou a mao cobrindo o resto explicam
+    # a divergencia sem a folha ter mudado. Adia como oclusao em
+    # vez de votar; o piso estrito aqui e o de avaliacao inteiro,
+    # nao o de restauracao.
+    if (
+        not keep_page
+        and identity_visible is not None
+        and prior_domain_px > 0
+        and prior_eval_px
+        < min(
+            prior_guard_px,
+            max(
+                1,
+                max(
+                    identity._IDENTITY_MIN_VISIBLE_PX,
+                    int(identity._IDENTITY_MIN_VISIBLE_FRACTION * prior_domain_px),
+                ),
+            ),
+        )
+    ):
+        return (
+            False,
+            recall,
+            containment,
+            prior_px,
+            prior_eval_px,
+            True,
+            "occlusion",
+            hold_seen,
+        )
     coverage_bound = max(
         1,
         max(
@@ -1200,6 +1268,34 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         if self._config.border_guard_px == 0:
             return None
         return registration._observed_footprint(anchor, corners, live_corners, shape)
+
+    def _identity_gray(self, p):
+        """Gray da passada na grade ancora, pelo MESMO warp que
+        produziu registered_prob. A comparacao de aparencia da
+        re-observacao (pauta limpa vs traco que a escurece) le essa
+        luminancia — a prob do modelo de tinta nao distingue
+        impressao de escrita quando as duas sao escuras."""
+        gray = (
+            p.warped
+            if p.warped.ndim == 2
+            else cv2.cvtColor(p.warped, cv2.COLOR_BGR2GRAY)
+        )
+        if p.anchor is None or p.registration_corners is None:
+            return gray
+        matrix = registration._registration_matrix(
+            p.anchor, p.registration_corners, p.prob.shape
+        )
+        if registration._registration_is_identity(matrix):
+            return gray
+        # Papel (255) na borda: o padding nunca pode parecer tinta
+        # mais escura que a pauta no teste de aparencia.
+        return cv2.warpPerspective(
+            gray,
+            matrix,
+            (p.prob.shape[1], p.prob.shape[0]),
+            flags=cv2.INTER_LINEAR,
+            borderValue=255,
+        )
 
     def _register_into(
         self, anchor, reg_corners, prob, visible, visible_cam, pass_corners=None
@@ -2399,6 +2495,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     self._cached_border_guard(p.prob.shape, p.identity_corners_snap),
                     p.identity_hold_seen_snap,
                     self._accumulator.threshold,
+                    self._identity_gray(p),
                 ),
             )
 
@@ -2522,6 +2619,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         self._cached_border_guard(p.prob.shape, identity_corners),
                         self._identity_hold_seen,
                         self._accumulator.threshold,
+                        self._identity_gray(p),
                     )
                 (
                     p.keep_page,
@@ -3021,14 +3119,19 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 else (p.visible if pm_coverage is None else (p.visible & pm_coverage))
             )
             pm_sampled = p.sampled
-            if pm_sampled is None:
+            if pm_sampled is None and p.used_registered_prob:
                 # A pegada nao depende da guarda de borda: sem ela
                 # _pass_sampled devolve None e o padding do registro
                 # semearia a referencia de pagina limpa em regiao que
                 # a passada nunca observou. Quando ha correcao afim
                 # aplicada a evidencia, a pegada calculada aqui segue
                 # o mesmo warp_back (com a guarda ligada isso ja foi
-                # feito em _pass_register_motion_coverage).
+                # feito em _pass_register_motion_coverage). So na
+                # passada REGISTRADA: quando o voto sai na geometria
+                # propria (primeira passada ou folha nova apos troca)
+                # nao ha registro nem padding — recomputar a pegada
+                # com a ancora velha podaria pixels validos da folha
+                # nova na primeira observacao de baseline dela.
                 pm_sampled = registration._observed_footprint(
                     p.anchor, p.registration_corners, p.corners, p.prob.shape
                 )

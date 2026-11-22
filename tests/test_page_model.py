@@ -1711,3 +1711,220 @@ def test_page_model_counters_under_non_identity_warp_border(monkeypatch):
         assert record["pm_suppressed_px"] == 0
     finally:
         worker.stop()
+
+
+def test_page_model_reacquires_stroke_drawn_entirely_on_printed_rule(monkeypatch):
+    """R457-461: toda a tinta salva sobre a pauta (ramo degenerado) — a
+    mesma folha restaura pela evidencia de escrita que escurece a pauta,
+    e a copia limpa da mesma pauta nao a herda."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        gen1 = worker.new_generation()
+        vis_all = np.ones((H, W), dtype=bool)
+        form = np.full((H, W), PAPER, dtype=np.float32)
+        # Regra impressa de 6 px de altura
+        form[40:46, 10:110] = 95.0
+        for _ in range(3):
+            _drive(worker, gen1, form, visible=vis_all)
+        assert np.count_nonzero(_confirmed(worker, gen1)) == 0
+
+        # Usuario traca um segmento de 40 px INTEIRO dentro da regra:
+        # a tinta salva fica 100% sobre o baseline impresso.
+        traced = form.copy()
+        traced[42:44, 40:60] = INK
+        for _ in range(6):
+            _drive(worker, gen1, traced, visible=vis_all)
+        confirmed_before = int(np.count_nonzero(_confirmed(worker, gen1)))
+        assert confirmed_before >= 30
+
+        # A mesma folha retorna: o traco escurece a regra e restaura.
+        gen2 = worker.new_generation(preserve_identity=True)
+        _drive(worker, gen2, traced, visible=vis_all)
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] == "same_page"
+        assert int(np.count_nonzero(_confirmed(worker, gen2))) == confirmed_before
+
+        # Copia limpa com a MESMA regra (sem o traco): nada mais escuro
+        # que a pauta na posicao salva — nao herda o desenho.
+        gen3 = worker.new_generation(preserve_identity=True)
+        for _ in range(identity_mod._PAGE_IDENTITY_SWITCH_CONSENSUS_FRAMES):
+            _drive(worker, gen3, form, visible=vis_all)
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] == "new_page"
+        assert np.count_nonzero(_confirmed(worker, gen3)) == 0
+    finally:
+        worker.stop()
+
+
+def test_page_model_clean_copy_thicker_print_edge_does_not_inherit(monkeypatch):
+    """R643-646: copia limpa cuja marca impressa engorda 1 px para cima
+    da posicao deslocada do traco salvo nao restaura o desenho; a mesma
+    folha com o traco de verdade deslocado restaura."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    vis_all = np.ones((H, W), dtype=bool)
+
+    def _seeded_worker():
+        w = _worker(InkConfig(page_model=True))
+        gen1 = w.new_generation()
+        form = np.full((H, W), PAPER, dtype=np.float32)
+        # Pauta longa na linha 30 + marca impressa curta na linha 60
+        form[30, 10:110] = 95.0
+        form[60, 40:60] = 95.0
+        for _ in range(3):
+            _drive(w, gen1, form, visible=vis_all)
+        assert np.count_nonzero(_confirmed(w, gen1)) == 0
+        # Traco manuscrito de 20 px logo abaixo da marca impressa
+        with_dash = form.copy()
+        with_dash[61, 45:65] = INK
+        for _ in range(4):
+            _drive(w, gen1, with_dash, visible=vis_all)
+        assert np.count_nonzero(_confirmed(w, gen1)) == 20
+        return w
+
+    # Controle positivo: a MESMA folha deslocada 1 px — a pauta
+    # mede o deslocamento e o traco deslocado escurece alem dela.
+    worker = _seeded_worker()
+    try:
+        shifted_same = np.full((H, W), PAPER, dtype=np.float32)
+        shifted_same[31, 10:110] = 95.0
+        shifted_same[61, 40:60] = 95.0
+        shifted_same[62, 45:65] = INK
+        gen2 = worker.new_generation(preserve_identity=True)
+        _drive(worker, gen2, shifted_same, visible=vis_all)
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] == "same_page"
+        # O canvas restaurado volta na posicao SALVA (grade ancora):
+        # o traco deslocado para 62 registra de volta sobre o 61.
+        assert np.count_nonzero(_confirmed(worker, gen2)[61, 45:65]) == 20
+    finally:
+        worker.stop()
+
+    # Copia limpa deslocada 1 px com a marca impressa APARECENDO
+    # 2 px de altura — a linha extra cai exatamente sobre a
+    # posicao deslocada do traco: posicao nao basta, a aparencia
+    # e de pauta e nada e admitido.
+    worker2 = _seeded_worker()
+    try:
+        clean_copy = np.full((H, W), PAPER, dtype=np.float32)
+        clean_copy[31, 10:110] = 95.0
+        clean_copy[61:63, 40:60] = 95.0
+        gen2 = worker2.new_generation(preserve_identity=True)
+        for _ in range(identity_mod._PAGE_IDENTITY_SWITCH_CONSENSUS_FRAMES):
+            _drive(worker2, gen2, clean_copy, visible=vis_all)
+        events = worker2.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] == "new_page"
+        assert np.count_nonzero(_confirmed(worker2, gen2)) == 0
+    finally:
+        worker2.stop()
+
+
+def test_page_model_occluded_mismatch_in_discount_band_does_not_vote(
+    monkeypatch,
+):
+    """R530-535: fatia clara com mismatch abaixo do piso SEM desconto
+    adia em vez de votar — a mesma folha ocluida com tinta nova visivel
+    sobrevive a 3 passadas cobertas e restaura ao descobrir."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        gen1 = worker.new_generation()
+        vis_all = np.ones((H, W), dtype=bool)
+        form = np.full((H, W), PAPER, dtype=np.float32)
+        form[30:34, 10:100] = 95.0
+        for _ in range(3):
+            _drive(worker, gen1, form, visible=vis_all)
+        assert np.count_nonzero(_confirmed(worker, gen1)) == 0
+
+        # Traco de 220 px cruzando a pauta (40 px sobre ela, 180 fora)
+        stroked = form.copy()
+        stroked[28:50, 50:60] = INK
+        for _ in range(6):
+            _drive(worker, gen1, stroked, visible=vis_all)
+        confirmed_before = int(np.count_nonzero(_confirmed(worker, gen1)))
+        assert confirmed_before >= 200
+
+        # Retorno com a base do traco coberta pela mao (20 px julgaveis
+        # visiveis + 40 ambiguos sobre a pauta) e tinta NOVA de 30 px
+        # exposta longe do traco — a fatia clara falha containment, mas
+        # esta abaixo do piso de avaliacao inteiro: adia, nao vota.
+        vis_hand = np.ones((H, W), dtype=bool)
+        vis_hand[34:52, 40:80] = False
+        added = stroked.copy()
+        added[10:15, 10:16] = INK
+        gen2 = worker.new_generation(preserve_identity=True)
+        for _ in range(3):
+            _drive(worker, gen2, added, visible=vis_hand)
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        decisions = [e["decision"] for e in events[-3:]]
+        assert "new_page" not in decisions
+        assert "quarantine_timeout" not in decisions
+        assert worker._identity_reference is not None
+
+        # Mao sai: o traco inteiro reaparece e a folha confirma —
+        # o desenho salvo inteiro volta (a tinta nova confirma junto,
+        # e tinta real na mesma folha).
+        _drive(worker, gen2, added, visible=vis_all)
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] == "same_page"
+        restored = _confirmed(worker, gen2)
+        assert np.count_nonzero(restored[28:50, 50:60]) == 220
+    finally:
+        worker.stop()
+
+
+def test_page_model_first_baseline_pass_after_switch_uses_own_geometry(
+    monkeypatch,
+):
+    """R3032: apos troca de folha a passada vota na geometria propria —
+    a pegada da ancora velha nao pode podar a primeira observacao de
+    baseline da folha nova."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    observed = []
+    orig_observe = pm_mod.PageModel.observe
+
+    def _spy(self, gray, **kwargs):
+        observed.append(
+            (
+                id(self),
+                None if kwargs.get("visible") is None else kwargs["visible"].copy(),
+            )
+        )
+        return orig_observe(self, gray, **kwargs)
+
+    monkeypatch.setattr(pm_mod.PageModel, "observe", _spy)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        gen1 = worker.new_generation()
+        sheet_a = np.full((H, W), PAPER, dtype=np.float32)
+        for _ in range(3):
+            _drive(worker, gen1, sheet_a)
+        stroked_a = sheet_a.copy()
+        stroked_a[24:27, 20:90] = INK
+        stroked_a[40:43, 30:80] = INK
+        for _ in range(6):
+            _drive(worker, gen1, stroked_a)
+        assert np.count_nonzero(_confirmed(worker, gen1)) >= 100
+
+        # Folha B em quad deslocado: a passada que decide new_page vota
+        # na geometria propria — a pegada (ancora velha -> quad
+        # deslocado) nao cobre a grade inteira e NAO pode entrar na
+        # mascara de observacao do modelo novo.
+        sheet_b = np.full((H, W), PAPER, dtype=np.float32)
+        sheet_b[60:63, 10:80] = INK
+        shifted_quad = Q0 + np.float32([[14, 0]] * 4)
+        gen2 = worker.new_generation(preserve_identity=True)
+        for _ in range(identity_mod._PAGE_IDENTITY_SWITCH_CONSENSUS_FRAMES):
+            _drive_page(
+                worker,
+                gen2,
+                WarpedPage(_bgr(sheet_b), gen2, shifted_quad, visible=None),
+            )
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] == "new_page"
+
+        pm = worker._page_model
+        first_call = next(vis for pm_id, vis in observed if pm_id == id(pm))
+        assert first_call is None or np.all(first_call)
+    finally:
+        worker.stop()
