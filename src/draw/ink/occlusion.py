@@ -244,7 +244,8 @@ class PaperExposureGuard:
         self._marks_hold_age = None
         self._marks_pending_age = 0
         self._occluded_confirmed = None
-        self._veto_px = None
+        self._anomalous_px = None
+        self._suspect_ink = None
 
     @property
     def pending_fill_recovery(self):
@@ -283,14 +284,23 @@ class PaperExposureGuard:
         return self.pending_fill_recovery or self.recovering
 
     @property
-    def veto_px(self):
-        """Pixels onde a guarda ainda suspeita de oclusor na última
-        passada observada: tiles anômalos (luma/croma) ou tinta lida
-        fora das posições aprendidas e das isentas por confirmação sob
-        anomalia. A evidência de retorno à aparência semeada não pode
-        abrir `paper_exposed` nesses lugares (Devin Review do PR #144).
-        None antes da primeira observação."""
-        return self._veto_px
+    def anomalous_px(self):
+        """Tiles anômalos de luma/croma na resolução de pixel da
+        última passada observada, ou None antes da primeira. Sob eles
+        a evidência de retorno à aparência semeada não abre remoção —
+        a régua escura que imita a guia fica vetada pelo tile
+        (Devin Review do PR #144)."""
+        return self._anomalous_px
+
+    @property
+    def suspect_ink(self):
+        """Tinta lida fora das posições aprendidas e das isentas por
+        confirmação sob anomalia: candidata a marca de oclusor. Tile
+        denso demais para amostrar papel (<60%) nunca aprende as
+        próprias marcas — a impressão semeada ali segue lendo tinta e
+        cabe ao chamador descontá-la antes de vetar (Devin Review do
+        PR #144). None antes da primeira observação."""
+        return self._suspect_ink
 
     @property
     def max_marks_recovery_age(self):
@@ -1086,7 +1096,7 @@ class PaperExposureGuard:
         )
         self._occluded_confirmed &= confirmed_cover
         self._occluded_confirmed[occluded_px] = confirmed_cover[occluded_px]
-        self._veto_px = suspect_ink | (
+        self._anomalous_px = (
             cv2.resize(
                 anomalous.astype(np.uint8),
                 (width, height),
@@ -1094,6 +1104,7 @@ class PaperExposureGuard:
             )
             > 0
         )
+        self._suspect_ink = suspect_ink
         self._was_anomalous = anomalous.copy()
         self._was_texture_anomaly = texture_anomaly.copy()
         return ExposureAssessment(

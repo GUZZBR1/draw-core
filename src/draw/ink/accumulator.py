@@ -305,8 +305,9 @@ class LayeredInkAccumulator:
                 # curso, borda que a pegada deixou) é prova
                 # inconclusiva — não pode nem apagar o traço nem
                 # segurar a trabalhadora acordada, a contagem velha
-                # zera. O incremento continua exigindo a testemunha:
-                # pixel ausente conta. Ocluído (sem visão) ou
+                # zera. O incremento de voto novo continua exigindo a
+                # testemunha; o streak já armado é exceção abaixo.
+                # Ocluído (sem visão) ou
                 # inspecionado sem papel provado não informa nada — o
                 # streak segura, não zera: a ausência do F-10 segue
                 # precisando ser persistente, mas não precisa ser em
@@ -314,6 +315,21 @@ class LayeredInkAccumulator:
                 # testemunha e a mão oscilam em cena real — medido:
                 # retained 1,5k~13,9k alternando no sim-hand, streak
                 # nunca completava).
+                # Streak já armado sob testemunha viva termina de
+                # contar com a própria evidência (missing =
+                # inspecionado + papel provado + prob baixa): apagar
+                # o resto da tinta zera `retained` e a testemunha
+                # nunca mais vive — o voto ficava congelado em 1-5,
+                # a trabalhadora sondava a 1 Hz para sempre e o
+                # fantasma seguia publicado no canvas (Devin Review
+                # do PR #144). Sem guarda avaliada na passada o
+                # caminho segue fail-closed.
+                unwitnessed_votes = (
+                    None
+                    if paper_exposed is None
+                    else missing & (self._removal_streak > 0)
+                )
+                voting = missing if witnessed else unwitnessed_votes
                 exposed = (
                     inspected if paper_exposed is None else inspected & paper_exposed
                 )
@@ -335,9 +351,9 @@ class LayeredInkAccumulator:
                     inconclusive &= visible
                 resettable = ~missing & (exposed | seen_ink | inconclusive)
                 self._removal_streak[resettable] = 0
-                if witnessed:
-                    self._removal_streak[missing] = np.minimum(
-                        self._removal_streak[missing].astype(np.uint16) + 1,
+                if voting is not None and np.any(voting):
+                    self._removal_streak[voting] = np.minimum(
+                        self._removal_streak[voting].astype(np.uint16) + 1,
                         registration._REMOVAL_PASSES,
                     ).astype(np.uint8)
             removed = self._removal_streak >= registration._REMOVAL_PASSES

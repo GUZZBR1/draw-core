@@ -190,6 +190,8 @@ class PageModel:
         # demanda depois de cada observe (que a altera).
         self._ref_inf = None
         self._occluder_hold = np.zeros((height, width), dtype=np.uint8)
+        self._unseen_hold = np.zeros((height, width), dtype=np.uint8)
+        self._unseen_blocked = np.zeros((height, width), dtype=bool)
         self._hold_mask = np.zeros((height, width), dtype=bool)
         self._recovering_px = 0
         self._seeding_remaining = 0
@@ -936,3 +938,24 @@ class PageModel:
         if visible is None:
             visible = np.ones(self.shape, dtype=bool)
         return ~self._seeded & np.asarray(visible, dtype=bool)
+
+    def covered_unseeded(self, blocked, *, hold_passes):
+        """Pixels sem referencia negados pela guarda, com hold fresco.
+
+        `blocked` e o dominio observavel menos o que a passada de
+        fato observou (fisicamente a vista, fotometricamente negado).
+        So o que acabou de ser negado arma o hold — pixel negado em
+        permanencia (logo escuro, impressao densa) esgota o prazo e
+        sai da contagem: esperar por ele seria esperar para sempre.
+        Uma mao que sai antes do prazo deixa o pixel voltar a ser
+        observado e semeado — a prontidao esperou honestamente
+        (Devin Review do PR #144).
+        """
+        blocked = np.asarray(blocked, dtype=bool) & ~self._seeded
+        entered = blocked & ~self._unseen_blocked
+        self._unseen_hold[entered] = hold_passes
+        self._unseen_hold[~blocked] = 0
+        held = blocked & (self._unseen_hold > 0)
+        np.subtract(self._unseen_hold, 1, out=self._unseen_hold, where=held)
+        self._unseen_blocked = blocked
+        return held

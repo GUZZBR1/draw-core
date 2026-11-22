@@ -149,6 +149,14 @@ class InkConfig:
     # passadas — queda curta de deteccao nao libera a regiao (o hold
     # da guarda fotometrica mora na PaperExposureGuard, nao aqui).
     occlusion_hold_passes: int = 3
+    # Hold de pixel sem referencia negado pela guarda
+    # (PageModel.covered_unseeded): fisicamente a vista mas
+    # fotometricamente negado conta para a prontidao por esta
+    # quantidade de passadas — uma mao que sai antes do prazo ainda
+    # e observada e semeada; impressao escura permanente esgota o
+    # prazo e nao segura o "pronto" para sempre (Devin Review do
+    # PR #144).
+    unseeded_hold_passes: int = 4
     # Modelo persistente da pagina limpa (draw.ink.page_model, opt-in):
     # referencia por pixel na grade da ancora, semeada por blocos que a
     # passada viu limpos. Pixels ainda sem referencia nao entregam
@@ -172,6 +180,8 @@ class InkConfig:
             raise ValueError("motion_veto_px deve ser > 0")
         if not 0 <= self.occlusion_hold_passes <= 10:
             raise ValueError("occlusion_hold_passes fora de [0, 10]")
+        if not 0 <= self.unseeded_hold_passes <= 10:
+            raise ValueError("unseeded_hold_passes fora de [0, 10]")
         if self.pass_interval_s is not None and not 0.0 < self.pass_interval_s <= 5.0:
             raise ValueError(
                 f"pass_interval_s fora de (0, 5] s: {self.pass_interval_s!r}"

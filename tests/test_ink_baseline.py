@@ -231,6 +231,14 @@ def _print_guide():
     return printed
 
 
+def _dense_print():
+    """Impresso denso (>40% do tile vira tinta): a guarda nunca aprende
+    as marcas dele — textura exige >=60% de amostras de papel por tile."""
+    printed = _paper()
+    printed[24:34, 24:48] = 90.0
+    return printed
+
+
 def _stroke_over_print_with_witness():
     """Guia impressa + traco escuro cruzando + desenho grande separado.
 
@@ -263,6 +271,33 @@ def test_erased_stroke_over_print_is_removed_from_canvas(monkeypatch):
             _drive(worker, generation, erased)
         canvas = _confirmed(worker, generation)
         assert not np.any(canvas[24:26, 20:60])
+        assert np.count_nonzero(canvas[40:80]) == SCRIBBLE_PX
+    finally:
+        worker.stop()
+
+
+def test_erased_stroke_over_dense_print_is_removed_from_canvas(monkeypatch):
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker_pm()
+    try:
+        generation = worker.new_generation()
+        for _ in range(4):
+            _drive(worker, generation, _dense_print())
+        drawn = _scribble(_dense_print(), 20.0)
+        drawn[26:28, 24:48] = 20.0  # traco sobre a impressao densa
+        for _ in range(5):
+            _drive(worker, generation, drawn)
+        canvas = _confirmed(worker, generation)
+        assert np.all(canvas[26:28, 24:48])
+        assert np.count_nonzero(canvas[40:80]) == SCRIBBLE_PX
+
+        # Apaga so o traco: o impresso denso volta a aparencia semeada
+        # mas segue pontuando como tinta em posicao nunca aprendida.
+        erased = _scribble(_dense_print(), 20.0)
+        for _ in range(14):
+            _drive(worker, generation, erased)
+        canvas = _confirmed(worker, generation)
+        assert not np.any(canvas[26:28, 24:48])
         assert np.count_nonzero(canvas[40:80]) == SCRIBBLE_PX
     finally:
         worker.stop()
@@ -332,6 +367,30 @@ def test_dark_print_that_never_seeds_does_not_block_ready(monkeypatch):
         state = worker.baseline_state()
         assert state.ready and state.phase == "ready", state
         assert state.pending_px == 0
+    finally:
+        worker.stop()
+
+
+def test_guard_blocked_area_counts_as_pending_until_it_clears(monkeypatch):
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker_pm()
+    try:
+        generation = worker.new_generation()
+        image = _paper()
+        image[8:72, 8:72] = 10.0  # mancha negada so pela guarda (mao "invisivel")
+        for _ in range(5):
+            _drive(worker, generation, image)
+        # Os pixels negados recentemente nunca foram observados: contam
+        # como pendentes enquanto o bloqueio e recente — "ready" so
+        # depois que a mancha sai e a regiao semeia (Devin Review do
+        # PR #144).
+        state = worker.baseline_state()
+        assert state.pending_px > 0, state
+        image = _paper()
+        for _ in range(6):
+            _drive(worker, generation, image)
+        state = worker.baseline_state()
+        assert state.phase == "ready" and state.pending_px == 0
     finally:
         worker.stop()
 

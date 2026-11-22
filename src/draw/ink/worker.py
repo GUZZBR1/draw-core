@@ -237,6 +237,14 @@ _WORKER_HISTORY = (256, 128)
 _SYNC_CADENCE_EPS_SECONDS = 1e-9
 
 
+# Fracao de pixels semeados que ainda casam com a propria referencia
+# para um tile anomalo ser lido como "conteudo", nao "coberto":
+# impressao densa escurece a media do tile mantendo cada pixel na
+# aparencia semeada; uma capa ou regua escura leva os pixels de
+# papel semeados a `novel` e a fracao despenca bem abaixo disso.
+_RETURNED_TILE_MATCH = 0.75
+
+
 def _fill_page_outside(image, coverage):
     """Fora da folha := média BGR da própria página por canal.
 
@@ -3900,6 +3908,12 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     if pm_coverage is None
                     else pm_coverage & ~physical_visible
                 )
+            # Dominio observavel antes dos vetos fotometricos: a
+            # diferenca para o obs_visible final e o que a guarda
+            # negou nesta passada — mao/oclusor que a mascara fisica
+            # nao viu e que ainda nao tem referencia conta para a
+            # prontidao com prazo curto (Devin Review do PR #144).
+            obs_domain = obs_visible
             if self._config.paper_guard and p.warped.dtype == np.uint8:
                 exposed_mask = pm.exposed(
                     gray,
@@ -3939,6 +3953,15 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 p.next_baseline_ink = np.zeros(p.prob.shape, dtype=bool)
                 p.pm_confirm_obs = pm.confirm_obs
                 p.pm_rezero_applied = True
+            cover_held = None
+            if obs_domain is not None:
+                blocked = (
+                    obs_domain if obs_visible is None else obs_domain & ~obs_visible
+                )
+                cover_held = pm.covered_unseeded(
+                    blocked,
+                    hold_passes=self._config.unseeded_hold_passes,
+                )
             pm.observe(
                 gray,
                 visible=obs_visible,
@@ -3978,6 +4001,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             unseeded_px = int(np.count_nonzero(pm.seeding_pending(obs_visible)))
             if hand_covered is not None:
                 unseeded_px += int(np.count_nonzero(hand_covered & ~pm.seeded))
+            if cover_held is not None:
+                unseeded_px += int(np.count_nonzero(cover_held))
             p.reg_info["pm_unseeded_px"] = unseeded_px
             baseline_seen = (
                 suppress & obs_admissible & (p.prob > self._accumulator.threshold)
@@ -4007,15 +4032,61 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 # O retorno a aparencia semeada vale evidencia de
                 # ausencia so fora dos pixels sob suspeita de oclusor
                 # nesta passada: tile anomalo (luma/croma — a regua
-                # escura que imita a guia) ou tinta em posicao nao
-                # aprendida (as marcas dela). O veto de pixel
-                # "confirmada sobre pixel escuro" e o unico que o
-                # casamento com a referencia do PageModel sobrepoe
-                # (Devin Review do PR #144).
+                # escura que imita a guia) ou tinta inexplicada em
+                # posicao nao aprendida (as marcas dela). A impressao
+                # semeada que segue lendo tinta (next_baseline_ink) NAO
+                # e marca nova: em tile denso demais para amostrar papel
+                # a guarda nunca aprende posicoes e o veto cego
+                # congelava a remocao (Devin Review do PR #144). O veto
+                # de pixel "confirmada sobre pixel escuro" e o unico
+                # que o casamento com a referencia do PageModel
+                # sobrepoe.
                 if p.exposure is not None:
-                    veto_px = p.exposure_guard.veto_px
-                    if veto_px is not None:
-                        returned_seen = returned_seen & ~veto_px
+                    anomalous_px = p.exposure_guard.anomalous_px
+                    suspect = p.exposure_guard.suspect_ink
+                    if anomalous_px is not None:
+                        veto = anomalous_px.copy()
+                        if suspect is not None:
+                            veto |= suspect & ~p.next_baseline_ink
+                        # Tile anomalo que segue parecendo a propria
+                        # semente nao esta coberto: a impressao densa
+                        # escurece a media do tile sem mudar a
+                        # aparencia de nenhum pixel semeado. Sob uma
+                        # capa ou regua escura, os pixels de papel
+                        # semeados viram `novel` e a fracao de
+                        # casamento despenca — o veto permanece
+                        # (Devin Review do PR #144).
+                        tile = occlusion._REFERENCE_TILE_PX
+                        grid = (
+                            (p.prob.shape[1] + tile - 1) // tile,
+                            (p.prob.shape[0] + tile - 1) // tile,
+                        )
+                        seeded_frac = cv2.resize(
+                            pm.seeded.astype(np.float32),
+                            grid,
+                            interpolation=cv2.INTER_AREA,
+                        )
+                        matched_frac = cv2.resize(
+                            (pm.seeded & ~novel_mask).astype(np.float32),
+                            grid,
+                            interpolation=cv2.INTER_AREA,
+                        )
+                        consistent = (
+                            cv2.resize(
+                                (
+                                    (seeded_frac > 0.0)
+                                    & (
+                                        matched_frac
+                                        >= seeded_frac * _RETURNED_TILE_MATCH
+                                    )
+                                ).astype(np.uint8),
+                                (p.prob.shape[1], p.prob.shape[0]),
+                                interpolation=cv2.INTER_NEAREST,
+                            )
+                            > 0
+                        )
+                        veto &= ~consistent
+                        returned_seen = returned_seen & ~veto
                 zero = zero | returned_seen
                 # O retorno a aparencia semeada tambem prova exposicao:
                 # a impressao escura sob o traco apagado cai no veto
