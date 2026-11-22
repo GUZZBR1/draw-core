@@ -17,10 +17,17 @@ O modelo de tinta e um _ScriptInk injetado por construtor: devolve
 probabilidade pelo conteudo do warp (forte onde esta escuro como
 tinta, fraco onde esta cinza como pauta/vinco/lapis/mao), o mesmo
 papel que o page_clean ONNX tem na passada real.
+
+O driver embute a garantia que os contratos precisam: um quadro que
+o teste narra como evento (deslize, mascara falha, jitter) tem que
+virar passada (`must=True`), e a leitura exige canvas publicado —
+sem isso a trabalhadora poderia dormir sobre o evento e a checagem
+lira o canvas de antes dele.
 """
 
 import dataclasses
 
+import cv2
 import numpy as np
 import pytest
 
@@ -47,6 +54,10 @@ TABLE_GRAY = 45.0
 RULING_GRAY = 185.0
 CREASE_GRAY = 168.0
 PENCIL_GRAY = 140.0
+
+# Linhas de pauta impressa na cena (fonte unica: os testes que as
+# desenham e o traco que as cruza leem daqui).
+RULE_YS = range(30, H - 20, 24)
 
 # Passo do relogio injetado entre passadas: com a mao presente a
 # cadencia e a do preset (0,15 s); sem mao (ou sem sinal) a sonda
@@ -115,17 +126,19 @@ class _Scene:
     def hand_off(self):
         self.hand[:] = False
 
-    def jitter(self, dx, dy):
-        """Quad desloca (dx, dy) na camera; o warp traz a banda de
-        mesa que o deslize admitiu na borda oposta."""
-        self.corners = Q0 + np.array([dx, dy], dtype=np.float32)
-        shifted = np.full_like(self.page, TABLE_GRAY)
-        y0, y1 = max(0, -dy), min(H, H - dy)
-        x0, x1 = max(0, -dx), min(W, W - dx)
+    def shifted(self, quad_delta, content_shift):
+        """Quad anda `quad_delta` na camera; o conteudo do warp anda
+        `content_shift` na grade da pagina (o erro de rastreio) e a
+        banda descoberta vira mesa escura."""
+        self.corners = Q0 + np.asarray(quad_delta, dtype=np.float32)
+        dx, dy = int(content_shift[0]), int(content_shift[1])
+        img = np.full_like(self.page, TABLE_GRAY)
+        y0, y1 = max(0, dy), min(H, H + dy)
+        x0, x1 = max(0, dx), min(W, W + dx)
         if y1 > y0 and x1 > x0:
-            shifted[y0:y1, x0:x1] = self.page[y0 + dy : y1 + dy, x0 + dx : x1 + dx]
-        self.table = shifted == TABLE_GRAY
-        return shifted
+            img[y0:y1, x0:x1] = self.page[y0 - dy : y1 - dy, x0 - dx : x1 - dx]
+        self.table = img == TABLE_GRAY
+        return img
 
     def warped(self):
         img = self.page.copy()
@@ -141,14 +154,19 @@ class _Scene:
         mask[oy : oy + H, ox : ox + W] = page_mask
         return mask
 
-    def page_frame(self, generation):
-        visible = self.cam_mask(~self.hand, fill=True)
-        coverage = (
-            self.cam_mask(~self.table, fill=False) if self.send_coverage else None
-        )
-        return WarpedPage(
-            _bgr(self.warped()), generation, self.corners, visible, coverage
-        )
+    def frame(self, generation, img=None, *, bare=False):
+        """WarpedPage da cena (ou de `img`, se dada) nas mascaras
+        padrao: `visible` e `coverage` colados no quad da camera.
+        bare=True omite as duas — a passada so tem o warp para ler."""
+        if img is None:
+            img = self.warped()
+        visible = coverage = None
+        if not bare:
+            visible = self.cam_mask(~self.hand, fill=True)
+            coverage = (
+                self.cam_mask(~self.table, fill=False) if self.send_coverage else None
+            )
+        return WarpedPage(_bgr(img), generation, self.corners, visible, coverage)
 
 
 # ------------------------------------------------------------------
@@ -161,23 +179,28 @@ def _worker(config):
     return clock, PageCleanWorker(_ScriptInk(), clock=clock, config=config)
 
 
-def _drive(worker, clock, page, dt=_DT_ACTIVE):
-    """Uma submissao + avanco de relogio + passada (se a cadencia deixar)."""
+def _feed(worker, clock, page, dt=_DT_ACTIVE, *, must=True):
+    """Submete `page`, avanca o relogio e roda uma passada se a
+    cadencia deixar. must=True exige que o quadro vire passada —
+    um evento narrado engolido pelo descanso deixaria o teste ler
+    o canvas de antes dele."""
     worker.submit(page)
     clock.advance(dt)
-    return worker.pump()
+    ran = worker.pump()
+    if must:
+        assert ran, "quadro submetido nao virou passada"
+    return ran
 
 
-def _passes(worker, clock, generation, scene, n, dt=_DT_ACTIVE):
-    """n ciclos submit/pump sobre a cena corrente."""
-    for _ in range(n):
-        _drive(worker, clock, scene.page_frame(generation), dt)
+def _passes(worker, clock, generation, scene, n, dt=_DT_ACTIVE, *, must=False):
+    """n ciclos submit/pump sobre a cena corrente; devolve quais
+    quadros viraram passada (o descanso pode pular os ociosos)."""
+    return [
+        _feed(worker, clock, scene.frame(generation), dt, must=must) for _ in range(n)
+    ]
 
 
 def _confirmed(worker, generation):
-    # Sem snapshot publicado a checagem seria vacua (um painel que
-    # nunca existiu le como mascara em branco): exige que a
-    # trabalhadora tenha publicado o canvas desta geracao.
     snap = worker.poll(generation, 0)
     assert snap is not None, "trabalhadora nunca publicou canvas"
     return np.asarray(snap.confirmed)
@@ -189,15 +212,15 @@ def _display(worker, generation):
     return np.asarray(snap.confirmed), np.asarray(snap.provisional), snap.version
 
 
-def _rect_mask(rect, shape=(H, W)):
-    y0, y1, x0, x1 = rect
-    mask = np.zeros(shape, dtype=bool)
-    mask[y0:y1, x0:x1] = True
-    return mask
+def _stroke_mask(scene):
+    """Mascara do que foi desenhado: scene.page so carrega conteudo
+    desenhado — mesa e mao vivem no warp, e os cinzas fracos
+    (pauta, vinco, lapis) ficam todos >= 100."""
+    return scene.page < 100
 
 
 def _write_stroke(worker, clock, generation, scene, stroke):
-    """Traço escrito com a mao presente e revelado na saida dela."""
+    """Traco escrito com a mao presente e revelado na saida dela."""
     scene.draw(stroke)
     worker.set_hand_presence(True, moved=True)
     _passes(worker, clock, generation, scene, 4)
@@ -206,15 +229,19 @@ def _write_stroke(worker, clock, generation, scene, stroke):
 
 
 def _dilate(mask, px):
-    out = mask.copy()
-    for _ in range(px):
-        grown = out.copy()
-        grown[1:, :] |= out[:-1, :]
-        grown[:-1, :] |= out[1:, :]
-        grown[:, 1:] |= out[:, :-1]
-        grown[:, :-1] |= out[:, 1:]
-        out = grown
-    return out
+    return cv2.dilate(
+        mask.astype(np.uint8), np.ones((2 * px + 1, 2 * px + 1), np.uint8)
+    ).astype(bool)
+
+
+def _frac(got, want):
+    """Fracao de `want` presente em `got` (cobertura do esperado)."""
+    return np.count_nonzero(got & want) / np.count_nonzero(want)
+
+
+def _beyond(got, want, px):
+    """Pixels de `got` fora da vizinhanca de `want` (vazamento)."""
+    return np.count_nonzero(got & ~_dilate(want, px))
 
 
 # Regimes sob medicao. "production" e o preset do PipelineConfig.
@@ -265,11 +292,10 @@ def test_hand_over_confirmed_stroke_preserves_it(ink):
     scene = _Scene()
     _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE)
 
-    stroke = (90, 96, 60, 260)  # traco real confirmado (linha ~6 px)
-    _write_stroke(worker, clock, generation, scene, stroke)
-    want = _rect_mask(stroke)
+    _write_stroke(worker, clock, generation, scene, (90, 96, 60, 260))
+    want = _stroke_mask(scene)
     got = _confirmed(worker, generation) > 0
-    assert np.count_nonzero(got & want) >= 0.95 * np.count_nonzero(want)
+    assert _frac(got, want) >= 0.95
 
     # A mao estaciona sobre o traco (mascara correta): sem evidencia,
     # a regiao congela — nem apaga nem escreve.
@@ -277,32 +303,28 @@ def test_hand_over_confirmed_stroke_preserves_it(ink):
     worker.set_hand_presence(True)
     _passes(worker, clock, generation, scene, 4)
     got = _confirmed(worker, generation) > 0
-    assert np.count_nonzero(got & want) >= 0.98 * np.count_nonzero(want)
+    assert _frac(got, want) >= 0.98
 
-    # Falha do masker: a mao continua sobre o traco, mas a mascara
-    # oscila — dois quadros reportam a regiao toda visivel e o warp
-    # traz os pixels da mao (cinza-pele) por cima do traco.
+    # Falha do masker: a mao segue trabalhando sobre o traco, mas a
+    # mascara oscila — dois quadros reportam a regiao toda visivel e
+    # o warp traz os pixels da mao (cinza-pele) por cima do traco.
     scene.hand_off()
+    worker.set_hand_presence(True, moved=True)
     masked = scene.page.copy()
     masked[60:140, 100:170] = HAND_GRAY
     for _ in range(2):
-        worker.submit(WarpedPage(_bgr(masked), generation, scene.corners, None, None))
-        clock.advance(_DT_ACTIVE)
-        worker.pump()
+        _feed(worker, clock, scene.frame(generation, img=masked, bare=True))
     got = _confirmed(worker, generation) > 0
-    assert np.count_nonzero(got & want) >= 0.95 * np.count_nonzero(want)
+    assert _frac(got, want) >= 0.95
 
-    # Mao sai de vez: o sinal de saida precisa chegar a trabalhadora
-    # (sem ele a porta de ociosidade le a mao ainda presente e parada
-    # e a trabalhadora descansa — os quadros limpos nunca rodam).
+    # Mao sai de vez: sem o sinal a porta de ociosidade le a mao
+    # ainda presente e parada, e os quadros limpos nunca rodam.
     worker.set_hand_presence(False)
-    ran = [
-        _drive(worker, clock, scene.page_frame(generation), _DT_IDLE) for _ in range(3)
-    ]
+    ran = _passes(worker, clock, generation, scene, 3, dt=_DT_IDLE)
     assert any(ran), "nenhuma passada rodou depois da saida da mao"
     got = _confirmed(worker, generation) > 0
-    assert np.count_nonzero(got & want) >= 0.95 * np.count_nonzero(want)
-    assert np.count_nonzero(got & ~_dilate(want, 3)) == 0
+    assert _frac(got, want) >= 0.95
+    assert _beyond(got, want, 3) == 0
 
 
 # ------------------------------------------------------------------
@@ -321,10 +343,9 @@ def test_preexisting_weak_content_does_not_leak(ink):
     # acima da barra do voto, ela so nao vaza se o mecanismo proprio de
     # cada regime agir — remocao de pauta em production, referencia do
     # PageModel em page_model_solo. Os cinzas fracos (vinco, lapis)
-    # ficam abaixo do piso comum do voto e medem so o resultado do
-    # produto, nao qual guarda agiu — a comparacao entre regimes para
-    # conteudo pre-existente e a da marca forte (linha "+" do PR).
-    for y in range(30, H - 20, 24):  # pauta impressa escura
+    # ficam abaixo do piso comum do voto e medem o resultado do
+    # produto, nao qual guarda agiu.
+    for y in RULE_YS:
         scene.draw((y, y + 2, 10, W - 10), INK)
     scene.draw((0, H, 150, 162), CREASE_GRAY)  # vinco/lombada
     scene.draw((180, 184, 200, 280), PENCIL_GRAY)  # desenho a lapis antigo
@@ -344,20 +365,16 @@ def test_new_stroke_after_settling_confirms_clean(ink):
     worker, clock = ink
     generation = worker.new_generation()
     scene = _Scene()
-    for y in range(30, H - 20, 24):
+    for y in RULE_YS:
         scene.draw((y, y + 2, 10, W - 10), RULING_GRAY)
     _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE)
 
-    # Traco vertical: as pautas impressas correm em range(30, H-20, 24)
-    # — linhas 78-79 e 102-103 — e um traco horizontal entre elas nao
-    # cruzaria nenhuma. Este cruza as duas de verdade.
-    stroke = (76, 106, 157, 163)  # cruza as pautas 78-79 e 102-103
-    _write_stroke(worker, clock, generation, scene, stroke)
-    want = _rect_mask(stroke)
+    # Traco vertical cruzando as pautas 78-79 e 102-103 (RULE_YS).
+    _write_stroke(worker, clock, generation, scene, (76, 106, 157, 163))
+    want = _stroke_mask(scene)
     got = _confirmed(worker, generation) > 0
-    assert np.count_nonzero(got & want) >= 0.95 * np.count_nonzero(want)
-    extra = got & ~_dilate(want, 2)
-    assert np.count_nonzero(extra) <= 0.02 * np.count_nonzero(want)
+    assert _frac(got, want) >= 0.95
+    assert _beyond(got, want, 2) <= 0.02 * np.count_nonzero(want)
 
 
 # ------------------------------------------------------------------
@@ -373,10 +390,10 @@ def test_border_jitter_over_dark_table_makes_no_ink(ink):
     scene.send_coverage = False  # sem mascara seg: so o warp fala
     moves = [(1, 0), (2, 0), (3, 1), (1, 2), (0, 3), (-2, 1), (-3, 0), (-1, -2)]
     for dx, dy in moves:
-        img = scene.jitter(dx, dy)
-        worker.submit(WarpedPage(_bgr(img), generation, scene.corners, None, None))
-        clock.advance(_DT_IDLE)
-        worker.pump()
+        # O quad desliza (dx, dy); o conteudo escorrega o oposto e a
+        # borda recolhida admite mesa escura.
+        img = scene.shifted((dx, dy), (-dx, -dy))
+        _feed(worker, clock, scene.frame(generation, img=img, bare=True), _DT_IDLE)
     got = _confirmed(worker, generation) > 0
     margin = np.zeros((H, W), dtype=bool)
     margin[:8, :] = margin[-8:, :] = margin[:, :8] = margin[:, -8:] = True
@@ -396,7 +413,7 @@ def test_dim_static_scene_does_not_churn(ink):
     versions = set()
     for i in range(10):
         scene.page[:] = PAPER_DIM + (4 if i % 2 else -4)  # flicker de exposicao
-        _drive(worker, clock, scene.page_frame(generation), _DT_IDLE)
+        _feed(worker, clock, scene.frame(generation), _DT_IDLE)
         confirmed, provisional, version = _display(worker, generation)
         versions.add(version)
         assert np.count_nonzero(confirmed) == 0
@@ -422,16 +439,16 @@ def test_eraser_removes_stroke_without_false_ink(ink):
     stroke_a = (90, 96, 60, 260)
     stroke_b = (150, 156, 60, 200)
     _write_stroke(worker, clock, generation, scene, stroke_a)
+    want_a = _stroke_mask(scene)
     _write_stroke(worker, clock, generation, scene, stroke_b)
-    want_a = _rect_mask(stroke_a)
-    want_b = _rect_mask(stroke_b)
+    want_b = _stroke_mask(scene) & ~want_a
     want = want_a | want_b
     # Cada traco precisa estar confirmado por si: se o alvo da
-    # borracha (A) nunca tivesse confirmado, as checagens finais
-    # passariam sem que tinta alguma tivesse sido removida.
+    # borracha nunca tivesse confirmado, o fim do teste passaria
+    # sem remover tinta alguma.
     got0 = _confirmed(worker, generation) > 0
-    assert np.count_nonzero(got0 & want_a) >= 0.9 * np.count_nonzero(want_a)
-    assert np.count_nonzero(got0 & want_b) >= 0.9 * np.count_nonzero(want_b)
+    assert _frac(got0, want_a) >= 0.9
+    assert _frac(got0, want_b) >= 0.9
 
     # A borracha apaga um terco do traco A sob a mao: a mao cobre a
     # regiao enquanto os pixels voltam ao nivel do papel; depois sai.
@@ -452,8 +469,8 @@ def test_eraser_removes_stroke_without_false_ink(ink):
     erased[:, cut:] = False
     kept = want & ~erased
     assert np.count_nonzero(got & erased) <= 0.05 * np.count_nonzero(erased)
-    assert np.count_nonzero(got & ~_dilate(want, 3)) == 0
-    assert np.count_nonzero(got & kept) >= 0.90 * np.count_nonzero(kept)
+    assert _beyond(got, want, 3) == 0
+    assert _frac(got, kept) >= 0.90
 
 
 # ------------------------------------------------------------------
@@ -467,46 +484,24 @@ def test_light_sheet_slide_does_not_duplicate_ink(ink):
     scene = _Scene()
     _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE)
 
-    stroke = (90, 96, 60, 260)
-    _write_stroke(worker, clock, generation, scene, stroke)
+    _write_stroke(worker, clock, generation, scene, (90, 96, 60, 260))
     before = _confirmed(worker, generation) > 0
     original_px = np.count_nonzero(before)
     assert original_px > 0
 
     # A folha desliza ~8 px e o quad acompanha com erro de rastreio:
     # o conteudo do warp anda o residuo (-2, -1, 0 px). A mao que
-    # arrasta a folha mantem a trabalhadora acordada — sem o sinal,
-    # 8 px fica abaixo do gatilho geometrico de despertar, o descanso
-    # ignora todo quadro submetido e o teste leria o canvas de antes
-    # do deslize. Cada quadro de residuo precisa virar passada.
+    # arrasta a folha mantem a trabalhadora acordada — 8 px fica
+    # abaixo do gatilho geometrico de despertar e, em descanso, todo
+    # quadro submetido e ignorado. Uma copia confirmada no meio do
+    # deslize poderia sumir ate o assentamento: a cada quadro o
+    # canvas nao pode ter tinta alem do envelope do residuo.
     worker.set_hand_presence(True, moved=True)
-    for dx, residual in ((8, -2), (8, -1), (8, 0)):
-        scene.corners = Q0 + np.array([dx, 0], dtype=np.float32)
-        img = np.full_like(scene.page, TABLE_GRAY)
-        if residual < 0:
-            img[:, :residual] = scene.page[:, -residual:]
-        elif residual > 0:
-            img[:, residual:] = scene.page[:, :-residual]
-        else:
-            img[:] = scene.page
-        scene.table = img == TABLE_GRAY
-        worker.submit(
-            WarpedPage(
-                _bgr(img),
-                generation,
-                scene.corners,
-                scene.cam_mask(~scene.hand, fill=True),
-                scene.cam_mask(~scene.table, fill=False),
-            )
-        )
-        clock.advance(_DT_ACTIVE)
-        assert worker.pump(), f"quadro do deslize (residuo {residual}) nao rodou"
-        # Duplicacao transitoria: uma copia confirmada no meio do
-        # deslize poderia sumir ate o assentamento e escapar da
-        # leitura final — a cada quadro processado o canvas nao pode
-        # ter tinta confirmada alem do envelope do residuo.
+    for residual in (-2, -1, 0):
+        img = scene.shifted((8, 0), (residual, 0))
+        _feed(worker, clock, scene.frame(generation, img=img))
         conf, _prov, _v = _display(worker, generation)
-        assert np.count_nonzero((np.asarray(conf) > 0) & ~_dilate(before, 4)) == 0, (
+        assert _beyond(conf > 0, before, 4) == 0, (
             f"tinta transitoria no quadro de residuo {residual}"
         )
     worker.set_hand_presence(False)
@@ -516,9 +511,6 @@ def test_light_sheet_slide_does_not_duplicate_ink(ink):
     total = np.count_nonzero(got)
     assert total >= 0.75 * original_px
     assert total <= 1.15 * original_px
-    # Uma copia deslocada alem do residuo simulado sairia da
-    # vizinhanca imediata do traco original — segundo componente ou
-    # cauda fantasma. (Eco mais fino que o residuo merge no proprio
-    # traco e e indistinguivel de leve engrossamento: o total acima
-    # limita esse residuo a ~1%, nao a barra os 15%.)
-    assert np.count_nonzero(got & ~_dilate(before, 2)) == 0
+    # Eco mais fino que o residuo merge no proprio traco (o total
+    # acima limita); fora da vizinhanca nao pode haver copia.
+    assert _beyond(got, before, 2) == 0
