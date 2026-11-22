@@ -1054,6 +1054,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         # Zera em qualquer adocao ou quando o pendente some; uma
         # borda nova a reabre.
         self._fill_recovery_waited = 0
+        self._marks_recovery_waited = 0
         # Descanso total (so a trabalhadora e o new_generation
         # tocam): passadas desta geracao e passadas seguidas sem
         # confirmar nada novo.
@@ -1181,6 +1182,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # veem estado da geracao anterior.
             self._paper_exposure = occlusion.PaperExposureGuard()
             self._fill_recovery_waited = 0
+            self._marks_recovery_waited = 0
             self._pending = None
             self._published = None
             self._published_display = None
@@ -1503,6 +1505,20 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             < occlusion._RECOVERY_WAIT_PASSES + self._paper_exposure.max_recovery_age
         )
 
+    def _marks_wait_open(self):
+        """Allow a clean position veto to expire and cast its first vote.
+
+        Age credit lets a late tile finish without allowing an endless
+        chain of different pending tiles: total wait is below twice the
+        marks horizon, independently of the fill recovery budget.
+        """
+        age = self._paper_exposure.max_marks_recovery_age
+        return (
+            self._config.removal
+            and age > 0
+            and self._marks_recovery_waited < occlusion._MARKS_HOLD_MAX + age
+        )
+
     def _at_rest(self):
         """Descanso total: nenhuma passada ate um evento acordar.
 
@@ -1520,6 +1536,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             and self._accumulator._removal_streak is not None
             and np.any(self._accumulator._removal_streak)
         ):
+            return False
+        if self._marks_wait_open():
             return False
         if self._recovery_wait_open():
             # Streak de evidência de tinta contando num bloco
@@ -1562,12 +1580,14 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._hand_state is False
             and not self._confirm_once
             and not self._recovery_wait_open()
+            and not self._marks_wait_open()
         ):
             return _IDLE_PROBE_SECONDS
         if (
             self._hand_state is None
             and self._still_passes >= _NO_HAND_REST_AFTER_STILL_PASSES
             and not self._recovery_wait_open()
+            and not self._marks_wait_open()
         ):
             return _IDLE_PROBE_SECONDS
         if self._config.pass_interval_s is not None:
@@ -2181,6 +2201,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 self._fill_recovery_waited += 1
             else:
                 self._fill_recovery_waited = 0
+            if p.exposure_guard.max_marks_recovery_age:
+                self._marks_recovery_waited += 1
+            else:
+                self._marks_recovery_waited = 0
             p.first_pass = p.generation != self._worker_generation
             p.recovering = self._identity_reference is not None and (
                 p.first_pass or self._identity_recovery_requested

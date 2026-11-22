@@ -110,6 +110,39 @@ _RECOVERY_HOLD_PASSES = 4
 _RECOVERY_WAIT_PASSES = max(_FILL_RECOVERY_PASSES, _RECOVERY_HOLD_PASSES)
 
 
+def _has_dense_pixel_seed(region):
+    """Whether a pixel-support region contains a raster-sized dense blob."""
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        region.astype(np.uint8), connectivity=8
+    )
+    pixel_corners = np.array(
+        [(-0.5, -0.5), (-0.5, 0.5), (0.5, -0.5), (0.5, 0.5)], dtype=np.float32
+    )
+    for blob_index in range(1, count):
+        blob_x, blob_y, blob_width, blob_height, blob_area = stats[blob_index]
+        if min(blob_width, blob_height) < _FILL_SEED_MIN_DIM_PX:
+            continue
+        blob = (
+            labels[blob_y : blob_y + blob_height, blob_x : blob_x + blob_width]
+            == blob_index
+        )
+        contours, _ = cv2.findContours(
+            blob.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        hull = cv2.convexHull(contours[0]).reshape(-1, 2).astype(np.float32)
+        # minAreaRect measures continuous point centers. Treat each raster
+        # pixel as its unit square. Expanding hull vertices gives the same
+        # outer extent without materializing four points for every pixel.
+        corners = (hull[:, None, :] + pixel_corners).reshape(-1, 2)
+        (_, _), (rect_w, rect_h), _ = cv2.minAreaRect(corners)
+        if (
+            min(rect_w, rect_h) >= _FILL_SEED_MIN_DIM_PX
+            and blob_area >= _FILL_SEED_MIN_FILL * rect_w * rect_h
+        ):
+            return True
+    return False
+
+
 class PaperExposureGuard:
     """Track the brightest observed paper level and reject darkened tiles.
 
@@ -143,6 +176,7 @@ class PaperExposureGuard:
         self._texture_ink_mask = None
         self._texture_dark_share = None
         self._marks_hold_age = None
+        self._marks_pending_age = 0
 
     @property
     def pending_fill_recovery(self):
@@ -179,6 +213,15 @@ class PaperExposureGuard:
     def recovery_pending(self):
         """Recuperação com trabalho pendente (streak ou hold ativo)."""
         return self.pending_fill_recovery or self.recovering
+
+    @property
+    def max_marks_recovery_age(self):
+        """Oldest clean position veto still waiting for observations.
+
+        Dirty or no-longer-suspect tiles reset their age to zero. Keep
+        this countdown separate from the shorter fill recovery budget.
+        """
+        return self._marks_pending_age
 
     @property
     def max_recovery_age(self):
@@ -263,6 +306,7 @@ class PaperExposureGuard:
         # recomputar, senão uma passada sem imagem válida a repetia
         # e a trabalhadora rearmava a janela para sempre.
         self._last_fill_adoption = False
+        self._marks_pending_age = 0
         if not isinstance(image, np.ndarray) or image.dtype != np.uint8:
             return None
         if image.ndim not in (2, 3) or (image.ndim == 3 and image.shape[2] != 3):
@@ -509,6 +553,20 @@ class PaperExposureGuard:
         marks_hold = marks_fire & ~(
             paper_clean & (self._marks_hold_age >= _MARKS_HOLD_MAX)
         )
+        if confirmed_ink is not None:
+            # New additions alone need no extra removal observations. Only
+            # keep sampling tiles where confirmed ink is currently missing.
+            missing = (
+                cv2.resize(
+                    (confirmed_ink & ~ink_mask).astype(np.float32),
+                    size,
+                    interpolation=cv2.INTER_AREA,
+                )
+                > 0
+            )
+            pending_ages = self._marks_hold_age[marks_hold & paper_clean & missing]
+            if pending_ages.size:
+                self._marks_pending_age = int(pending_ages.max())
         new_ink = (
             texture_known
             & self._texture_learned_clean
@@ -696,47 +754,28 @@ class PaperExposureGuard:
             if np.any(tile_support):
                 tile_h = height / size[1]
                 tile_w = width / size[0]
-                count, labels = cv2.connectedComponents(
+                count, labels, tile_stats, _ = cv2.connectedComponentsWithStats(
                     tile_support.astype(np.uint8), connectivity=8
                 )
                 for index in range(1, count):
-                    rows, cols = np.where(labels == index)
-                    if (
-                        rows.max() - rows.min() + 1 < 2
-                        or cols.max() - cols.min() + 1 < 2
-                    ):
+                    x, y, component_width, component_height, _ = tile_stats[index]
+                    if component_width < 2 or component_height < 2:
                         continue
                     region = pixel_support[
-                        int(rows.min() * tile_h) : int(
-                            np.ceil((rows.max() + 1) * tile_h)
-                        ),
-                        int(cols.min() * tile_w) : int(
-                            np.ceil((cols.max() + 1) * tile_w)
-                        ),
+                        int(y * tile_h) : int(np.ceil((y + component_height) * tile_h)),
+                        int(x * tile_w) : int(np.ceil((x + component_width) * tile_w)),
                     ]
                     if not np.any(region):
                         continue
-                    _, blob_labels, stats, _ = cv2.connectedComponentsWithStats(
-                        region.astype(np.uint8), connectivity=8
-                    )
-                    for blob_index in range(1, len(stats)):
-                        # O retângulo ORIENTADO é o que mede a forma:
-                        # um traço diagonal sólido preenche ~100% do
-                        # seu minAreaRect (o bbox alinhado ao eixo
-                        # diria ~8% e mataria a semente), enquanto o L
-                        # oco da sombra segue em ~19% em qualquer
-                        # orientação (Devin Review do PR #144).
-                        points = np.column_stack(
-                            np.where(blob_labels == blob_index)[::-1]
-                        ).astype(np.float32)
-                        (_, _), (rect_w, rect_h), _ = cv2.minAreaRect(points)
-                        if (
-                            min(rect_w, rect_h) >= _FILL_SEED_MIN_DIM_PX
-                            and stats[blob_index, cv2.CC_STAT_AREA]
-                            >= _FILL_SEED_MIN_FILL * rect_w * rect_h
-                        ):
-                            supported |= labels == index
-                            break
+                    # A diagonal solid stroke fills its oriented rectangle;
+                    # the hollow L-shaped shadow remains sparse in any angle.
+                    if _has_dense_pixel_seed(region):
+                        component = labels[
+                            y : y + component_height, x : x + component_width
+                        ]
+                        supported[
+                            y : y + component_height, x : x + component_width
+                        ] |= component == index
         self._ink_streak[supported] = np.minimum(
             self._ink_streak[supported].astype(np.uint16) + 1, 255
         ).astype(np.uint8)
