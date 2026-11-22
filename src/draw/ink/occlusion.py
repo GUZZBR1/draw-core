@@ -14,6 +14,7 @@ _VISIBLE_TILE_FRACTION = 0.85
 # Um objeto claro ainda pode ter a luma e o croma do papel. Compare a
 # variação relativa local com a textura de papel aprendida por tile.
 _TEXTURE_CHANGE = 0.015
+_TEXTURE_MIN_PAPER_FRACTION = 0.6
 # Um deslocamento fotométrico da página inteira (luz da sala caindo,
 # auto-exposição da câmera, balanço de branco) move a quase totalidade
 # dos tiles de uma vez — não é oclusão local. Quando a parcela anômala
@@ -102,7 +103,7 @@ class PaperExposureGuard:
         self._page_reference = None
         self._page_color_reference = None
         self._texture_reference = None
-        self._page_texture_reference = None
+        self._was_texture_anomalous = None
         self._ink_streak = None
         self._fill_adopted = None
         self._last_fill_adoption = False
@@ -239,10 +240,43 @@ class PaperExposureGuard:
             current = reduced.astype(np.float32)
             color = None
             gray = image.astype(np.float32)
-        mean_square = cv2.resize(gray * gray, size, interpolation=cv2.INTER_AREA)
+        texture_weights = np.ones((height, width), dtype=np.float32)
+        support_level = (
+            _FILL_INK_PIXEL_THRESHOLD
+            if ink_support_threshold is None
+            else float(ink_support_threshold)
+        )
+        if ink_prob is not None:
+            ink_prob = np.asarray(ink_prob, dtype=np.float32)
+            if ink_prob.shape == (height, width):
+                texture_weights = (
+                    np.isfinite(ink_prob) & (ink_prob < support_level)
+                ).astype(np.float32)
+            else:
+                texture_weights.fill(0.0)
+        paper_fraction = cv2.resize(texture_weights, size, interpolation=cv2.INTER_AREA)
+        sampled_mean = cv2.resize(
+            gray * texture_weights, size, interpolation=cv2.INTER_AREA
+        )
+        sampled_mean_square = cv2.resize(
+            gray * gray * texture_weights, size, interpolation=cv2.INTER_AREA
+        )
+        texture_mean = np.divide(
+            sampled_mean,
+            paper_fraction,
+            out=np.zeros_like(sampled_mean),
+            where=paper_fraction > 0.0,
+        )
+        texture_mean_square = np.divide(
+            sampled_mean_square,
+            paper_fraction,
+            out=np.zeros_like(sampled_mean_square),
+            where=paper_fraction > 0.0,
+        )
+        texture_valid = paper_fraction >= _TEXTURE_MIN_PAPER_FRACTION
         texture = np.sqrt(
-            np.maximum(mean_square - current * current, 0.0)
-        ) / np.maximum(current, _CHROMA_LUMA_FLOOR)
+            np.maximum(texture_mean_square - texture_mean * texture_mean, 0.0)
+        ) / np.maximum(texture_mean, _CHROMA_LUMA_FLOOR)
 
         if visible is None:
             updateable = np.ones(current.shape, dtype=bool)
@@ -272,7 +306,7 @@ class PaperExposureGuard:
             self._page_reference = None
             self._page_color_reference = None
             self._texture_reference = np.full(current.shape, np.nan, dtype=np.float32)
-            self._page_texture_reference = None
+            self._was_texture_anomalous = np.zeros(current.shape, dtype=bool)
             self._ink_streak = np.zeros(current.shape, dtype=np.uint8)
             self._fill_adopted = np.zeros(current.shape, dtype=bool)
             self._recovering = np.zeros(current.shape, dtype=np.uint8)
@@ -308,21 +342,44 @@ class PaperExposureGuard:
         color_anomaly = self._color_anomaly(known, chroma, current.shape)
 
         texture_known = np.isfinite(self._texture_reference)
-        has_texture_history = self._page_texture_reference is not None
-        if self._page_texture_reference is None:
-            texture_candidates = texture[updateable & ~darkened & ~color_anomaly]
-            if texture_candidates.size:
-                self._page_texture_reference = float(np.median(texture_candidates))
-        expected_texture = np.where(
-            texture_known,
-            self._texture_reference,
-            self._page_texture_reference or 0.0,
+        left = np.roll(self._texture_reference, 1, axis=1)
+        right = np.roll(self._texture_reference, -1, axis=1)
+        up = np.roll(self._texture_reference, 1, axis=0)
+        down = np.roll(self._texture_reference, -1, axis=0)
+        left[:, 0] = np.nan
+        right[:, -1] = np.nan
+        up[0, :] = np.nan
+        down[-1, :] = np.nan
+        horizontal_count = np.isfinite(left).astype(np.uint8) + np.isfinite(right)
+        vertical_count = np.isfinite(up).astype(np.uint8) + np.isfinite(down)
+        horizontal_reference = np.divide(
+            np.nan_to_num(left, nan=0.0) + np.nan_to_num(right, nan=0.0),
+            horizontal_count,
+            out=np.zeros(current.shape, dtype=np.float32),
+            where=horizontal_count > 0,
         )
-        texture_anomaly = (
-            np.abs(texture - expected_texture)
-            > np.maximum(_TEXTURE_CHANGE, expected_texture * 0.5)
-            if has_texture_history
-            else np.zeros(current.shape, dtype=bool)
+        vertical_reference = np.divide(
+            np.nan_to_num(up, nan=0.0) + np.nan_to_num(down, nan=0.0),
+            vertical_count,
+            out=np.zeros(current.shape, dtype=np.float32),
+            where=vertical_count > 0,
+        )
+        neighbor_reference = np.where(
+            horizontal_count > 0, horizontal_reference, vertical_reference
+        )
+        neighbor_count = np.where(
+            horizontal_count > 0, horizontal_count, vertical_count
+        )
+        texture_reference = np.where(
+            texture_known, self._texture_reference, neighbor_reference
+        )
+        texture_comparable = texture_known | (neighbor_count > 0)
+        texture_anomaly = ~texture_valid | (
+            texture_comparable
+            & (
+                np.abs(texture - texture_reference)
+                > np.maximum(_TEXTURE_CHANGE, texture_reference * 0.5)
+            )
         )
 
         anomalous = darkened | color_anomaly
@@ -394,6 +451,7 @@ class PaperExposureGuard:
             flattened = (
                 updateable
                 & (anomalous | texture_anomaly)
+                & ~self._was_texture_anomalous
                 & ~color_anomaly
                 & (current >= page_reference - page_drop)
             )
@@ -415,25 +473,21 @@ class PaperExposureGuard:
         # fora do caminho ou quando a cena não tem máscara alguma.
         supported = np.zeros(current.shape, dtype=bool)
         pixel_support = None
-        if ink_prob is not None and np.any(anomalous):
+        if ink_prob is not None:
             ink_prob = np.asarray(ink_prob, dtype=np.float32)
             if ink_prob.shape == (height, width):
-                support_level = (
-                    _FILL_INK_PIXEL_THRESHOLD
-                    if ink_support_threshold is None
-                    else float(ink_support_threshold)
-                )
                 pixel_support = ink_prob >= support_level
-                support_fraction = cv2.resize(
-                    pixel_support.astype(np.float32), size, interpolation=cv2.INTER_AREA
-                )
-                support_mean = cv2.resize(ink_prob, size, interpolation=cv2.INTER_AREA)
-                supported = (
-                    anomalous
-                    & updateable
-                    & (support_fraction >= _FILL_INK_TILE_SUPPORT)
-                    & (support_mean >= _FILL_INK_TILE_MEAN)
-                )
+        if pixel_support is not None and np.any(anomalous):
+            support_fraction = cv2.resize(
+                pixel_support.astype(np.float32), size, interpolation=cv2.INTER_AREA
+            )
+            support_mean = cv2.resize(ink_prob, size, interpolation=cv2.INTER_AREA)
+            supported = (
+                anomalous
+                & updateable
+                & (support_fraction >= _FILL_INK_TILE_SUPPORT)
+                & (support_mean >= _FILL_INK_TILE_MEAN)
+            )
         self._ink_streak[supported] = np.minimum(
             self._ink_streak[supported].astype(np.uint16) + 1, 255
         ).astype(np.uint8)
@@ -474,9 +528,13 @@ class PaperExposureGuard:
             self._color_reference[initialize] = chroma[initialize]
         refresh = updateable & known & ~anomalous
         np.maximum(self._reference, current, out=self._reference, where=refresh)
-        texture_initialize = updateable & ~texture_known & ~anomalous & ~texture_anomaly
+        texture_initialize = (
+            updateable & texture_valid & ~texture_known & ~anomalous & ~texture_anomaly
+        )
         self._texture_reference[texture_initialize] = texture[texture_initialize]
-        texture_refresh = updateable & texture_known & ~anomalous & ~texture_anomaly
+        texture_refresh = (
+            updateable & texture_valid & texture_known & ~anomalous & ~texture_anomaly
+        )
         self._texture_reference[texture_refresh] = texture[texture_refresh]
 
         # A clean first sample can seed and use its own tile immediately;
@@ -495,11 +553,6 @@ class PaperExposureGuard:
             > 0
         )
         if pixel_support is not None:
-            pixel_luma = (
-                cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).astype(np.float32)
-                if image.ndim == 3
-                else image.astype(np.float32)
-            )
             expected_pixels = cv2.resize(
                 expected, (width, height), interpolation=cv2.INTER_NEAREST
             )
@@ -510,7 +563,7 @@ class PaperExposureGuard:
             # contains a solid dark fill. Strong ink pixels over dark
             # camera pixels never prove exposed paper, including tiles
             # that are only partially covered by the fill.
-            dark_ink = pixel_support & (pixel_luma < expected_pixels - pixel_drop)
+            dark_ink = pixel_support & (gray < expected_pixels - pixel_drop)
             if np.any(dark_ink):
                 if isinstance(paper_exposed, (bool, np.bool_)):
                     paper_exposed = np.full((height, width), paper_exposed, dtype=bool)
@@ -571,6 +624,7 @@ class PaperExposureGuard:
         self._recovering[anomalous] = 0
         self._recovering[self._was_anomalous & ~anomalous] = _RECOVERY_HOLD_PASSES
         self._was_anomalous = anomalous.copy()
+        self._was_texture_anomalous = texture_anomaly.copy()
         return ExposureAssessment(
             visible=unblocked,
             paper_exposed=paper_exposed,
