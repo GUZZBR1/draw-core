@@ -38,6 +38,7 @@ class LayeredInkAccumulator:
     def reset(self):
         self._window = deque(maxlen=votes._INK_VOTE_WINDOW)
         self._removal_streak = None
+        self._removal_stale_passes = 0
         self._confirmed = None
         self._provisional = None
         self._provisional_ever = None
@@ -62,6 +63,7 @@ class LayeredInkAccumulator:
         confirmed = np.asarray(confirmed, dtype=np.uint8)
         if self._confirmed is None or self._confirmed.shape != confirmed.shape:
             self._removal_streak = None
+            self._removal_stale_passes = 0
             self._confirmed = np.zeros_like(confirmed)
             self._provisional = np.zeros(confirmed.shape, np.uint8)
             self._provisional_ever = np.zeros(confirmed.shape, dtype=bool)
@@ -150,6 +152,7 @@ class LayeredInkAccumulator:
                 paper_exposed = None
         if self._confirmed is None or self._confirmed.shape != prob.shape:
             self._removal_streak = None
+            self._removal_stale_passes = 0
             self._confirmed = np.zeros(prob.shape, dtype=np.uint8)
             self._provisional = np.zeros(prob.shape, dtype=np.uint8)
             self._provisional_ever = np.zeros(prob.shape, dtype=bool)
@@ -255,6 +258,15 @@ class LayeredInkAccumulator:
         if self._config.removal:
             if self._removal_streak is None:
                 self._removal_streak = np.zeros(prob.shape, dtype=np.uint8)
+            # Assinatura barata do streak antes da atualização: se
+            # nada muda na passada — pixel ocluído ou inspecionado
+            # sem papel provado segura a contagem — o pendurado
+            # envelhece e o worker pode devolver a cadência ao
+            # probe ocioso (Devin Review do PR #144).
+            streak_sig = (
+                int(np.count_nonzero(self._removal_streak)),
+                int(self._removal_streak.sum(dtype=np.uint64)),
+            )
             # Sem dominio inspecionado nao ha evidencia negativa
             # confiavel; com a guarda ativa ela sozinha delimita
             # onde a ausencia foi de fato observada.
@@ -340,6 +352,15 @@ class LayeredInkAccumulator:
                 seen_as_ink[removed] = False
                 score[removed] = 0
                 hits[removed] = 0
+            if not np.any(self._removal_streak):
+                self._removal_stale_passes = 0
+            elif streak_sig == (
+                int(np.count_nonzero(self._removal_streak)),
+                int(self._removal_streak.sum(dtype=np.uint64)),
+            ):
+                self._removal_stale_passes += 1
+            else:
+                self._removal_stale_passes = 0
         confirmed_now = self._confirmed > 0
         provisional_now = seen_as_ink & ~confirmed_now
         if self._config.hysteresis:

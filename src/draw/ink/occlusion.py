@@ -141,9 +141,33 @@ def _has_dense_pixel_seed(region):
         if (
             min(pixel_w, pixel_h) >= _FILL_SEED_MIN_DIM_PX
             and blob_area >= _FILL_SEED_MIN_FILL * center_w * center_h
+            and _closed_or_solid_seed(blob, blob_area, hull)
         ):
             return True
     return False
+
+
+def _closed_or_solid_seed(blob, blob_area, hull):
+    """A forma, não a densidade, separa a semente real da miragem.
+
+    Encurtando as faixas, o L de canto atinge a mesma fração do bbox
+    de um contorno fechado ou de um traço sólido (~28%), e a medida
+    no retângulo de centros decide sozinha por uma borda de um
+    pixel. O L é côncavo e aberto — deixa mais da metade do próprio
+    hull vazia; o traço ou o blob sólido preenche a maior parte do
+    hull; e o contorno fino, que também deixa o hull vazio, fecha um
+    buraco. Qualquer um dos dois basta."""
+    if blob_area >= 0.5 * cv2.contourArea(hull):
+        return True
+    # O bbox é justo, então o blob toca as quatro bordas: o rótulo 0
+    # (o próprio blob) sempre aparece na borda do mapa de rótulos do
+    # fundo, e qualquer rótulo de fundo ausente da borda é um buraco
+    # fechado pelo contorno.
+    labels = cv2.connectedComponents((~blob).astype(np.uint8), connectivity=4)[1]
+    edge = np.unique(
+        np.concatenate((labels[0], labels[-1], labels[:, 0], labels[:, -1]))
+    )
+    return bool(np.any(~np.isin(labels, edge)))
 
 
 class PaperExposureGuard:

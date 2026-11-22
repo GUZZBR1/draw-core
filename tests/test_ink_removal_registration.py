@@ -1675,3 +1675,90 @@ def test_erase_and_redraw_lets_removal_finish_after_marks_hold_ages():
             edited, visible, ink_prob=new_prob, ink_support_threshold=0.7
         )
     assert np.asarray(assessment.paper_exposed)[stroke].any()
+
+
+def test_short_l_shaped_shadow_corner_cannot_seed_fill_recovery():
+    """O L curto fecha a margem de densidade: 623 px são 27,0% do
+    raster 48x48 mas 28,2% do retângulo de centros 47x47 — a fração
+    sozinha não decide; a forma (aberto e fino, sem buraco nem
+    núcleo espesso) é o que o separa do contorno e do traço
+    (Devin Review do PR #144)."""
+    guard = occlusion_mod.PaperExposureGuard()
+    shape = (120, 168)  # grade exata de 24px
+    paper = np.full((*shape, 3), 220, dtype=np.uint8)
+    visible = np.ones(shape, dtype=bool)
+    for _ in range(2):
+        guard.observe(paper, visible)
+
+    shadowed = paper.copy()
+    shadowed[24:96, 24:96] = 150  # sombra 3x3 tiles
+    bands = np.zeros(shape, np.float32)
+    bands[24:31, 24:72] = 0.95  # faixa de 7x48 no topo
+    bands[24:72, 24:31] = 0.95  # faixa de 7x48 na esquerda (L)
+    # Os três tiles com faixas seguem qualificados; o L cobre 623 px.
+    for _ in range(6):
+        guard.observe(shadowed, visible, ink_prob=bands, ink_support_threshold=0.7)
+    assert not guard._ink_streak.any()
+    assert not guard._fill_adopted.any()
+
+
+def test_stalled_removal_streak_returns_cadence_to_the_idle_probe():
+    """Streak parcial sob sombra estável: inspecionado sem provar
+    papel, a contagem segura em 2 para sempre — depois de
+    _REMOVAL_PASSES passadas sem mover, o pendurado caduca e a
+    cadência volta ao probe ocioso (Devin Review do PR #144)."""
+    shape = (120, 160)
+    prob = np.zeros(shape, np.float32)
+    worker = rr.make_ink_worker(_MutablePageClean(prob), rr.SceneClock())
+    acc = worker._accumulator
+    stroke_a = np.zeros(shape, bool)
+    stroke_a[40:44, 40:60] = True  # apagado, coberto pela sombra
+    stroke_b = np.zeros(shape, bool)
+    stroke_b[80:88, 40:80] = True  # testemunha: segue lida como tinta
+    canvas = np.zeros(shape, np.uint8)
+    canvas[stroke_a | stroke_b] = 255
+    acc.restore_confirmed(canvas)
+    acc._removal_streak = np.zeros(shape, np.uint8)
+    acc._removal_streak[stroke_a] = 2
+    prob[stroke_b] = 0.95
+    visible = np.ones(shape, bool)
+    exposed = ~stroke_a  # sombra estável: inspecionado, nunca prova papel
+
+    assert worker._removal_pending()
+    for index in range(registration_mod._REMOVAL_PASSES):
+        acc.add(prob, visible, valid_mask=visible, paper_exposed=exposed)
+        assert worker._removal_pending() == (
+            index < registration_mod._REMOVAL_PASSES - 1
+        )
+    # Mão fora e confirmação gasta: o intervalo volta ao probe
+    # ocioso, não ao 250 ms ativo nem ao descanso cego.
+    worker.set_hand_presence(False)
+    worker._confirm_once = False
+    assert worker._pass_interval() == worker_mod._IDLE_PROBE_SECONDS
+    # A sombra sai: a evidência volta a mover o streak e a cadência
+    # urgente reabre — a espera caduca, o voto não.
+    exposed_all = np.ones(shape, bool)
+    acc.add(prob, visible, valid_mask=visible, paper_exposed=exposed_all)
+    assert worker._removal_pending()
+
+
+def test_pending_removal_uses_idle_probe_under_slow_ink_interval():
+    """--ink-interval 5 não atrasa o voto de remoção pendente: a
+    cadência urgente fica no teto do probe ocioso de 1 s (Devin
+    Review do PR #144)."""
+    shape = (120, 160)
+    prob = np.zeros(shape, np.float32)
+    worker = rr.make_ink_worker(
+        _MutablePageClean(prob),
+        rr.SceneClock(),
+        config=InkConfig(pass_interval_s=5.0),
+    )
+    acc = worker._accumulator
+    canvas = np.zeros(shape, np.uint8)
+    canvas[40:44, 40:60] = 255
+    acc.restore_confirmed(canvas)
+    acc._removal_streak = np.zeros(shape, np.uint8)
+    acc._removal_streak[40:44, 40:60] = 2
+    worker.set_hand_presence(False)
+    worker._confirm_once = False
+    assert worker._pass_interval() == worker_mod._IDLE_PROBE_SECONDS

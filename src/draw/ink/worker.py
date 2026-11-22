@@ -1520,11 +1520,19 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         )
 
     def _removal_pending(self):
-        """Removal votes still need observations at the active cadence."""
+        """Removal votes still need observations at the active cadence.
+
+        O streak que não se move em toda uma janela de remoção — a
+        sombra estável que nunca prova papel, por exemplo — não é
+        trabalho urgente: como as carências de recovery e marks, a
+        espera é limitada e o pendurado caduca depois de
+        _REMOVAL_PASSES passadas sem progresso (Devin Review do
+        PR #144)."""
         return (
             self._config.removal
             and self._accumulator._removal_streak is not None
             and np.any(self._accumulator._removal_streak)
+            and self._accumulator._removal_stale_passes < registration._REMOVAL_PASSES
         )
 
     def _at_rest(self):
@@ -1596,9 +1604,17 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             and not self._removal_pending()
         ):
             return _IDLE_PROBE_SECONDS
-        if self._config.pass_interval_s is not None:
-            return self._config.pass_interval_s
-        return _PAGE_CLEAN_INTERVAL_SECONDS
+        interval = (
+            self._config.pass_interval_s
+            if self._config.pass_interval_s is not None
+            else _PAGE_CLEAN_INTERVAL_SECONDS
+        )
+        # Um voto de remoção pendente não pode esperar um
+        # --ink-interval lento: a cadência urgente é o probe ocioso
+        # (Devin Review do PR #144).
+        if self._removal_pending():
+            return min(interval, _IDLE_PROBE_SECONDS)
+        return interval
 
     def _announce_rest_locked(self):
         """Entrada do descanso total: a tela assenta numa unica troca.
