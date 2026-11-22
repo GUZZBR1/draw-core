@@ -419,8 +419,8 @@ class HandMasker:
         image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         result = None
         if use_video:
-            timestamp = max(int(timestamp_ms), self._last_video_ts + 1)
             try:
+                timestamp = max(int(timestamp_ms), self._last_video_ts + 1)
                 result = self._video_landmarker.detect_for_video(image, timestamp)
                 self._last_video_ts = timestamp
             except Exception:
@@ -441,7 +441,10 @@ class HandMasker:
         if result is None:
             if not self._ensure():
                 return None
-            result = self._landmarker.detect(image)
+            try:
+                result = self._landmarker.detect(image)
+            except Exception:
+                return None
         frame_h, frame_w = frame.shape[:2]
         hands = []
         for hand in result.hand_landmarks or []:
