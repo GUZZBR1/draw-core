@@ -42,9 +42,9 @@ seguro: papel re-exposto fica MAIS claro que a referencia, nao mais
 escuro, entao remocao nunca le como conteudo novo.
 
 Opt-in via InkConfig.page_model; desligado, nada muda. O limiar de
-"novo" (_NOVEL_DELTA, em unidades de luminancia 0-255) e uma
-semente razoavel para um traco escuro sobre papel claro; o corpus
-de clipes reais e quem calibra de vez.
+"novo" (_NOVEL_RATIO, contraste de Weber (ref - I) / ref) e
+invariante de escala — vale para mesa clara e cena escura; a
+calibracao nas capturas reais esta registrada na constante.
 """
 
 import cv2
@@ -70,16 +70,29 @@ _CONFIRM_OBS = 3
 # bastante para acompanhar nuvem e lampada (#133).
 _UPDATE_RATE = 0.125
 # Quanto mais escuro que a referencia um pixel precisa estar para
-# ser "conteudo novo", em unidades de luminancia. Semente para
-# traco escuro sobre papel claro; a calibracao real sai do corpus.
-# A literatura canonica testa sombra por RAZAO (MOG2 Tau, penumbra e o
-# caso dificil — docs/research/nota-page-model-literatura.md no repo
-# GUZZBR1/-draw-site-); o delta
-# absoluto falha justamente no gradiente de sombra movel do #133. E o
-# erro mais seguro p/ prototipo: falso `novel` cai na pipeline normal
-# (status quo), falso `~novel` suprime traco claro para sempre — mas a
-# decisao delta vs razao vs entrada `division_normalize` e medicao,
-# nao chute: pendente de clipes reais.
+# ser "conteudo novo", como RAZAO do proprio nivel da referencia
+# (contraste de Weber, (ref - I) / ref) — a literatura canonica testa
+# sombra por razao (MOG2 Tau, penumbra; docs/research/
+# nota-page-model-literatura.md no repo GUZZBR1/-draw-site-) e so ela
+# e invariante entre mesa clara e cena escura. Calibrado nas capturas
+# reais de captures/pagina_reorientada_*.png (2026-11-22): conteudo
+# impresso/escrito real mede razao ~1,0; marca impressa lendo ~27%
+# abaixo da referencia sob dimming (o caso do teste da suíte) fica
+# abaixo do limiar e segue suprimida; sombra local suave (~20%)
+# tambem. O residuo conhecido: sombra local mais profunda que ~30%
+# ainda parece conteudo novo — a mesma classe de furo que o delta
+# absoluto tinha, agora invariante de escala. Lapis bem fraco
+# (< ~30% de contraste) fica fora: e o preco de nao chamar sombra de
+# tinta.
+_NOVEL_RATIO = 0.30
+# Limiar absoluto das comparacoes de tom salvo do caminho de
+# identidade (`darker_than_reference`, `saved_tone_evidence`): ali a
+# pergunta nao e "isto e conteudo novo contra o papel" mas "este tom
+# casa com a tinta salva/a pior aparencia vizinha" — um casamento de
+# tons entre niveis escuros, dominio em que a razao de Weber nao se
+# aplica. Manter os dois limiares separados e deliberado: novel/
+# appearance julgam conteudo novo por razao; identidade julga tom por
+# delta — e o contrato calibrado pelos testes de identidade.
 _NOVEL_DELTA = 24.0
 # Tolerancia de "voltou a referencia", em luminancia normalizada. Bem
 # mais apertada que _NOVEL_DELTA de proposito: histerese de limiar duplo
@@ -153,6 +166,7 @@ class PageModel:
         block=_BLOCK,
         confirm_obs=_CONFIRM_OBS,
         rate=_UPDATE_RATE,
+        novel_ratio=_NOVEL_RATIO,
         novel_delta=_NOVEL_DELTA,
     ):
         if block < 1:
@@ -161,12 +175,15 @@ class PageModel:
             raise ValueError("confirm_obs deve ser >= 1")
         if not 0.0 < rate <= 1.0:
             raise ValueError("rate deve estar em (0, 1]")
-        if not novel_delta > 0.0:
+        if not 0.0 < novel_ratio < 1.0:
+            raise ValueError("novel_ratio deve estar em (0, 1)")
+        if novel_delta <= 0.0:
             raise ValueError("novel_delta deve ser > 0")
         self.shape = tuple(shape)
         self.block = int(block)
         self.confirm_obs = int(confirm_obs)
         self.rate = float(rate)
+        self.novel_ratio = float(novel_ratio)
         self.novel_delta = float(novel_delta)
         height, width = self.shape
         self._ref = np.zeros((height, width), dtype=np.float32)
@@ -563,7 +580,8 @@ class PageModel:
         return gray if abs(gain - 1.0) <= 1e-4 else (gray / np.float32(gain))
 
     def novel(self, gray, visible=None):
-        """Pixels mais escuros que a referencia alem de `novel_delta`.
+        """Pixels mais escuros que a referencia alem de `novel_ratio`
+        vezes a propria referencia (contraste de Weber).
 
         Compara `gray` e a referencia no mesmo dominio normalizado pela
         iluminacao do papel exposto: escurecimento global da folha nao
@@ -572,13 +590,18 @@ class PageModel:
         norm_gray = self._normalized(gray, visible)
         if not self._has_seeded:
             return np.zeros(self.shape, dtype=bool)
-        return self._seeded & (self._norm_ref - norm_gray > self.novel_delta)
+        return self._seeded & (
+            self._norm_ref - norm_gray
+            > self.novel_ratio * np.maximum(self._norm_ref, 1.0)
+        )
 
     def appearance(self, gray, visible=None):
         """(novel, returned) numa unica normalizacao de iluminacao.
 
         A estimativa de ganho e o custo dominante de ambos; o caminho
-        quente da trabalhadora precisa dos dois por passada.
+        quente da trabalhadora precisa dos dois por passada. O ramo
+        `novel` aplica a mesma razao de Weber de `novel()` — os dois
+        caminhos classificam "conteudo novo" pelo mesmo criterio.
         """
         norm_gray = self._normalized(gray, visible)
         if not self._has_seeded:
@@ -586,7 +609,7 @@ class PageModel:
             return none, none.copy()
         diff = self._norm_ref - norm_gray
         return (
-            self._seeded & (diff > self.novel_delta),
+            self._seeded & (diff > self.novel_ratio * np.maximum(self._norm_ref, 1.0)),
             self._seeded & (np.abs(diff) <= _RETURN_TOL),
         )
 
