@@ -10,6 +10,7 @@ import time
 import numpy as np
 
 from draw.contracts import InkBaselineState, WarpedPage
+from draw.ink import occlusion
 from draw.ink import worker as worker_mod
 from draw.ink.config import InkConfig
 
@@ -33,9 +34,9 @@ def _bgr(gray):
     return np.stack([gray] * 3, axis=-1).astype(np.uint8)
 
 
-def _drive(worker, generation, image, visible=None):
+def _drive(worker, generation, image, visible=None, corners=Q0):
     before = worker.stats()["passes_total"]
-    worker.submit(WarpedPage(_bgr(image), generation, Q0, visible))
+    worker.submit(WarpedPage(_bgr(image), generation, corners, visible))
     deadline = time.monotonic() + 5.0
     while worker.stats()["passes_total"] <= before:
         if time.monotonic() > deadline:
@@ -272,6 +273,62 @@ def test_erased_stroke_over_print_is_removed_from_canvas(monkeypatch):
         canvas = _confirmed(worker, generation)
         assert not np.any(canvas[24:26, 20:60])
         assert np.count_nonzero(canvas[40:80]) == SCRIBBLE_PX
+    finally:
+        worker.stop()
+
+
+def test_moved_page_projects_the_occluder_veto_into_anchor_space(monkeypatch):
+    """Regua imitando a guia sobre o traco com a pagina deslocada.
+
+    A guarda mede `anomalous_px`/`suspect_ink` no warp da passada, mas
+    `returned_seen` e as mascaras de baseline vivem na grade da ancora:
+    sem a projecao, o veto fotometrico cobre os pixels errados e o
+    retorno forjado apaga a tinta confirmada (Devin Review do PR #144).
+    As mascaras sao injetadas na grade do warp (linhas 40-46); com o
+    quad deslocado +4 px elas so vetam a linha 48 do traco depois de
+    projetadas para a ancora.
+    """
+    fake_anom = np.zeros((H, W), dtype=bool)
+    fake_anom[40:47, 20:60] = True
+    monkeypatch.setattr(
+        occlusion.PaperExposureGuard,
+        "anomalous_px",
+        property(lambda self: self.__dict__.get("_fake_anom", self._anomalous_px)),
+    )
+    monkeypatch.setattr(
+        occlusion.PaperExposureGuard,
+        "suspect_ink",
+        property(lambda self: self.__dict__.get("_fake_sus", self._suspect_ink)),
+    )
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker_pm()
+    try:
+        generation = worker.new_generation()
+        guide = _print_guide()
+        guide[48:50, 20:60] = 90.0  # linha impressa no topo do tile 2
+        for _ in range(4):
+            _drive(worker, generation, guide)
+        drawn = _scribble(guide, 20.0, rows=range(56, 88, 8), cols=(88, 112))
+        drawn[48:50, 20:60] = 20.0  # traco sobre a linha impressa
+        for _ in range(5):
+            _drive(worker, generation, drawn)
+        assert np.all(_confirmed(worker, generation)[48:50, 20:60])
+
+        # A regua cobre a linha impressa (mesma luma da semente: o
+        # retorno dispara) e o quad reportado desloca +4 px — o warp
+        # chega deslocado -4, como num erro de deteccao.
+        worker._paper_exposure._fake_anom = fake_anom
+        worker._paper_exposure._fake_sus = None
+        ruled = _scribble(guide, 20.0, rows=range(56, 88, 8), cols=(88, 112))
+        ruled[44:64, 20:60] = 90.0
+        ruled[44:64, 28:60:16] = 20.0  # marcas escuras da regua
+        shifted = np.full((H, W), PAPER, dtype=np.float32)
+        shifted[:-4] = ruled[4:]
+        moved = Q0 + np.array([0, 4], dtype=np.float32)
+        for _ in range(7):
+            _drive(worker, generation, shifted, corners=moved)
+        canvas = _confirmed(worker, generation)
+        assert np.all(canvas[48:50, 26:58])
     finally:
         worker.stop()
 

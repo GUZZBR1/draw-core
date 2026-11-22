@@ -4028,6 +4028,48 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 if p.exposure is not None:
                     anomalous_px = p.exposure_guard.anomalous_px
                     suspect = p.exposure_guard.suspect_ink
+                    # A guarda mede o warp desta passada; o veto e o
+                    # retorno julgados abaixo vivem na grade da ancora.
+                    # Sem a projecao, pagina que desloca ou rotaciona
+                    # deixa o veto cobrindo os pixels errados — e a
+                    # regua escura sob o traco confirmado deixava de
+                    # suprimir o retorno, virando ausencia provada
+                    # (Devin Review do PR #144). Mesmo par (ancora,
+                    # registro) e mesmo motion_fix das mascaras da
+                    # avaliacao acima.
+                    if last_reg is not None:
+                        matrix = registration._registration_matrix(
+                            last_reg[0], last_reg[1], p.prob.shape
+                        )
+                        if not registration._registration_is_identity(matrix):
+                            if anomalous_px is not None:
+                                anomalous_px = _warp_exposure_mask(
+                                    anomalous_px, matrix, p.prob.shape
+                                )
+                            if suspect is not None:
+                                suspect = _warp_exposure_mask(
+                                    suspect, matrix, p.prob.shape
+                                )
+                    motion_fix = (
+                        p.motion_fix
+                        if p.motion_decision == "correct" and p.used_registered_prob
+                        else None
+                    )
+                    if motion_fix is not None:
+                        if anomalous_px is not None:
+                            anomalous_px = (
+                                motion_fix.warp_back(
+                                    anomalous_px.astype(np.uint8), nearest=True
+                                )
+                                > 0
+                            )
+                        if suspect is not None:
+                            suspect = (
+                                motion_fix.warp_back(
+                                    suspect.astype(np.uint8), nearest=True
+                                )
+                                > 0
+                            )
                     if anomalous_px is not None:
                         veto = anomalous_px.copy()
                         if suspect is not None:
