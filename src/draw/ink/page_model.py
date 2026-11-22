@@ -802,19 +802,24 @@ class PageModel:
                     int(dx),
                 )
                 ry, rx = py - int(dy) - my0, px - int(dx) - mx0
-                known_gap = np.minimum(
-                    clean_gap, _nearest_reference_gap(known_ref, ry, rx, obs, near_i)
-                )
-                occl_gap = np.minimum(
-                    clean_gap, _nearest_reference_gap(occl_ref, ry, rx, obs, near_i)
-                )
+                if known_ref is not None:
+                    known_gap = np.minimum(
+                        clean_gap,
+                        _nearest_reference_gap(known_ref, ry, rx, obs, near_i),
+                    )
+                    occl_gap = np.minimum(
+                        clean_gap,
+                        _nearest_reference_gap(occl_ref, ry, rx, obs, near_i),
+                    )
                 np.minimum(
                     clean_gap,
                     _nearest_reference_gap(moved_ref, ry, rx, obs, near_i),
                     out=clean_gap,
                 )
-                unsure = (saved_gap <= self.novel_delta) & (saved_gap < known_gap)
-                occluded = (saved_gap <= self.novel_delta) & (saved_gap < occl_gap)
+                if known_ref is not None:
+                    fits = saved_gap <= self.novel_delta
+                    unsure = fits & (saved_gap < known_gap)
+                    occluded = fits & (saved_gap < occl_gap)
             hit = (saved_gap <= self.novel_delta) & (saved_gap < clean_gap)
             matched_obs[qy[hit], qx[hit]] = True
             matched_saved[py[hit], px[hit]] = True
@@ -860,6 +865,7 @@ class PageModel:
         tx0, tx1 = max(x0, -dx), min(x1, width - dx)
         if ty1 <= ty0 or tx1 <= tx0:
             return moved, known, occluded, y0, x0
+        full = (ty0, ty1, tx0, tx1) == (y0, y1, x0, x1)
         ref = ref_inf[ty0:ty1, tx0:tx1]
         here = norm_gray[ty0:ty1, tx0:tx1]
         there = norm_gray[ty0 + dy : ty1 + dy, tx0 + dx : tx1 + dx]
@@ -872,6 +878,10 @@ class PageModel:
             stayed &= judged
         win = (slice(ty0 - y0, ty1 - y0), slice(tx0 - x0, tx1 - x0))
         moved[win][stayed] = np.inf
+        if full and (vis is None or judged.all()):
+            # Toda amostra visivel e na grade: nenhum veto depende de
+            # oclusao — sem os recortes extras.
+            return moved, None, None, y0, x0
         known[win] = np.where(judged & ~stayed, ref, np.inf)
         hidden = ~judged
         if foot is not None:

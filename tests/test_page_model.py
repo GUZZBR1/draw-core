@@ -2641,6 +2641,55 @@ def test_identity_hidden_projected_rule_holds_only_under_the_hand():
     assert clipped[7] is False
 
 
+def test_identity_clipped_rule_and_hand_covered_stroke_hold():
+    """worker.py:812: o recorte bloqueia o traco da borda (160 px) e a
+    mao cobre outro traco (600 px) dentro da pegada: descobri-lo basta
+    para o piso, entao adia com hold; a mao sai e a folha e a mesma."""
+    model = pm_mod.PageModel((H, W))
+    form = np.full((H, W), PAPER, dtype=np.float32)
+    form[34:36, 10:110] = 95.0
+    vis = np.ones((H, W), dtype=bool)
+    for _ in range(4):
+        model.observe(form, visible=vis, paper=vis)
+    baseline = form < 200
+    ref = np.zeros((H, W), dtype=np.uint8)
+    ref[29:31, 25:105] = 255
+    ref[10:20, 30:90] = 255
+    gray_ref = np.full((H, W), np.nan, dtype=np.float32)
+    gray_ref[29:31, 25:105] = 65.0
+    gray_ref[10:20, 30:90] = INK
+    gray = np.full((H, W), PAPER, dtype=np.float32)
+    gray[32:34, 10:110] = 95.0
+    gray[29:31, 25:105] = 85.0
+    gray[10:20, 30:90] = INK
+    candidate = _identity_candidate(gray)
+    clip = vis.copy()
+    clip[32:, :] = False
+    hand = clip.copy()
+    hand[8:22, :] = False
+
+    def run(visible):
+        return worker_mod._evaluate_page_identity(
+            ref,
+            baseline,
+            candidate,
+            visible,
+            clip,
+            None,
+            False,
+            0.2,
+            identity_gray=gray,
+            identity_model=model,
+            identity_gray_ref=gray_ref,
+        )
+
+    covered = run(hand)
+    assert covered[0] is False and covered[5] is True
+    assert covered[6] == "occlusion" and covered[7] is True
+    lifted = run(clip)
+    assert lifted[0] is True
+
+
 def _ruled_form():
     form = np.full((H, W), PAPER, dtype=np.float32)
     form[34:36, 10:110] = 95.0

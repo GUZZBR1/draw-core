@@ -462,6 +462,9 @@ def _evaluate_page_identity(
     qualquer folha tipo caderno.
     """
     prior = identity_reference > 0
+    # Visibilidade do registro antes de a incerteza fotometrica tirar
+    # pixels dela: separa tinta coberta pela mao de tinta nao julgavel.
+    hand_visible = identity_visible
     has_baseline = (
         identity_baseline is not None
         and identity_baseline.shape == candidate.shape
@@ -745,6 +748,14 @@ def _evaluate_page_identity(
         if occluded is None or not np.any(occluded)
         else int(np.count_nonzero(occluded & prior_domain))
     )
+    # Incerteza geometrica (recorte) somada a tinta coberta direto pela
+    # mao no dominio: descobrir essa tinta pode bastar para o piso, e
+    # o prazo nao pode apagar o desenho antes de a mao sair.
+    uncovered_px = (
+        0
+        if unsure is None or hand_visible is None or not np.any(unsure & prior_domain)
+        else int(np.count_nonzero(prior_domain & ~hand_visible & ~unsure))
+    )
     prior_eval = (
         prior_domain if identity_visible is None else (prior_domain & identity_visible)
     )
@@ -809,7 +820,10 @@ def _evaluate_page_identity(
                 prior_eval_px,
                 True,
                 "occlusion",
-                hold_seen or ambiguous_px > 0 or occluded_domain_px > 0,
+                hold_seen
+                or ambiguous_px > 0
+                or occluded_domain_px > 0
+                or (uncovered_px > 0 and prior_eval_px + uncovered_px >= min_eval_px),
             )
     if prior_eval_px == 0:
         unobserved_px = 0 if identity_sampled is None else usable_total_px - usable_px
