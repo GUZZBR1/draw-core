@@ -234,19 +234,58 @@ def _align_identity_baseline(identity_baseline, seen, prior, radius, kernel):
     seen_indep = seen & ~prior_d
     if not np.any(seen_indep):
         return identity_baseline
+    active_rows = np.flatnonzero(np.any(base_nonprior, axis=1))
+    if active_rows.size == 0:
+        return identity_baseline
+    base_rows = base_nonprior[active_rows]
+    active_cols = np.flatnonzero(np.any(base_rows, axis=0))
+    x0 = int(active_cols[0])
+    x1 = int(active_cols[-1]) + 1
+    packed_base_active = np.packbits(base_rows[:, x0:x1], axis=1)
     h, w = seen_indep.shape
-    seen_pad = np.pad(seen_indep, radius, mode="constant", constant_values=False)
-    best_overlap = int(np.count_nonzero(base_nonprior & seen_indep))
+    row_band_mask = np.zeros(h + 2 * radius, dtype=bool)
+    for dy in range(-radius, radius + 1):
+        row_band_mask[active_rows + (radius + dy)] = True
+    band_rows = np.flatnonzero(row_band_mask)
+    row_to_band = np.empty(h + 2 * radius, dtype=np.intp)
+    row_to_band[band_rows] = np.arange(band_rows.size, dtype=np.intp)
+    col_span = x1 - x0 + 2 * radius
+    seen_band = np.zeros((band_rows.size, col_span), dtype=bool)
+    src_rows = band_rows - radius
+    valid_r = (src_rows >= 0) & (src_rows < h)
+    valid_band_idx = np.flatnonzero(valid_r)
+    valid_src_rows = src_rows[valid_r]
+    src_x0 = max(0, x0 - radius)
+    src_x1 = min(w, x1 + radius)
+    dst_x0 = src_x0 - (x0 - radius)
+    dst_x1 = dst_x0 + (src_x1 - src_x0)
+    if valid_band_idx.size > 0 and src_x1 > src_x0:
+        seen_band[valid_band_idx, dst_x0:dst_x1] = seen_indep[
+            valid_src_rows, src_x0:src_x1
+        ]
+    span_w = x1 - x0
+    packed_shifts = [
+        np.packbits(
+            seen_band[:, radius + dx : radius + dx + span_w],
+            axis=1,
+        )
+        for dx in range(-radius, radius + 1)
+    ]
+    rows_center = row_to_band[active_rows + radius]
+    best_overlap = int(
+        np.bitwise_count(packed_base_active & packed_shifts[radius][rows_center]).sum()
+    )
     best_dy, best_dx = 0, 0
     best_dist = 0
     for dy in range(-radius, radius + 1):
+        rows_shifted = row_to_band[active_rows + (radius + dy)]
         for dx in range(-radius, radius + 1):
             if dy == 0 and dx == 0:
                 continue
-            y0 = radius + dy
-            x0 = radius + dx
             overlap = int(
-                np.count_nonzero(base_nonprior & seen_pad[y0 : y0 + h, x0 : x0 + w])
+                np.bitwise_count(
+                    packed_base_active & packed_shifts[radius + dx][rows_shifted]
+                ).sum()
             )
             dist = abs(dy) + abs(dx)
             if overlap > best_overlap or (overlap == best_overlap and dist < best_dist):
