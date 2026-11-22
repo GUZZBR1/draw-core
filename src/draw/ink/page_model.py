@@ -85,14 +85,13 @@ _UPDATE_RATE = 0.125
 # (< ~30% de contraste) fica fora: e o preco de nao chamar sombra de
 # tinta.
 _NOVEL_RATIO = 0.30
-# Limiar absoluto das comparacoes de tom salvo do caminho de
-# identidade (`darker_than_reference`, `saved_tone_evidence`): ali a
-# pergunta nao e "isto e conteudo novo contra o papel" mas "este tom
-# casa com a tinta salva/a pior aparencia vizinha" — um casamento de
-# tons entre niveis escuros, dominio em que a razao de Weber nao se
-# aplica. Manter os dois limiares separados e deliberado: novel/
-# appearance julgam conteudo novo por razao; identidade julga tom por
-# delta — e o contrato calibrado pelos testes de identidade.
+# Limiar absoluto do casamento de tom salvo (`saved_tone_evidence`):
+# ali a pergunta nao e "isto e conteudo novo contra o papel" mas
+# "este tom casa com a tinta salva" — uma distancia entre dois niveis
+# escuros, dominio em que a razao de Weber nao se aplica. Todo o resto
+# que julga "mais escuro que a aparencia limpa" (novel, appearance,
+# returned, darker_than_reference) usa a razao — o mesmo predicado
+# (_novel_diff) para nao divergir.
 _NOVEL_DELTA = 24.0
 # Tolerancia de "voltou a referencia", em luminancia normalizada. Bem
 # mais apertada que _NOVEL_DELTA de proposito: histerese de limiar duplo
@@ -177,7 +176,7 @@ class PageModel:
             raise ValueError("rate deve estar em (0, 1]")
         if not 0.0 < novel_ratio < 1.0:
             raise ValueError("novel_ratio deve estar em (0, 1)")
-        if novel_delta <= 0.0:
+        if not novel_delta > 0.0:
             raise ValueError("novel_delta deve ser > 0")
         self.shape = tuple(shape)
         self.block = int(block)
@@ -579,6 +578,19 @@ class PageModel:
         )
         return gray if abs(gain - 1.0) <= 1e-4 else (gray / np.float32(gain))
 
+    def _novel_diff(self, diff, ref):
+        """O predicado de "conteudo novo": `diff > novel_ratio * ref`.
+
+        `diff` e `ref - gray` no dominio normalizado — positivo onde a
+        observacao esta mais escura que a referencia. `ref` pode ser a
+        referencia semeada (novel/appearance/returned) ou a aparencia
+        limpa propagada (darker_than_reference); inf nunca e novo.
+        Unico lugar onde a razao de Weber vira comparacao — os quatro
+        caminhos (voto, remocao, retorno, identidade) classificam pelo
+        mesmo criterio.
+        """
+        return diff > self.novel_ratio * np.maximum(ref, 1.0)
+
     def novel(self, gray, visible=None):
         """Pixels mais escuros que a referencia alem de `novel_ratio`
         vezes a propria referencia (contraste de Weber).
@@ -590,27 +602,29 @@ class PageModel:
         norm_gray = self._normalized(gray, visible)
         if not self._has_seeded:
             return np.zeros(self.shape, dtype=bool)
-        return self._seeded & (
-            self._norm_ref - norm_gray
-            > self.novel_ratio * np.maximum(self._norm_ref, 1.0)
+        return self._seeded & self._novel_diff(
+            self._norm_ref - norm_gray, self._norm_ref
         )
 
     def appearance(self, gray, visible=None):
         """(novel, returned) numa unica normalizacao de iluminacao.
 
         A estimativa de ganho e o custo dominante de ambos; o caminho
-        quente da trabalhadora precisa dos dois por passada. O ramo
-        `novel` aplica a mesma razao de Weber de `novel()` — os dois
-        caminhos classificam "conteudo novo" pelo mesmo criterio.
+        quente da trabalhadora precisa dos dois por passada. As
+        mascaras sao DISJUNTAS por construcao: `returned` exclui quem
+        ainda passa o teste de novidade — sem isso um traco sobre
+        pauta escura (razao > _NOVEL_RATIO com |diff| <= _RETURN_TOL)
+        seria lido como tinta nova e apagado ao mesmo tempo.
         """
         norm_gray = self._normalized(gray, visible)
         if not self._has_seeded:
             none = np.zeros(self.shape, dtype=bool)
             return none, none.copy()
         diff = self._norm_ref - norm_gray
+        novel_mask = self._novel_diff(diff, self._norm_ref)
         return (
-            self._seeded & (diff > self.novel_ratio * np.maximum(self._norm_ref, 1.0)),
-            self._seeded & (np.abs(diff) <= _RETURN_TOL),
+            self._seeded & novel_mask,
+            self._seeded & (np.abs(diff) <= _RETURN_TOL) & ~novel_mask,
         )
 
     def returned(self, gray, visible=None):
@@ -619,12 +633,18 @@ class PageModel:
         E o outro lado da histerese de `novel`: so quem casa com a
         referencia de perto e evidencia de ausencia. Pixel entre as duas
         tolerancias (traco com contraste reduzido) nao e nem novo nem
-        de volta.
+        de volta. Quem ainda passa o teste de novidade nunca conta como
+        devolvido — sobre pauta escura as duas faixas se tocariam.
         """
         norm_gray = self._normalized(gray, visible)
         if not self._has_seeded:
             return np.zeros(self.shape, dtype=bool)
-        return self._seeded & (np.abs(self._norm_ref - norm_gray) <= _RETURN_TOL)
+        diff = self._norm_ref - norm_gray
+        return (
+            self._seeded
+            & (np.abs(diff) <= _RETURN_TOL)
+            & ~self._novel_diff(diff, self._norm_ref)
+        )
 
     def darker_than_reference(
         self,
@@ -638,7 +658,11 @@ class PageModel:
         prenormalized=False,
         with_expected=True,
     ):
-        """Pixels mais escuros que a aparencia limpa ALINHADA, alem de `novel_delta`.
+        """Pixels mais escuros que a aparencia limpa ALINHADA, por `_novel_diff`.
+
+        Usa o mesmo contraste de Weber de `novel()` — a identidade
+        nao pode chamar de "indistinguivel da pauta" um traco que o
+        voto acabou de admitir como conteudo novo (review #174).
 
         Compara `gray` (grade da ancora) a `_norm_ref` na posicao
         deslocada de (dy, dx) — a mesma translacao que a pauta mede —
@@ -700,8 +724,8 @@ class PageModel:
         if near > 0:
             ref = cv2.erode(ref, np.ones((2 * near + 1, 2 * near + 1), dtype=np.uint8))
         darker = np.zeros(self.shape, dtype=bool)
-        darker[cy0:cy1, cx0:cx1] = np.isfinite(ref) & (
-            ref - norm_gray[cy0:cy1, cx0:cx1] > self.novel_delta
+        darker[cy0:cy1, cx0:cx1] = np.isfinite(ref) & self._novel_diff(
+            ref - norm_gray[cy0:cy1, cx0:cx1], ref
         )
         if not with_expected:
             return darker, None
