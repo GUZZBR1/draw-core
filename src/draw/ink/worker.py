@@ -213,6 +213,14 @@ _PAGE_CLEAN_INTERVAL_SECONDS = 0.25
 _PAGE_CLEAN_STOP_TIMEOUT_SECONDS = 5.0
 
 
+# Watchdog do descanso total: o wait() sem prazo depende de um
+# notify chegar — se algum evento se perder entre a avaliacao do
+# predicado e o sono, a trabalhadora nunca mais olha a cena. O
+# prazo so faz a volta reavaliar _pass_interval; o descanso
+# continua decidido pelos predicados, nao pelo relogio.
+_REST_WATCHDOG_SECONDS = 10.0
+
+
 # Publicacoes confirmadas guardadas para poll_delta mesclar: ~10 s a 3
 # passadas/s. Alem disso o consumidor atrasado recebe um delta full.
 _DELTA_HISTORY = 32
@@ -1529,10 +1537,24 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         _REMOVAL_PASSES passadas sem progresso (Devin Review do
         PR #144)."""
         return (
+            self._removal_outstanding()
+            and self._accumulator._removal_stale_passes < registration._REMOVAL_PASSES
+        )
+
+    def _removal_outstanding(self):
+        """Voto de remoção existe — fresco ou caducado.
+
+        A caducidade do _removal_pending só rebaixa a cadência (de
+        ativa para a sonda ociosa); não apaga o trabalho. Enquanto
+        houver voto por resolver, o descanso total fica proibido: o
+        loop em repouso ignora frames novos — a sombra sair sozinha
+        não muda mão nem geometria — e a prova de papel que destrava
+        a contagem nunca chegaria ao acumulador, deixando a tinta
+        apagada congelada no canvas (Devin Review do PR #144)."""
+        return (
             self._config.removal
             and self._accumulator._removal_streak is not None
             and np.any(self._accumulator._removal_streak)
-            and self._accumulator._removal_stale_passes < registration._REMOVAL_PASSES
         )
 
     def _at_rest(self):
@@ -1547,7 +1569,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         propria mao, reportado pela assinatura da mascara.
         Ver _REST_MIN_GENERATION_PASSES/_REST_QUIET_PASSES.
         """
-        if self._removal_pending():
+        if self._removal_outstanding():
             return False
         if self._marks_wait_open():
             return False
@@ -1599,6 +1621,21 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         if (
             self._hand_state is None
             and self._still_passes >= _NO_HAND_REST_AFTER_STILL_PASSES
+            and not self._recovery_wait_open()
+            and not self._marks_wait_open()
+            and not self._removal_pending()
+        ):
+            return _IDLE_PROBE_SECONDS
+        # Voto caducado sob mao parada: o descanso total e proibido
+        # (o voto existe), mas ele nao e trabalho urgente — sem o
+        # desvio para a sonda, o ativo de 250 ms rodava para sempre
+        # sob a sombra estavel com a mao pousada (Devin Review do
+        # PR #144).
+        if (
+            self._hand_state is True
+            and self._hand_still()
+            and self._removal_outstanding()
+            and not self._confirm_once
             and not self._recovery_wait_open()
             and not self._marks_wait_open()
             and not self._removal_pending()
@@ -1872,7 +1909,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 while self._last_pass_start is not None:
                     interval = self._pass_interval()
                     if interval is None:
-                        # Descanso total: espera sem prazo por um
+                        # Descanso total: espera por um
                         # evento que acorde (a mao voltar, a mao
                         # presente se mexer, geracao nova, stop).
                         # Submit NAO acorda: ele so troca o
@@ -1880,8 +1917,11 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         # evento de verdade chegar. Sem isto a
                         # sonda de 1 Hz rodava para sempre sobre a
                         # pagina parada e o voto acumulava camadas.
+                        # O prazo é só watchdog contra um notify
+                        # perdido: quem decide continua sendo o
+                        # predicado do _pass_interval.
                         self._announce_rest_locked()
-                        self._condition.wait()
+                        self._condition.wait(timeout=_REST_WATCHDOG_SECONDS)
                         if self._stopped:
                             return
                         if self._pending is None:
@@ -3103,7 +3143,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # da guarda é materializado em máscara — senão o
             # acumulador nunca tem evidência para a remoção e o
             # apagamento congela na página limpa.
-            last_reg = p.last_reg
+            last_reg = registration_used
             photo_visible, paper_exposed = _exposure_masks_in_geometry(
                 p.exposure,
                 None if last_reg is None else last_reg[0],
@@ -3128,7 +3168,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # falar sozinho; quem nega papel congela a regiao.
             paper_exposed = paper_exposed & p.paper_ok
         p.paper_exposed = paper_exposed
-        last_reg = p.last_reg
+        last_reg = registration_used
         if self._config.page_model and p.pass_voted:
             # Modelo persistente da pagina (draw.ink.page_model):
             # observa a passada na grade da ancora e so entrega

@@ -1762,3 +1762,78 @@ def test_pending_removal_uses_idle_probe_under_slow_ink_interval():
     worker.set_hand_presence(False)
     worker._confirm_once = False
     assert worker._pass_interval() == worker_mod._IDLE_PROBE_SECONDS
+
+
+def test_stalled_removal_still_publishes_after_occluder_leaves():
+    """Voto caducado segue sendo trabalho: a trabalhadora não pode
+    entrar em descanso total enquanto o streak existir — a sonda
+    ociosa continua rodando e, quando a sombra sai sozinha (frames
+    limpos, mesma mão e geometria), a contagem destrava e a remoção
+    publica (Devin Review do PR #144)."""
+    shape = (120, 160)
+    prob = np.zeros(shape, np.float32)
+    clock = rr.SceneClock()
+    page_clean = _MutablePageClean(prob)
+    worker = rr.make_ink_worker(page_clean, clock)
+    acc = worker._accumulator
+    generation = worker.new_generation()
+    stroke_a = np.zeros(shape, bool)
+    stroke_a[40:44, 40:60] = True  # apagado, coberto pela sombra
+    stroke_b = np.zeros(shape, bool)
+    stroke_b[80:88, 40:80] = True  # testemunha: segue lida como tinta
+    canvas = np.zeros(shape, np.uint8)
+    canvas[stroke_a | stroke_b] = 255
+    acc.restore_confirmed(canvas)
+    acc._removal_streak = np.zeros(shape, np.uint8)
+    acc._removal_streak[stroke_a] = 2
+    prob[stroke_b] = 0.95
+    visible = np.ones(shape, bool)
+    exposed = ~stroke_a  # sombra estável: inspecionado, nunca prova papel
+
+    for _ in range(registration_mod._REMOVAL_PASSES):
+        acc.add(prob, visible, valid_mask=visible, paper_exposed=exposed)
+    assert not worker._removal_pending()  # a espera caducou...
+    worker.set_hand_presence(False)
+    worker._confirm_once = False
+    worker._generation_passes = registration_mod._REMOVAL_PASSES
+    worker._quiet_passes = worker_mod._REST_QUIET_PASSES
+    # ...mas o voto existe: descanso total proibido, cadência é a sonda.
+    assert not worker._at_rest()
+    assert worker._pass_interval() == worker_mod._IDLE_PROBE_SECONDS
+
+    # A sombra sai sozinha: frames limpos chegam pela sonda e a
+    # remoção publica por pixel — stroke_a some, a testemunha fica.
+    paper = np.full((*shape, 3), 220, dtype=np.uint8)
+    paper[stroke_b] = 60
+    corners = rr.base_quad(shape)
+    for _ in range(registration_mod._REMOVAL_PASSES * 3):
+        clock.now += 1
+        worker.submit(WarpedPage(paper, generation, corners))
+        worker.pump()
+    assert not acc._confirmed[stroke_a].any()
+    assert acc._confirmed[stroke_b].all()
+
+
+def test_stalled_removal_under_still_hand_uses_idle_probe():
+    """Voto caducado com a mão parada sobre a página: o descanso
+    total segue proibido (o voto existe) e a cadência é a sonda
+    ociosa, não o ativo de 250 ms (Devin Review do PR #144)."""
+    shape = (120, 160)
+    prob = np.zeros(shape, np.float32)
+    worker = rr.make_ink_worker(_MutablePageClean(prob), rr.SceneClock())
+    acc = worker._accumulator
+    canvas = np.zeros(shape, np.uint8)
+    canvas[40:44, 40:60] = 255
+    acc.restore_confirmed(canvas)
+    acc._removal_streak = np.zeros(shape, np.uint8)
+    acc._removal_streak[40:44, 40:60] = 2
+    acc._removal_stale_passes = registration_mod._REMOVAL_PASSES
+
+    worker.set_hand_presence(True)
+    worker._hand_motion_at = -worker_mod._HAND_REST_STILL_SECONDS
+    worker._confirm_once = False
+    worker._generation_passes = registration_mod._REMOVAL_PASSES
+    worker._quiet_passes = worker_mod._REST_QUIET_PASSES
+
+    assert not worker._at_rest()
+    assert worker._pass_interval() == worker_mod._IDLE_PROBE_SECONDS
