@@ -1107,6 +1107,10 @@ def _project_forest(
     yc0 = int(round(float(t_src.paths[k_src, seam_col - t_src.x0])))
     limit_dst = w if direction > 0 else -1
     nodes, tips = _trace_ink_run(ink, yc0, seam_col, limit_dst, direction, band_in_edge)
+    # sem ponta de saída o veredito é vazio de qualquer forma: o traço de
+    # volta na origem (o ramo mais caro) não precisa rodar
+    if not tips:
+        return [], []
     # traça de volta na origem: preserva só colunas conectadas ao traço na costura
     limit_src = -1 if direction > 0 else w
     stop_src = band_out_edge - 1 if direction > 0 else band_out_edge + 1

@@ -251,6 +251,38 @@ def test_worker_drops_the_cached_model_when_the_generation_changes(monkeypatch):
     assert len(resets) == n + 1  # outra folha: reestima
 
 
+def test_worker_erases_the_fold_ruling_from_the_confirmed_canvas():
+    """Integração pelo worker: vinco sombreado puro não pode entrar no canvas
+    confirmado (32.640 px de pauta sem o filtro)."""
+    prob = _fold_page(shade_p=0.9)
+    for enabled in (True, False):
+        worker, now = _worker(prob, enabled)
+        gen = worker.new_generation()
+        for _ in range(4):
+            _run_one_pass(worker, now, prob.shape, gen)
+        shown = worker.poll_display(gen, -1)
+        confirmed = np.count_nonzero(shown.confirmed) if shown else 0
+        if enabled:
+            assert confirmed == 0
+        else:
+            assert confirmed > 30000
+
+
+def test_worker_keeps_a_bend_stroke_across_the_seam_on_the_canvas():
+    """Integração pelo worker: o traço dobrando na costura (par esparso) entra
+    inteiro no canvas confirmado — a remoção não pode comê-lo."""
+    prob = _bend_across_offset_seam()
+    worker, now = _worker(prob, True)
+    gen = worker.new_generation()
+    for _ in range(4):
+        _run_one_pass(worker, now, prob.shape, gen)
+    shown = worker.poll_display(gen, -1)
+    box = (slice(280, 294), slice(562, 638))
+    expected = (prob > 0.5)[box]
+    kept = (shown.confirmed[box] & expected).sum() if shown else 0
+    assert kept == expected.sum()
+
+
 # ------------------------------------------------ achados do Devin (#56)
 
 
@@ -1839,3 +1871,70 @@ def test_a_midpoint_stroke_between_small_offset_rules_is_kept_by_policy():
     others[278:296, :] = False
     assert others.sum() == 0
     assert (prob > 0.5)[:, 562:638].sum() > (out > 0.5)[:, 562:638].sum()
+
+
+def test_a_staggered_shadow_patch_is_identical_ink_to_a_midpoint_stroke():
+    """Review #139 (remendo escalonado, desnível 4 px): a sombra com ombros
+    de 13 col + intervalos 80-87 na origem e 82-89 no destino gera EXATAMENTE
+    o mapa de tinta de um traço que dobra pelo meio do desnível na mesma
+    pauta — array_equal dos dois mapas. Nenhuma regra sobre esse mapa separa
+    as duas interpretações; a política conservadora fica fixada por este par
+    (apagar aqui apagaria caneta). Separar de verdade exige evidência fora do
+    mapa binário — a imagem original (iluminação do papel) — limitação
+    conhecida, fora do escopo deste filtro."""
+    patch = _fold_page(split_x=600, offset_r=4)
+    patch[80:86, 547:560] = 0.95  # ombros da pauta sombreada
+    patch[84:90, 640:653] = 0.95
+    patch[80:88, 598:600] = 0.95  # remendo esq: intervalo 80-87
+    patch[82:90, 600:602] = 0.95  # remendo dir: intervalo 82-89
+
+    stroke = _fold_page(split_x=600, offset_r=4)
+    stroke[80:86, 547:598] = 0.95  # traço grosso seguindo a pauta esquerda
+    stroke[84:90, 640:653] = 0.95
+    for x in range(598, 602):
+        stroke[82:88, x] = 0.95  # dobra pelo meio do desnível
+    stroke[84:90, 602:653] = 0.95  # aterrissa na pauta direita
+
+    np.testing.assert_array_equal(patch, stroke)
+    out_patch = ruling.RulingFilter().apply(patch.copy())
+    out_stroke = ruling.RulingFilter().apply(stroke.copy())
+    np.testing.assert_array_equal(out_patch, out_stroke)
+    # política conservadora: a tinta ambígua fica (a sombra das outras pautas sai)
+    kept = (out_patch > 0.5)[80:90, 540:660].sum()
+    assert kept >= 0.97 * (patch > 0.5)[80:90, 540:660].sum()
+    others = (out_patch > 0.5)[:, 562:638].copy()
+    others[80:90, :] = False
+    assert others.sum() == 0
+
+
+def test_project_forest_skips_the_back_trace_when_no_exit_tip(monkeypatch):
+    """Custo (análise #139): sem ponta de saída na floresta o veredito é
+    vazio de qualquer forma — o traço de volta na origem (o ramo mais caro,
+    ~78% do tempo no cenário de dobra) não pode rodar. `_trace_ink_run` é
+    chamado uma única vez por projeção sem saída."""
+    calls = []
+    monkeypatch.setattr(
+        ruling, "_trace_ink_run", lambda *a: calls.append(1) or ([], [])
+    )
+
+    class _T:
+        x0, x1 = 0, 600
+        paths = np.full((1, 600), 80.0, dtype=np.float32)
+
+    t = _T()
+    out = ruling._project_forest(
+        np.zeros((600, 1200), np.uint8),
+        t,
+        0,
+        np.ones(600, bool),
+        599,
+        640,
+        560,
+        1,
+        6,
+        12,
+        [t],
+        [np.ones((1, 600), bool)],
+    )
+    assert out == ([], [])
+    assert len(calls) == 1
