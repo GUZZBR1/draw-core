@@ -485,17 +485,18 @@ def run(
         telemetry = telemetry_module.SessionTelemetry(
             save_path / "telemetry.jsonl"
         ).start()
+        paper_spec = config.current()
         format_metadata = {
-            "paper_format": config.PAPER_FORMAT,
-            "paper_orientation": config.PAPER_ORIENTATION,
-            "page_grid": [config.PAPER_W, config.PAPER_H],
+            "paper_format": paper_spec.name,
+            "paper_orientation": paper_spec.orientation,
+            "page_grid": [paper_spec.width, paper_spec.height],
             "mm_per_px": config.mm_per_px(),
         }
         telemetry.update(**format_metadata)
         telemetry.event("session_open", **format_metadata)
         print(
-            f"Formato da sessao: {config.PAPER_FORMAT} ({config.PAPER_ORIENTATION}), "
-            f"grade {config.PAPER_W}x{config.PAPER_H}, "
+            f"Formato da sessao: {paper_spec.name} ({paper_spec.orientation}), "
+            f"grade {paper_spec.width}x{paper_spec.height}, "
             f"{config.mm_per_px():.6f} mm/px."
         )
         print(
@@ -697,7 +698,7 @@ def run(
             AutoRotationDetector() if (auto_rotate and not markers_mode) else None
         )
         auto_orienter = (
-            AutoPageOrientation(initial=config.PAPER_ORIENTATION)
+            AutoPageOrientation(initial=config.current().orientation)
             if (auto_orientation and not markers_mode)
             else None
         )
@@ -925,14 +926,15 @@ def run(
                 ):
                     new_orient = auto_orienter.observe(tracker.corners, frame.shape)
                     if new_orient is not None:
-                        config.apply_format(config.PAPER_FORMAT, new_orient)
+                        config.apply_format(config.current().name, new_orient)
+                        paper_spec = config.current()
                         if ink_stream is not None:
-                            ink_stream.set_paper_mm(config.paper_mm())
+                            ink_stream.set_paper_mm(paper_spec.paper_mm())
                         reset_source = True
                         preserve_ink_on_reset = True
                         print(
                             "Orientacao da folha ajustada automaticamente para "
-                            f"{new_orient} ({config.PAPER_W}x{config.PAPER_H})."
+                            f"{new_orient} ({paper_spec.width}x{paper_spec.height})."
                         )
                 if loop_outcome == INK_WORKER_FAILED:
                     ui_module._show(

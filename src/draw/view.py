@@ -50,7 +50,7 @@ _BLANK_SHEET = None
 
 def blank_sheet():
     global _BLANK_SHEET
-    shape = (config.PAPER_H, config.PAPER_W)
+    shape = (config.current().height, config.current().width)
     if _BLANK_SHEET is None or _BLANK_SHEET.shape[:2] != shape:
         _BLANK_SHEET = ink_render.render_canvas(np.zeros(shape, dtype=np.uint8))
     return _BLANK_SHEET

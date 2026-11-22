@@ -3,7 +3,16 @@
 A folha-modelo é um A4 com quatro marcadores ArUco, um em cada canto.
 Todas as coordenadas aqui estão no espaço da folha retificada
 (a "vista de cima" que o pipeline produz).
+
+A grade da sessão é um `PaperSpec` imutável: `current()` devolve o spec
+vigente e `apply_format` o troca atomicamente — antes os cinco globais
+mutáveis (PAPER_W, MARKER_CENTERS, ...) podiam sair de sincronia se
+alguém escrevesse em um deles fora da função.
 """
+
+from collections.abc import Mapping
+from dataclasses import dataclass
+from types import MappingProxyType
 
 import cv2
 
@@ -14,27 +23,37 @@ FORMATS = {
     "carta": (216.0, 279.0),
     "caderno": (200.0, 275.0),
 }
-PAPER_FORMAT = "a4"
 # Orientação da grade: "retrato" (padrão) ou "paisagem" (caderno aberto
 # ou folha deitada). Paisagem troca largura e altura da grade; o lado
 # longo segue com 1200 px, então mm_per_px não muda.
 ORIENTATIONS = ("retrato", "paisagem")
-PAPER_ORIENTATION = "retrato"
-
-# Grade A4 legada: nao derivar os 850 px da proporcao nominal.
-PAPER_W = 850
-PAPER_H = 1200
 
 # Marcadores: id -> nome do canto.
 MARKER_IDS = (0, 1, 2, 3)  # 0=sup. esq., 1=sup. dir., 2=inf. dir., 3=inf. esq.
 
-# Centros dos marcadores no espaço da folha retificada.
-MARKER_CENTERS = {
-    0: (90, 90),
-    1: (PAPER_W - 90, 90),
-    2: (PAPER_W - 90, PAPER_H - 90),
-    3: (90, PAPER_H - 90),
-}
+
+@dataclass(frozen=True, slots=True)
+class PaperSpec:
+    """Grade retificada da sessão: formato, orientação, pixels e cantos.
+
+    `marker_centers` guarda os quatro centros ArUco por id
+    (0=sup. esq., 1=sup. dir., 2=inf. dir., 3=inf. esq.) num mapeamento
+    somente-leitura: o spec compartilhado nao pode ser editado in-place.
+    """
+
+    name: str
+    orientation: str
+    width: int
+    height: int
+    marker_centers: Mapping
+
+    def paper_mm(self):
+        """(largura_mm, altura_mm) da folha na orientação da grade."""
+        return paper_mm(self.name, self.orientation)
+
+    def mm_per_px(self):
+        return mm_per_px(self.name)
+
 
 # Dicionario ArUco DICT_4X4_50 (constante 0 do OpenCV). Resolvido sem
 # exigir `cv2.aruco` na importacao: um ambiente em que `opencv-python`
@@ -74,8 +93,9 @@ def paper_grid(name, orientation="retrato"):
 
 def paper_mm(name=None, orientation=None):
     """(largura_mm, altura_mm) da folha na orientação da grade."""
-    name = PAPER_FORMAT if name is None else name
-    orientation = PAPER_ORIENTATION if orientation is None else orientation
+    spec = _current
+    name = spec.name if name is None else name
+    orientation = spec.orientation if orientation is None else orientation
     if name not in FORMATS:
         raise ValueError(f"formato de folha desconhecido: {name}")
     if orientation not in ORIENTATIONS:
@@ -85,25 +105,50 @@ def paper_mm(name=None, orientation=None):
 
 
 def mm_per_px(name=None):
-    name = PAPER_FORMAT if name is None else name
+    name = _current.name if name is None else name
     if name not in FORMATS:
         raise ValueError(f"formato de folha desconhecido: {name}")
     return FORMATS[name][1] / 1200
 
 
+def _spec(name, orientation):
+    width, height = paper_grid(name, orientation)
+    return PaperSpec(
+        name,
+        orientation,
+        width,
+        height,
+        MappingProxyType(
+            {
+                0: (90, 90),
+                1: (width - 90, 90),
+                2: (width - 90, height - 90),
+                3: (90, height - 90),
+            }
+        ),
+    )
+
+
+# Grade A4 legada: nao derivar os 850 px da proporcao nominal.
+_current = _spec("a4", "retrato")
+
+
+def current():
+    """O `PaperSpec` da sessão vigente."""
+    return _current
+
+
+def _set_current(spec):
+    """Restaura um spec guardado (corpus/testes trocam de grade por clipe)."""
+    global _current
+    _current = spec
+
+
 def apply_format(name, orientation="retrato"):
     """Configura a grade antes de construir os consumidores da sessao."""
-    global PAPER_FORMAT, PAPER_ORIENTATION, PAPER_W, PAPER_H, MARKER_CENTERS
-    width, height = paper_grid(name, orientation)
-    PAPER_FORMAT, PAPER_ORIENTATION = name, orientation
-    PAPER_W, PAPER_H = width, height
-    MARKER_CENTERS = {
-        0: (90, 90),
-        1: (width - 90, 90),
-        2: (width - 90, height - 90),
-        3: (90, height - 90),
-    }
-    return width, height
+    global _current
+    _current = _spec(name, orientation)
+    return _current.width, _current.height
 
 
 def get_dictionary():

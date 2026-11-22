@@ -83,8 +83,9 @@ fazem parte do caminho de produção (`pipeline` consome `poll_display`/
 
 O cansaço não é difuso: concentra em três pontos.
 
-1. **`src/draw/ink/worker.py` (2242 LOC)** — `_run_pass` é um único método de
-   ~1040 linhas acumulando: rest/wake cadence, geo-wake, sonda ociosa, janela
+1. **`src/draw/ink/worker.py` (2242 LOC)** — ~~`_run_pass` era um único método
+   de ~1040 linhas~~ **RESOLVIDO (#154, ver seção "Split do `_run_pass`")**:
+   orquestrador + 7 estágios nomeados. O método acumulava: rest/wake cadence, geo-wake, sonda ociosa, janela
    pós-saída, motion-veto, histerese, remoção de pauta, divnorm, migração por
    grade de cobertura, e agora a guarda de papel #129 (orçamento de sombra,
    `frozen_pending_px`). `InkConfig` tem **~20 campos, quase todos opt-in**,
@@ -95,11 +96,12 @@ O cansaço não é difuso: concentra em três pontos.
    correção de raiz que os substitui. O subsistema claramente carece de um
    modelo de estado por-região; cada incidente vira mais uma guarda.
 2. **`src/draw/app.py` (2388 → 1368 LOC em main)** — god-file já parcialmente
-   dividido em main (`ui.py` 634 + `selfcheck.py` 420 extraídos). Segue denso
-   (CLI + run loop + provisioning + hvcam + auto-rotação + streaming), e o
-   branch `refactor/app-split` ainda existe para continuar.
-3. **`src/draw/hvcam.py` (1851 LOC)** — matriz de fallbacks vsock/MJPEG/nativo;
-   ~45 commits, incluindo um revert do PR #82.
+   dividido (`ui.py` 634 + `selfcheck.py` 420 extraídos). Segue denso
+   (CLI + run loop + provisioning + hvcam + auto-rotação + streaming);
+   `run()` de ~730 linhas é o maior método do repo.
+3. ~~**`src/draw/hvcam.py` (1851 LOC)**~~ — **RESOLVIDO (#158)**: virou pacote
+   `hvcam/` com 8 módulos unidirecionais (`_wire`, `_lib`, `_transport`,
+   `_mjpeg`, `_capture`, `_provision`, `_reverse`, `_process`).
 
 Secundários: `pipeline.py` (ciclo de vida da máscara de mão, ~14 fix commits na
 mesma família de timing), `auto_orient.py` (chain de ~15 fixes que chegou a ser
@@ -151,10 +153,9 @@ idênticos; `refactor/lab-helpers` já extrai a duplicação).
   pequena e testada — mantidas como interface pública/infra.
 - `hand_presence` vs `hand`: contratos diferentes (presença assíncrona vs
   máscara de oclusão por frame). `_hvcam_mjpeg` vs `hvcam`: complementares.
-  `settings`/`config`/`ink.config`: três escopos distintos — exceto que
-  `config.py` segue com **globais mutáveis** (`apply_format` reescreve
-  `PAPER_W/H`, `MARKER_CENTERS`), wart herdado que o `Config` imutável do
-  spec deveria substituir.
+  `settings`/`config`/`ink.config`: três escopos distintos. ~~`config.py`
+  tinha globais mutáveis~~ **RESOLVIDO (#157)**: `PaperSpec` congelado via
+  `config.current()`, `apply_format` troca o spec atomicamente.
 - `stream.py` receiver API: exigida pelo contrato `bridge/STREAM.md` E por
   drawlink.
 
@@ -175,8 +176,8 @@ worktree /tmp/draw-cleanup, −924 linhas em 34 arquivos): `view.fit`,
 _UVMAP e os 11 testes do contrato dormente), `hand_presence.present`. Órfãos:
 `lapis-amarelo.svg`, `site/public/images/papers/*.svg` (8),
 `docs/research/figures/generated/*.jpg` (8), `docs/research/v1/` (12).
-Pendentes no mesmo espírito: corrigir refs obsoletas em
-`bridge/README.md`/`PROTOCOL.md`; `geometry.fit_quad` e
+Refs obsoletas em `bridge/README.md`/`PROTOCOL.md` corrigidas (#159:
+"untested" e dois links mortos). `geometry.fit_quad` e
 `safe_io.read_image/iter_jsonl` ficaram (API pequena e testada).
 
 **P0 — higiene operacional** — ✅ EXECUTADO: 16 branches locais mergeadas
@@ -207,8 +208,8 @@ quando o modelo chegar.
 `lab/seg_metrics.py` (arquivar ou assumir como dev-only documentado);
 `bridge/windows_helper.py` (arquivar se injeção de cursor estiver morta);
 `docs/FALHAS.md`/`SETUP_WINDOWS.md` (portar aparados ou atualizar o spec);
-`config.py` globais mutáveis → `Config` imutável; `lab/perf/` (portar do
-legado quando a decisão C++ voltar à mesa).
+~~`config.py` globais mutáveis → `Config` imutável~~ **feito (#157)**;
+`lab/perf/` (portar do legado quando a decisão C++ voltar à mesa).
 
 Resultado real da rodada: **~924 LOC removidas** + ~40 branches/worktrees
 podados.
@@ -256,9 +257,18 @@ para o worktree — ver armadilha de ambiente).
   +1.300 linhas de teste) e #144/#145 tocam o mesmo trecho que a
   reestruturação do page-model move — portar agora = fazer duas vezes.
   Sequência certa: aterrissa o page-model, depois eles.
-- **`chore/dead-code-round-2` em PR** (#155, `cb7b717`, CI verde,
-  `MERGEABLE`): −924 LOC, aguarda review/merge.
-- Worktrees podados (appsplit/corpus/pr115 — todos mergeados).
+- **#155 mergeado** (`1781bd4`): dead-code round 2, −924 LOC.
+- **#156 mergeado** (`5b4a99e`): este relatório na main.
+- **#157 mergeado** (`454f9eb`): `config.py` → `PaperSpec` imutável +
+  `config.current()`; globais mutáveis eliminados; review apontou e foi
+  corrigido: `marker_centers` virou `MappingProxyType` somente-leitura e
+  `warp_sheet` lê o spec uma única vez para matriz+dsize.
+- **#158 mergeado** (`cbc840f`): `hvcam.py` (1820 LOC) → pacote `hvcam/`
+  com 8 módulos (`_wire`, `_process`, `_lib`, `_transport`, `_mjpeg`,
+  `_capture`, `_provision`, `_reverse`). Review pegou e foram corrigidas
+  regressões de base `__file__` (candidatos de lib/host subiram um nível)
+  + `_MANAGED_*` duplicado + teste novo de checkout irmão offline.
+- Worktrees podados (appsplit/corpus/pr115/config/hvcam — todos mergeados).
 
 ## Auditoria `InkConfig` — quais campos têm caminho real
 
@@ -285,5 +295,8 @@ decisão do dono se a régua ainda vai provar ganho).
 `docs/FALHAS.md` e `docs/SETUP_WINDOWS.md`: referenciados pelo
 MIGRATION_SPEC (linhas 93/125/133) mas nunca existiram neste repo —
 a fonte é o repo legado. Decisão pendente: portar aparados ou atualizar
-o spec. `bridge/README.md` e `PROTOCOL.md` revisados: estão corretos
-(protocolo experimental, nada no caminho default depende dele).
+o spec. `bridge/README.md` e `PROTOCOL.md` corrigidos: README chamava
+`windows_helper` de "untested" (datado — tem testes estruturais e de
+segurança) e linkava `scripts/setup_camera_wsl.sh` inexistente;
+PROTOCOL linkava `tools/step0_latency.py` inexistente (ficou como
+referência ao repo legado).

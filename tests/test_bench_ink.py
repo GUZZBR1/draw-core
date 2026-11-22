@@ -232,7 +232,7 @@ def test_run_clip_measures_canvas_regions_and_cpu(tmp_path):
     assert out["ruling_over_writing"] == 0.0
     assert np.isfinite(out["cpu_s_per_scene_s"]) and out["cpu_s_per_scene_s"] > 0
     assert out["passes"] > 0
-    assert out["_canvas"].shape == (config.PAPER_H, config.PAPER_W)
+    assert out["_canvas"].shape == (config.current().height, config.current().width)
     assert not list(clip.glob(".bench_out"))  # nada escrito na pasta do clipe
 
 

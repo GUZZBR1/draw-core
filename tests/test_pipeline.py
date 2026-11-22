@@ -661,6 +661,86 @@ def test_ink_auto_gain_brightens_dark_page_before_ink():
     assert float(lit.min()) < 0.5 * float(np.percentile(lit, 90))
 
 
+def test_ink_auto_gain_smoothing_reaches_the_page_clean_input():
+    """Devin Review PR #140: o replay do issue-133 derivava a prob do
+    escalar de ganho; aqui a página efetivamente entregue ao page_clean
+    prova que a LUT aplicada é a saída do suavizador, não o alvo cru. Uma
+    faixa clara local muda o p90 em ±2,5%, sem deslocar a mediana do papel.
+    A banda morta segura a LUT e mantém a sombra estável."""
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None),
+        config=PipelineConfig(ink_auto_gain=True),
+    )
+
+    def scene(glint_level):
+        frame = np.full((720, 1280, 3), 225, np.uint8)
+        frame[100:400, 100:500] = 80
+        frame[100:400, 350:500] = glint_level
+        frame[150:250, 200:300] = 50  # sombra local não altera o p90 do papel
+        return frame
+
+    _drive(loop, 40, frame=scene(80))
+    ink.pages.clear()
+    shadow_samples = []
+    applied_gains = []
+    for glint_level in (80, 78, 82, 78, 80, 82, 80):
+        loop.step(_packet(loop, scene(glint_level)))
+        page = ink.pages[-1].image
+        # page[270:295, 300:350] cai sobre a sombra (y 150-250, x 200-300
+        # do frame) na grade retificada (1200, 850).
+        shadow_samples.append(float(page[270:295, 300:350].mean()))
+        # last_ink_gain é o ganho declarado pelo passo que produziu
+        # pages[-1]: a cadência pode pular quadros, mas o par
+        # (página, ganho) é sempre da mesma passada.
+        applied_gains.append(loop.last_ink_gain)
+
+    # A sombra 50 sobe a ~50 x ganho declarado, pixel a pixel: sem o
+    # apply_gain a página leria ~50; com o alvo cru leria ~128/122.
+    for sample, gain in zip(shadow_samples, applied_gains, strict=True):
+        assert sample == pytest.approx(50.0 * gain, abs=1.5)
+    assert max(applied_gains) - min(applied_gains) <= 0.01
+    assert max(shadow_samples) - min(shadow_samples) <= 1.0
+
+
+def test_ink_auto_gain_deadband_releases_when_gain_clips_faint_stroke():
+    """Devin Review PR #140: uma faixa clara local muda o p90 de 194 para
+    199 sem mover a mediana; o alvo novo (1,005) cai dentro da banda morta,
+    mas o ganho retido (1,031) clipa a faixa clara junto do traço fraco.
+    A banda cede e a página recupera contraste nas passadas seguintes."""
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None),
+        config=PipelineConfig(ink_auto_gain=True),
+    )
+
+    def scene(glint_level):
+        frame = np.full((720, 1280, 3), 225, np.uint8)
+        frame[100:400, 100:500] = 194
+        frame[100:400, 350:500] = glint_level  # p90 muda; a mediana fica em 194
+        frame[150:200, 230:280] = 252  # faixa: clipa com 1,031, não com 1,005
+        frame[170:175, 240:270] = 248  # traço fraco dentro da faixa
+        return frame
+
+    _drive(loop, 40, frame=scene(194))
+    assert loop.last_ink_gain == pytest.approx(200 / 194, rel=0.02)
+
+    seen = len(ink.pages)
+    patch_means, stroke_means = [], []
+    for _ in range(30):
+        loop.step(_packet(loop, scene(199)))
+        while len(ink.pages) > seen:
+            page = ink.pages[seen].image
+            seen += 1
+            # Na grade retificada (1200, 850): faixa py 200-400/px 276-382,
+            # traço py 280-300/px 298-361.
+            patch_means.append(float(page[210:390, 285:375].mean()))
+            stroke_means.append(float(page[283:297, 305:355].mean()))
+
+    assert len(patch_means) >= 3  # várias submissões no frame claro
+    for patch, stroke in zip(patch_means[-3:], stroke_means[-3:], strict=True):
+        assert patch < 254.5  # a faixa clara não satura mais
+        assert patch - stroke >= 3  # e o traço fraco segue distinto dela
+
+
 def test_ink_auto_gain_ignores_bright_desk_inside_the_quad():
     """Review #52: o quad abrange papel escuro (86%) e mesa clara (14%);
     o ganho é estimado só sobre a folha (cobertura), então o papel é
@@ -744,6 +824,60 @@ def test_ink_auto_gain_excludes_the_hand_from_the_classic_hand_masker():
     )  # sem o masker, a mão clara cancela o ganho: o teste discrimina
     _drive(loop, 40, frame=frame)
     assert loop.last_ink_gain == 1.0
+
+
+def test_ink_auto_gain_holds_last_gain_while_hand_covers_the_sheet():
+    """Issue #133: a mão cobrindo o quadro inteiro zera a máscara do
+    ganho (`visible` todo False) — e paper_gain leria mesa+oclusor como
+    "imagem inteira": um quadro claro derrubaria o ganho a 1,0 (flash
+    escuro + reconvergência ao sair a mão). Máscara vazia não mede: a
+    estimativa congela e o último ganho segue aplicado até o papel
+    reaparecer."""
+
+    class _Masker:
+        full = False
+
+        def mask(self, image):
+            camera = np.zeros(image.shape[:2], np.uint8)
+            if self.full:
+                camera[:] = 255
+            return camera
+
+    def scene(level, hand=False):
+        frame = np.full((720, 1280, 3), 235, np.uint8)  # mesa clara
+        frame[100:400, 100:500] = 100 if hand else level  # oclusor ou papel
+        return frame
+
+    masker = _Masker()
+    loop, _det, ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None),
+        config=PipelineConfig(ink_auto_gain=True),
+        hand_masker=masker,
+    )
+    _drive(loop, 40, frame=scene(80))  # papel escuro: ganho estabelecido
+    assert loop.last_ink_gain == pytest.approx(2.5, rel=0.05)
+
+    masker.full = True
+    seen = len(ink.pages)
+    for _ in range(30):
+        loop.step(_packet(loop, scene(80, hand=True)))
+    occluded = ink.pages[seen:]
+    assert occluded, "a passada de tinta segue submetendo sob a mão"
+    occluded_visibles = [v for _g, _c, v, _cov in ink.submitted[seen:]]
+    assert all(v is not None and not v.any() for v in occluded_visibles)
+    # A estimativa não rodou: o ganho não caiu a 1,0 nem andou.
+    assert loop.last_ink_gain == pytest.approx(2.5, rel=0.05)
+    # E segue aplicado na página: o oclusor 100 sobe ~100 x 2,5 (sem
+    # clipar) — com o bug a página subiria crua a ~100.
+    for page in occluded:
+        assert float(page.image[400:800, 300:500].mean()) == pytest.approx(250.0, abs=3)
+
+    masker.full = False
+    for _ in range(20):
+        loop.step(_packet(loop, scene(160)))  # papel mais claro
+    # Com a folha de volta a estimativa retoma: o ganho segue o alvo
+    # novo em vez de ficar preso no valor congelado.
+    assert loop.last_ink_gain == pytest.approx(200 / 160, rel=0.05)
 
 
 def test_ink_divnorm_submits_the_raw_warp_to_the_worker():
@@ -1206,6 +1340,23 @@ def test_drop_without_persist_clears_canvas_and_provisional():
     assert loop.clean_mask is None
     assert loop.clean_provisional_mask is None
     assert loop.accumulated_canvas is None
+
+
+def test_reset_source_resets_the_applied_ink_gain():
+    """Devin Review PR #140: o reset de fonte/geração zerava o
+    suavizador mas não `last_ink_gain` — com a folha toda coberta a
+    estimativa não roda e o frame aplicaria o ganho velho (folha clara
+    entraria clipada a 255). Os dois estados zera juntos."""
+    loop, _det, _ink = _make_loop(
+        lambda _i: (QUAD.copy(), "paper", None),
+        config=PipelineConfig(ink_auto_gain=True),
+    )
+    frame = np.full((720, 1280, 3), 80, np.uint8)
+    _drive(loop, 40, frame=frame)
+    assert loop.last_ink_gain == pytest.approx(2.5, rel=0.1)
+
+    loop.reset_source(since=1000.0)
+    assert loop.last_ink_gain == 1.0
 
 
 def test_reset_source_drops_camera_space_state_and_stale_detections():
