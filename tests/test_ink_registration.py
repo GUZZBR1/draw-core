@@ -285,9 +285,10 @@ def test_changed_page_content_starts_a_clean_canvas(monkeypatch):
             assert (
                 worker._identity_events[-1]["decision"] == "deferred_switch_consensus"
             )
-            np.testing.assert_array_equal(
-                worker.poll(generation, 0).confirmed, original.confirmed
-            )
+            # Abstido pelo consenso de troca, o desenho mora na
+            # referencia — o canvas publicado nao o carrega.
+            assert np.count_nonzero(worker.poll(generation, 0).confirmed[BLOCK_A]) == 0
+            assert np.count_nonzero(worker._identity_reference[BLOCK_A]) == 100
         _drive(worker, generation, ink, [(0, 0)])
         shown = worker.poll_display(generation, 0)
         assert shown is not None
@@ -500,3 +501,37 @@ def test_off_crop_occlusion_lets_the_post_exit_countdown_advance():
         f"contador {worker._confirm_passes} — a oclusao fora do "
         "recorte rearmou a janela em vez de deixa-la avancar"
     )
+
+
+def test_reused_sampled_footprint_clips_like_the_internal_one():
+    """Pegada reutilizada produz o mesmo recorte que a interna; o
+    parametro e aplicado, nao recomputado."""
+    shape = (100, 140)
+    prob = np.ones(shape, np.float32)
+    anchor = np.array([[120, 60], [500, 60], [500, 300], [120, 300]], np.float32)
+    corners = anchor + np.array([[6, 0], [0, 0], [0, 0], [6, 0]], np.float32)
+    camera = np.ones((480, 640), bool)
+    _prob, internal = registration_mod._register_ink_probability(
+        prob,
+        anchor,
+        corners,
+        visible_cam=camera,
+        sampled=None,
+    )
+    _prob, reused = registration_mod._register_ink_probability(
+        prob,
+        anchor,
+        corners,
+        visible_cam=camera,
+        sampled=registration_mod._sampled_footprint(anchor, corners, shape),
+    )
+    assert internal.any() and not internal.all()
+    assert np.array_equal(reused, internal)
+    _prob, blanked = registration_mod._register_ink_probability(
+        prob,
+        anchor,
+        corners,
+        visible_cam=camera,
+        sampled=np.zeros(shape, bool),
+    )
+    assert not blanked.any()

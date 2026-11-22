@@ -588,10 +588,14 @@ def test_identity_recovery_budget_on_a4_grid(monkeypatch):
     candidate[1181:1186, 651:841] = 0.95
     candidate[401:421, 301:351] = 0.95
     visible = np.ones(shape, dtype=bool)
-    worker_mod._evaluate_page_identity(ref, baseline, candidate, visible, 0.7)
+    worker_mod._evaluate_page_identity(
+        ref, baseline, candidate, visible, None, None, False, 0.7
+    )
     start = time.monotonic()
     for _ in range(20):
-        res = worker_mod._evaluate_page_identity(ref, baseline, candidate, visible, 0.7)
+        res = worker_mod._evaluate_page_identity(
+            ref, baseline, candidate, visible, None, None, False, 0.7
+        )
     per_pass_ms = (time.monotonic() - start) / 20 * 1000
     assert res[0] is True
     assert per_pass_ms < 10.0
