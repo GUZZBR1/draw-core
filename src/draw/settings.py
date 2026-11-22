@@ -73,9 +73,6 @@ class PipelineConfig:
       preenchimento/ganho na pipeline e o `ink_divnorm` da
       PageCleanWorker normaliza — ligado num lado só entrega warp
       sem normalização ao modelo.
-    - follow_move (era DRAW_INK_FOLLOW_MOVE): com a geometria de
-      tinta congelada sem mão, um deslocamento sustentado da folha
-      reparte o histórico de cantos na posição nova.
     - ink_auto_gain: ganho digital no retificado antes do page_clean
       (draw.exposure): leva o papel ao nível ~200 quando a câmera
       entrega a página escura (teto físico de 1/30 s a 30 fps, driver
@@ -104,7 +101,6 @@ class PipelineConfig:
     # precisam bater — ligado num lado só entrega warp sem
     # normalização ao modelo (ver a docstring acima).
     ink_divnorm: bool = False
-    follow_move: bool = True
     ink_auto_gain: bool = True
     ink: InkConfig = InkConfig.production()
     detect_wake: bool = True

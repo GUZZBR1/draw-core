@@ -263,72 +263,69 @@ class LayeredInkAccumulator:
         new_confirmed_px = int(np.count_nonzero(new_confirmed))
         if new_confirmed_px:
             self._confirmed[new_confirmed] = 255
-        removed_px = 0
         witnessed = False
-        if self._config.removal:
-            if self._removal_streak is None:
-                self._removal_streak = np.zeros(prob.shape, dtype=np.uint8)
-            # Sem dominio inspecionado nao ha evidencia negativa
-            # confiavel; com a guarda ativa ela sozinha delimita
-            # onde a ausencia foi de fato observada.
-            witnessed = False
-            # A testemunha da remocao precisa de evidencia negativa
-            # real: a mascara de oclusao do chamador, ou o dominio
-            # geometrico da guarda. O ~frozen dobrado no visible via
-            # paper_ok nao e visao da passada — nao vale sozinho.
-            if (
-                removal_allowed
-                and canvas_before
-                and (had_visibility or valid_mask is not None)
-            ):
-                retained = np.count_nonzero(confirmed_before & inspected & mask_now)
-                witnessed = (
-                    retained >= registration._REMOVAL_RETAINED_FRACTION * canvas_before
-                    or retained >= registration._REMOVAL_WITNESS_FLOOR_PX
-                )
-                missing = (
-                    confirmed_before
-                    & inspected
-                    & np.isfinite(prob)
-                    & (prob <= registration._REMOVAL_LOW_PROB)
-                )
-                # O reset NAO depende da testemunha: ela so governa o
-                # que conta como ausencia. Sem ela, pixel fora do
-                # dominio inspecionado (guarda que alargou por cima
-                # de uma contagem em curso, borda que a pegada
-                # deixou) nao pode nem apagar o traco nem segurar a
-                # trabalhadora acordada — a contagem velha zera. O
-                # incremento continua exigindo a testemunha: pixel
-                # inspecionado e não ausente vê o streak zerar
-                # (evidência positiva ou prova inconclusiva); pixel
-                # ausente conta. Ocluído não informa nada — o streak
-                # segura, não zera: a ausência do F-10 segue
-                # precisando ser persistente, mas não precisa ser em
-                # passadas consecutivas nem desobstruídas (a
-                # testemunha e a mão oscilam em cena real — medido:
-                # retained 1,5k~13,9k alternando no sim-hand, streak
-                # nunca completava).
-                resettable = ~missing
-                if visible is not None:
-                    resettable &= visible
-                self._removal_streak[resettable] = 0
-                if witnessed:
-                    self._removal_streak[missing] = np.minimum(
-                        self._removal_streak[missing].astype(np.uint16) + 1,
-                        registration._REMOVAL_PASSES,
-                    ).astype(np.uint8)
-            removed = self._removal_streak >= registration._REMOVAL_PASSES
-            removed_px = int(np.count_nonzero(removed))
-            if removed_px:
-                self._confirmed[removed] = 0
-                self._removal_streak[removed] = 0
-                # Nenhuma memória de voto pode ressuscitar o traço apagado.
-                for item in self._window:
-                    item[removed] = 0
-                self._score_buf = self._hits_buf = self._seen_buf = None
-                seen_as_ink[removed] = False
-                score[removed] = 0
-                hits[removed] = 0
+        if self._removal_streak is None:
+            self._removal_streak = np.zeros(prob.shape, dtype=np.uint8)
+        # Sem dominio inspecionado nao ha evidencia negativa
+        # confiavel; com a guarda ativa ela sozinha delimita
+        # onde a ausencia foi de fato observada.
+        # A testemunha da remocao precisa de evidencia negativa
+        # real: a mascara de oclusao do chamador, ou o dominio
+        # geometrico da guarda. O ~frozen dobrado no visible via
+        # paper_ok nao e visao da passada — nao vale sozinho.
+        if (
+            removal_allowed
+            and canvas_before
+            and (had_visibility or valid_mask is not None)
+        ):
+            retained = np.count_nonzero(confirmed_before & inspected & mask_now)
+            witnessed = (
+                retained >= registration._REMOVAL_RETAINED_FRACTION * canvas_before
+                or retained >= registration._REMOVAL_WITNESS_FLOOR_PX
+            )
+            missing = (
+                confirmed_before
+                & inspected
+                & np.isfinite(prob)
+                & (prob <= registration._REMOVAL_LOW_PROB)
+            )
+            # O reset NAO depende da testemunha: ela so governa o
+            # que conta como ausencia. Sem ela, pixel fora do
+            # dominio inspecionado (guarda que alargou por cima
+            # de uma contagem em curso, borda que a pegada
+            # deixou) nao pode nem apagar o traco nem segurar a
+            # trabalhadora acordada — a contagem velha zera. O
+            # incremento continua exigindo a testemunha: pixel
+            # inspecionado e não ausente vê o streak zerar
+            # (evidência positiva ou prova inconclusiva); pixel
+            # ausente conta. Ocluído não informa nada — o streak
+            # segura, não zera: a ausência do F-10 segue
+            # precisando ser persistente, mas não precisa ser em
+            # passadas consecutivas nem desobstruídas (a
+            # testemunha e a mão oscilam em cena real — medido:
+            # retained 1,5k~13,9k alternando no sim-hand, streak
+            # nunca completava).
+            resettable = ~missing
+            if visible is not None:
+                resettable &= visible
+            self._removal_streak[resettable] = 0
+            if witnessed:
+                self._removal_streak[missing] = np.minimum(
+                    self._removal_streak[missing].astype(np.uint16) + 1,
+                    registration._REMOVAL_PASSES,
+                ).astype(np.uint8)
+        removed = self._removal_streak >= registration._REMOVAL_PASSES
+        removed_px = int(np.count_nonzero(removed))
+        if removed_px:
+            self._confirmed[removed] = 0
+            self._removal_streak[removed] = 0
+            # Nenhuma memória de voto pode ressuscitar o traço apagado.
+            for item in self._window:
+                item[removed] = 0
+            self._score_buf = self._hits_buf = self._seen_buf = None
+            seen_as_ink[removed] = False
+            score[removed] = 0
+            hits[removed] = 0
         confirmed_now = self._confirmed > 0
         provisional_now = seen_as_ink & ~confirmed_now
         if self._config.hysteresis:
@@ -378,8 +375,7 @@ class LayeredInkAccumulator:
             unmasked_frozen = frozen if raw_visible is None else (raw_visible & frozen)
             pending = unmasked_frozen & ~confirmed_before & (prob > self.threshold)
             if (
-                self._config.removal
-                and removal_allowed
+                removal_allowed
                 and had_visibility
                 and canvas_before
                 and paper_ok is not None
@@ -423,7 +419,6 @@ class LayeredInkAccumulator:
                 if paper_ok is None
                 else int(np.count_nonzero(paper_ok & (self._hold > 0)))
             ),
+            "removed_confirmed_px": removed_px,
         }
-        if self._config.removal:
-            result["removed_confirmed_px"] = removed_px
         return result

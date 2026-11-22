@@ -23,7 +23,7 @@ def test_parse_flags_pipeline_and_ink_fields():
     assert config.coverage is False
     assert config.ink.reg_deadband is True
     assert config.canvas_persist is True
-    assert config.ink.removal is True
+    assert config.ink.hysteresis is False
 
 
 @pytest.mark.parametrize(
