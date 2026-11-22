@@ -277,7 +277,33 @@ def test_ceiling_gain_reopens_after_a_brief_highlight_flash():
     for index in range(9, 16):
         gain = smoother.update(target, index * 0.15, image=page, mask=visible)
     out = exposure.apply_gain(page, gain)
-    assert out[0, 40, 0] > 190  # ~198 de saída, não preso em ~193
+    assert out[0, 40, 0] > 195  # ~198 de saída; travado em 2,93 dariam 193
+
+
+def test_targets_straddling_the_ceiling_band_hold_a_steady_gain():
+    """Devin Review PR #140: alvos alternando para dentro/fora da banda
+    do teto (máscara de mão mexendo o p90) convergiam para alvos
+    efetivos diferentes — nominal 3,0 dentro, medido fora — e o papel
+    parado pulsava de brilho. O alvo efetivo na banda agora mistura
+    medido→nominal de forma contínua na borda."""
+    page = np.full((120, 120, 3), 66, np.uint8)  # sem clip em nenhum ganho ≤3
+    mask_open = np.ones((120, 120), dtype=bool)
+    mask_hand = mask_open.copy()
+    mask_hand[100:] = False  # mão cobre uma borda; pixels compartilhados intactos
+
+    smoother = exposure.PaperGainSmoother()
+    # p90 68 vs 70 nos lados opostos do corte — alvos a ~2,8% um do outro
+    targets = [2.94, 2.86] * 8
+    gains = [
+        smoother.update(
+            t, index * 0.15, image=page, mask=[mask_open, mask_hand][index % 2]
+        )
+        for index, t in enumerate(targets)
+    ]
+    settled = gains[-4:]
+    assert max(settled) - min(settled) < 0.02  # ganho parado, sem pulso
+    out = exposure.apply_gain(page, settled[-1])
+    assert 190 < out[0, 40, 0] < 200  # ~194, constante
 
 
 def test_ceiling_gain_stays_limited_while_the_flash_persists():

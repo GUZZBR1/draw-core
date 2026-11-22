@@ -199,14 +199,14 @@ class PaperGainSmoother:
             # ganho retido). Valer dos dois lados do teto impede o
             # flicker quando a máscara cruza o corte (Devin Review
             # PR #140): a mesma cena produz a mesma saída.
-            # Alvo nominal fixo dentro da banda: o teto não mede a
-            # cena, e sem alvo variável na banda não há ruído para
-            # perseguir — o ganho converge para o nominal e a guarda
-            # limita a PROPOSTA pela observação da passada: desce no
-            # clarão e reabre quando ele some, sem catraca no retido
-            # (Devin Review PR #140).
-            nominal_error = math.log(_MAX_GAIN) - current_log
-            proposed = math.exp(current_log + alpha * nominal_error)
+            # O alvo efetivo mistura medido→nominal sem descontinuidade:
+            # na borda da banda segue o medido (alvos alternando para
+            # dentro/fora da banda convergem quase ao mesmo ponto); no
+            # teto vira o nominal fixo, atrator que impede a catraca.
+            # A guarda limita a proposta pela observação da passada.
+            u = min(1.0, (target_log - _CEILING_GUARD_LOG) / _GAIN_DEADBAND_LOG)
+            eff_log = target_log + (math.log(_MAX_GAIN) - target_log) * u**3
+            proposed = math.exp(current_log + alpha * (eff_log - current_log))
             self._gain = self._ceiling_safe_gain(proposed, clip_sample, clip_is_color)
             return self._gain
 
