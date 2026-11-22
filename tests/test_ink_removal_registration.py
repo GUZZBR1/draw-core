@@ -1853,3 +1853,34 @@ def test_open_zigzag_seeds_fill_recovery():
         guard.observe(shadowed, visible, ink_prob=bands, ink_support_threshold=0.7)
     assert guard._ink_streak.any()
     assert guard._fill_adopted.any()
+
+
+def test_wrong_shape_paper_exposed_blocks_votes_while_omitted_permits():
+    """Máscara fotométrica fora da grade do warp é bug do chamador:
+    congela para False em vez de reabrir o contrato sem prova. Com a
+    testemunha viva, a malformada zera os votos de remoção; a omitida
+    (None, a abstenção legada) deixa o dreno andar — mesmo eixo do
+    teste do visible malformado acima (Devin Review do PR #144)."""
+    prob = ink()
+    erased = prob.copy()
+    erased[65:75, 65:85] = 0  # o bloco pequeno some; o grande testemunha
+    visible = np.ones(prob.shape, bool)
+    bad = np.ones((10, 10), bool)
+
+    frozen = accumulator_mod.LayeredInkAccumulator()
+    original = confirmed(frozen, prob)
+    removed_px = 0
+    for _ in range(registration_mod._REMOVAL_PASSES + 4):
+        result = frozen.add(erased, visible, paper_exposed=bad)
+        removed_px += result["removed_confirmed_px"]
+    assert removed_px == 0
+    assert not frozen._removal_streak.any()
+    np.testing.assert_array_equal(result["confirmed"], original)
+
+    legacy = accumulator_mod.LayeredInkAccumulator()
+    confirmed(legacy, prob)
+    for _ in range(registration_mod._REMOVAL_PASSES - 1):
+        result = legacy.add(erased, visible, paper_exposed=None)
+        np.testing.assert_array_equal(result["confirmed"], original)
+    result = legacy.add(erased, visible, paper_exposed=None)
+    assert result["removed_confirmed_px"] == 200
