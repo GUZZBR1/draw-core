@@ -34,6 +34,43 @@ def _corners_float32(value, name):
     return corners
 
 
+def _readonly(value, copy=False):
+    """Devolve visão (ou cópia) somente-leitura do array."""
+    out = value.copy() if copy else value.view()
+    out.flags.writeable = False
+    return out
+
+
+def _corners_field(obj, name):
+    """Normaliza obj.<name> para (4, 2) float32 somente-leitura; None passa."""
+    if (value := getattr(obj, name)) is not None:
+        object.__setattr__(obj, name, _corners_float32(value, name))
+
+
+def _mask_2d(obj, name, *, copy=False, dtypes=(np.uint8,), optional=True):
+    """Valida a máscara 2D obj.<name> e grava a forma somente-leitura."""
+    if (value := getattr(obj, name)) is None:
+        if optional:
+            return
+    elif isinstance(value, np.ndarray) and value.ndim == 2 and value.dtype in dtypes:
+        object.__setattr__(obj, name, _readonly(value, copy=copy))
+        return
+    desc = "/".join(np.dtype(t).name for t in dtypes)
+    if optional:
+        desc += " ou None"
+    raise ValueError(f"{name} precisa ser máscara 2D {desc}")
+
+
+def _check_captured_at(value, optional=True):
+    """Exige carimbo monotônico finito; None passa só se optional."""
+    if value is None:
+        if optional:
+            return
+    elif isinstance(value, (int, float)) and np.isfinite(value):
+        return
+    raise ValueError(f"captured_at precisa ser float finito: {value!r}")
+
+
 @dataclass(frozen=True, slots=True)
 class FramePacket:
     """Um quadro capturado: imagem BGR (H, W, 3) uint8 e identidade.
@@ -72,9 +109,7 @@ class FramePacket:
             )
         if self.source_ts_ms is not None and self.source_ts_ms < 0:
             raise ValueError(f"source_ts_ms precisa ser >= 0: {self.source_ts_ms}")
-        image = self.image.view()
-        image.flags.writeable = False
-        object.__setattr__(self, "image", image)
+        object.__setattr__(self, "image", _readonly(self.image))
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,10 +133,7 @@ class SheetQuad:
                 "corners e verdict precisam vir juntos: "
                 "(cantos, 'paper') ou (None, None)"
             )
-        if self.corners is not None:
-            object.__setattr__(
-                self, "corners", _corners_float32(self.corners, "corners")
-            )
+        _corners_field(self, "corners")
         if self.verdict is not None and self.verdict not in SHEET_VERDICTS:
             raise ValueError(
                 f"verdict precisa ser None ou um de {sorted(SHEET_VERDICTS)}: "
@@ -155,23 +187,8 @@ class InkState:
 
     def __post_init__(self):
         for name in ("confirmed", "provisional"):
-            mask = getattr(self, name)
-            if mask is not None and (
-                not isinstance(mask, np.ndarray)
-                or mask.ndim != 2
-                or mask.dtype != np.uint8
-            ):
-                raise ValueError(f"{name} precisa ser máscara 2D uint8 ou None")
-            if mask is not None:
-                view = mask.view()
-                view.flags.writeable = False
-                object.__setattr__(self, name, view)
-        if self.anchor_corners is not None:
-            object.__setattr__(
-                self,
-                "anchor_corners",
-                _corners_float32(self.anchor_corners, "anchor_corners"),
-            )
+            _mask_2d(self, name)
+        _corners_field(self, "anchor_corners")
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,45 +220,27 @@ class WarpedPage:
     captured_at: float | None = None
 
     def __post_init__(self):
-        if self.captured_at is not None and not (
-            isinstance(self.captured_at, (int, float)) and np.isfinite(self.captured_at)
-        ):
-            raise ValueError(
-                f"captured_at precisa ser float finito: {self.captured_at!r}"
-            )
+        _check_captured_at(self.captured_at)
         if not isinstance(self.image, np.ndarray) or self.image.ndim not in (2, 3):
             raise ValueError("image precisa ser um ndarray 2D ou (H, W, 3)")
         if self.image.ndim == 3 and (
             self.image.shape[2] != 3 or self.image.dtype != np.uint8
         ):
             raise ValueError(f"image (H, W, 3) precisa ser uint8: {self.image.dtype}")
-        image = self.image.view()
-        image.flags.writeable = False
-        object.__setattr__(self, "image", image)
+        object.__setattr__(self, "image", _readonly(self.image))
         if self.generation < 0:
             raise ValueError(f"generation precisa ser >= 0: {self.generation}")
-        if self.corners is not None:
-            object.__setattr__(
-                self, "corners", _corners_float32(self.corners, "corners")
-            )
+        _corners_field(self, "corners")
         for name in ("visible", "coverage"):
             mask = getattr(self, name)
             if mask is None:
                 continue
-            if (
-                not isinstance(mask, np.ndarray)
-                or mask.ndim != 2
-                or mask.dtype not in (np.dtype(bool), np.dtype(np.uint8))
-            ):
-                raise ValueError(f"{name} precisa ser máscara 2D bool/uint8 ou None")
+            _mask_2d(self, name, dtypes=(bool, np.uint8))
             if self.corners is None and mask.shape != self.image.shape[:2]:
                 raise ValueError(
                     f"{name} sem corners segue a grade do warp: "
                     f"{mask.shape} != {self.image.shape[:2]}"
                 )
-            view = mask.view()
-            view.flags.writeable = False
-            object.__setattr__(self, name, view)
 
 
 @dataclass(frozen=True, slots=True)
@@ -276,12 +275,7 @@ class InkSnapshot:
     confirmed: np.ndarray
 
     def __post_init__(self):
-        mask = self.confirmed
-        if not isinstance(mask, np.ndarray) or mask.ndim != 2 or mask.dtype != np.uint8:
-            raise ValueError("confirmed precisa ser máscara 2D uint8")
-        confirmed = mask.copy()
-        confirmed.flags.writeable = False
-        object.__setattr__(self, "confirmed", confirmed)
+        _mask_2d(self, "confirmed", copy=True, optional=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -318,9 +312,8 @@ class InkDelta:
     full: bool
 
     def __post_init__(self):
+        _mask_2d(self, "mask", copy=True, optional=False)
         mask = self.mask
-        if not isinstance(mask, np.ndarray) or mask.ndim != 2 or mask.dtype != np.uint8:
-            raise ValueError("mask precisa ser máscara 2D uint8")
         if self.bbox is None:
             if mask.size:
                 raise ValueError("bbox None exige mask vazia")
@@ -332,15 +325,7 @@ class InkDelta:
             raise ValueError("version precisa ser >= since_version")
         if self.removed_px < 0:
             raise ValueError("removed_px precisa ser >= 0")
-        mask = mask.copy()
-        mask.flags.writeable = False
-        object.__setattr__(self, "mask", mask)
-        if self.anchor_corners is not None:
-            object.__setattr__(
-                self,
-                "anchor_corners",
-                _corners_float32(self.anchor_corners, "anchor_corners"),
-            )
+        _corners_field(self, "anchor_corners")
 
 
 @dataclass(frozen=True, slots=True)
@@ -357,22 +342,12 @@ class InkDisplaySnapshot:
     provisional: np.ndarray
 
     def __post_init__(self):
-        shapes = []
         for name in ("confirmed", "provisional"):
-            value = getattr(self, name)
-            if (
-                not isinstance(value, np.ndarray)
-                or value.ndim != 2
-                or value.dtype != np.uint8
-            ):
-                raise ValueError(f"{name} precisa ser máscara 2D uint8")
-            mask = value.copy()
-            mask.flags.writeable = False
-            object.__setattr__(self, name, mask)
-            shapes.append(mask.shape)
-        if shapes[0] != shapes[1]:
+            _mask_2d(self, name, copy=True, optional=False)
+        if self.confirmed.shape != self.provisional.shape:
             raise ValueError(
-                f"confirmed e provisional precisam ter a mesma forma: {shapes}"
+                f"confirmed e provisional precisam ter a mesma forma: "
+                f"{[self.confirmed.shape, self.provisional.shape]}"
             )
 
 
@@ -397,26 +372,9 @@ class InkPublication:
     full: bool = False
 
     def __post_init__(self):
-        if self.captured_at is not None and not (
-            isinstance(self.captured_at, (int, float)) and np.isfinite(self.captured_at)
-        ):
-            raise ValueError(
-                f"captured_at precisa ser float finito: {self.captured_at!r}"
-            )
-        if self.anchor_corners is not None:
-            object.__setattr__(
-                self,
-                "anchor_corners",
-                _corners_float32(self.anchor_corners, "anchor_corners"),
-            )
-        mask = self.confirmed
-        if mask is None:
-            return
-        if not isinstance(mask, np.ndarray) or mask.ndim != 2 or mask.dtype != np.uint8:
-            raise ValueError("confirmed precisa ser máscara 2D uint8 ou None")
-        view = mask.view()
-        view.flags.writeable = False
-        object.__setattr__(self, "confirmed", view)
+        _check_captured_at(self.captured_at)
+        _corners_field(self, "anchor_corners")
+        _mask_2d(self, "confirmed")
 
 
 @dataclass(frozen=True, slots=True)
@@ -463,10 +421,7 @@ class DetectionResult:
     def __post_init__(self):
         if self.sequence < 0:
             raise ValueError(f"sequence precisa ser >= 0: {self.sequence}")
-        if self.corners is not None:
-            object.__setattr__(
-                self, "corners", _corners_float32(self.corners, "corners")
-            )
+        _corners_field(self, "corners")
         if self.verdict is not None and self.verdict not in SHEET_VERDICTS:
             raise ValueError(
                 f"verdict precisa ser None ou um de {sorted(SHEET_VERDICTS)}: "
@@ -475,17 +430,7 @@ class DetectionResult:
         if self.detect_ms < 0:
             raise ValueError(f"detect_ms precisa ser >= 0: {self.detect_ms}")
         for name in ("coverage_mask", "hand_mask"):
-            mask = getattr(self, name)
-            if mask is not None and (
-                not isinstance(mask, np.ndarray)
-                or mask.ndim != 2
-                or mask.dtype != np.uint8
-            ):
-                raise ValueError(f"{name} precisa ser máscara 2D uint8 ou None")
-            if mask is not None:
-                view = mask.view()
-                view.flags.writeable = False
-                object.__setattr__(self, name, view)
+            _mask_2d(self, name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -570,21 +515,10 @@ class HandOcclusion:
     def __post_init__(self):
         if self.frame_sequence < 0 or self.source_id < 0:
             raise ValueError("frame_sequence e source_id precisam ser >= 0")
-        if not isinstance(self.captured_at, (int, float)) or not np.isfinite(
-            self.captured_at
-        ):
-            raise ValueError("captured_at precisa ser finito")
+        _check_captured_at(self.captured_at, optional=False)
         HandSample(self.present, self.moved)
-        shape = None
         for name in ("occlusion_mask", "orientation_mask"):
-            mask = getattr(self, name)
-            if mask is None:
-                continue
-            if not isinstance(mask, np.ndarray) or mask.ndim != 2 or mask.dtype != bool:
-                raise ValueError(f"{name} precisa ser uma máscara 2D bool")
-            if shape is not None and shape != mask.shape:
-                raise ValueError("as máscaras precisam usar a mesma grade de câmera")
-            shape = mask.shape
-            snapshot = mask.copy()
-            snapshot.flags.writeable = False
-            object.__setattr__(self, name, snapshot)
+            _mask_2d(self, name, dtypes=(bool,), copy=True)
+        a, b = self.occlusion_mask, self.orientation_mask
+        if a is not None and b is not None and a.shape != b.shape:
+            raise ValueError("as máscaras precisam usar a mesma grade de câmera")
