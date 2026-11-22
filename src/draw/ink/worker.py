@@ -1519,6 +1519,14 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             and self._marks_recovery_waited < occlusion._MARKS_HOLD_MAX + age
         )
 
+    def _removal_pending(self):
+        """Removal votes still need observations at the active cadence."""
+        return (
+            self._config.removal
+            and self._accumulator._removal_streak is not None
+            and np.any(self._accumulator._removal_streak)
+        )
+
     def _at_rest(self):
         """Descanso total: nenhuma passada ate um evento acordar.
 
@@ -1531,11 +1539,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         propria mao, reportado pela assinatura da mascara.
         Ver _REST_MIN_GENERATION_PASSES/_REST_QUIET_PASSES.
         """
-        if (
-            self._config.removal
-            and self._accumulator._removal_streak is not None
-            and np.any(self._accumulator._removal_streak)
-        ):
+        if self._removal_pending():
             return False
         if self._marks_wait_open():
             return False
@@ -1581,6 +1585,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             and not self._confirm_once
             and not self._recovery_wait_open()
             and not self._marks_wait_open()
+            and not self._removal_pending()
         ):
             return _IDLE_PROBE_SECONDS
         if (
@@ -1588,6 +1593,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             and self._still_passes >= _NO_HAND_REST_AFTER_STILL_PASSES
             and not self._recovery_wait_open()
             and not self._marks_wait_open()
+            and not self._removal_pending()
         ):
             return _IDLE_PROBE_SECONDS
         if self._config.pass_interval_s is not None:

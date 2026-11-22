@@ -46,8 +46,8 @@ def test_erase_redraw_after_hand_exit_finishes_without_another_wake(second_edit_
     )
     generation = worker.new_generation()
 
-    def tick(image):
-        now[0] += 2.0
+    def tick(image, step=2.0):
+        now[0] += step
         worker.submit(
             WarpedPage(image, generation, corners, visible, captured_at=now[0])
         )
@@ -65,14 +65,18 @@ def test_erase_redraw_after_hand_exit_finishes_without_another_wake(second_edit_
     model.prob[new] = model.prob[witness] = 0.95
     if second_edit_after is not None:
         model.prob[old_second] = 0.95
+    # These frames span less than a second in total. Switching to the
+    # idle probe would prevent the remaining removal votes from running.
     for index in range(2 * occlusion._MARKS_HOLD_MAX + 12):
         if index == second_edit_after:
             edited[old_second] = 220
             edited[new_second] = 60
             model.prob[old_second] = 0.0
             model.prob[new_second] = 0.95
-        tick(edited)
-        if worker._paper_exposure.max_marks_recovery_age:
+        tick(edited, step=0.011)
+        if worker._paper_exposure.max_marks_recovery_age or np.any(
+            worker._accumulator._removal_streak
+        ):
             assert worker._pass_interval() == 0.01
     snapshot = worker.poll(generation, 0)
     assert not snapshot.confirmed[old].any(), "rest interrupted the position veto"
@@ -81,4 +85,6 @@ def test_erase_redraw_after_hand_exit_finishes_without_another_wake(second_edit_
     if second_edit_after is not None:
         assert not snapshot.confirmed[old_second].any()
         assert snapshot.confirmed[new_second].all()
+    for _ in range(4):
+        tick(edited)
     assert worker.stats()["resting"]

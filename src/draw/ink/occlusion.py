@@ -130,14 +130,17 @@ def _has_dense_pixel_seed(region):
             blob.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
         hull = cv2.convexHull(contours[0]).reshape(-1, 2).astype(np.float32)
-        # minAreaRect measures continuous point centers. Treat each raster
-        # pixel as its unit square. Expanding hull vertices gives the same
-        # outer extent without materializing four points for every pixel.
+        # Keep the original center rectangle as the calibrated density
+        # denominator; the 28% threshold was tuned against that convention.
+        (_, _), (center_w, center_h), _ = cv2.minAreaRect(hull)
+        # For the minimum-size gate, treat each raster pixel as its unit
+        # square. Expanding hull vertices gives the outer extent without
+        # materializing four points for every pixel.
         corners = (hull[:, None, :] + pixel_corners).reshape(-1, 2)
-        (_, _), (rect_w, rect_h), _ = cv2.minAreaRect(corners)
+        (_, _), (pixel_w, pixel_h), _ = cv2.minAreaRect(corners)
         if (
-            min(rect_w, rect_h) >= _FILL_SEED_MIN_DIM_PX
-            and blob_area >= _FILL_SEED_MIN_FILL * rect_w * rect_h
+            min(pixel_w, pixel_h) >= _FILL_SEED_MIN_DIM_PX
+            and blob_area >= _FILL_SEED_MIN_FILL * center_w * center_h
         ):
             return True
     return False
