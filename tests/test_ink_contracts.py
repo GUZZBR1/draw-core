@@ -514,3 +514,31 @@ def test_light_sheet_slide_does_not_duplicate_ink(ink):
     # Eco mais fino que o residuo merge no proprio traco (o total
     # acima limita); fora da vizinhanca nao pode haver copia.
     assert _beyond(got, before, 2) == 0
+
+
+# ------------------------------------------------------------------
+# Contrato 8: traco lido uma vez antes da mao sair termina de
+# confirmar nas passadas pos-saida, sem a mao voltar.
+# ------------------------------------------------------------------
+
+
+def test_stroke_seen_once_before_hand_exit_finishes_confirming(ink):
+    worker, clock = ink
+    generation = worker.new_generation()
+    scene = _Scene()
+    _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE)
+
+    # O traco e desenhado um instante antes da mao levantar: so uma
+    # leitura com a mao presente; o resto da janela de votos acontece
+    # nas passadas que a saida re-arma (review #74/#122).
+    scene.draw((90, 96, 60, 260))
+    worker.set_hand_presence(True, moved=True)
+    _passes(worker, clock, generation, scene, 1, must=True)
+    worker.set_hand_presence(False)
+    ran = _passes(worker, clock, generation, scene, 8, dt=_DT_IDLE)
+    assert any(ran), "nenhuma passada rodou depois da saida da mao"
+
+    want = _stroke_mask(scene)
+    got = _confirmed(worker, generation) > 0
+    assert _frac(got, want) >= 0.95
+    assert _beyond(got, want, 2) <= 0.02 * np.count_nonzero(want)
