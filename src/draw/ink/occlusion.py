@@ -482,7 +482,7 @@ class PaperExposureGuard:
                 updateable = np.ones(current.shape, dtype=bool)
             else:
                 fraction = cv2.resize(
-                    visible.astype(np.uint8), size, interpolation=cv2.INTER_AREA
+                    visible.astype(np.float32), size, interpolation=cv2.INTER_AREA
                 )
                 updateable = fraction >= _VISIBLE_TILE_FRACTION
 
