@@ -502,11 +502,14 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._awaiting_clear_post_exit = False
         self._still_passes = 0
         # Passadas seguidas com recuperacao de preenchimento
-        # pendente e NENHUMA borda de adocao: um streak legitimo
-        # adota em ate _FILL_RECOVERY_PASSES; além disso sem adocao
-        # sobram so oscilacoes — a espera para de segurar a porta
-        # (Devin Review do PR #144). Zera em qualquer adocao ou
-        # quando o pendente some; uma borda nova a reabre.
+        # pendente e NENHUMA borda de adocao. O teto
+        # (_RECOVERY_WAIT_PASSES) nao corre sobre este total — o
+        # pendente e global e um streak que nasce quando outro morre
+        # herdaria a espera alheia: a porta compara com o teto mais
+        # a idade do pendente mais velho, entao o que o teto limita
+        # e o tempo morto anterior a ele (Devin Review do PR #144).
+        # Zera em qualquer adocao ou quando o pendente some; uma
+        # borda nova a reabre.
         self._fill_recovery_waited = 0
         # Descanso total (so a trabalhadora e o new_generation
         # tocam): passadas desta geracao e passadas seguidas sem
@@ -836,6 +839,29 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             and self._clock() - self._hand_motion_at >= _HAND_REST_STILL_SECONDS
         )
 
+    def _recovery_wait_open(self):
+        """Espera por recuperacao pendente ainda dentro do prazo.
+
+        O teto _RECOVERY_WAIT_PASSES cobre o tempo MORTO: as
+        passadas pendentes anteriores ao item vivo mais velho,
+        gastas em streaks que morreram no caminho. O pendente mais
+        velho recebe a propria idade como carencia — um streak que
+        so fica a vista tarde ainda completa o horizonte de adocao,
+        em vez de herdar a espera alheia e ter a contagem cortada
+        antes da leitura que o adota (Devin Review do PR #144).
+        Como a idade pendente e sempre menor que o teto, a espera
+        total fica limitada a 2*_RECOVERY_WAIT_PASSES - 1: o
+        vaivem de sombra que nunca adota segue fechando a porta.
+
+        Com a Condition na mao (le _paper_exposure e
+        _fill_recovery_waited).
+        """
+        return (
+            self._paper_exposure.recovery_pending
+            and self._fill_recovery_waited
+            < occlusion._RECOVERY_WAIT_PASSES + self._paper_exposure.max_recovery_age
+        )
+
     def _at_rest(self):
         """Descanso total: nenhuma passada ate um evento acordar.
 
@@ -854,19 +880,17 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             and np.any(self._accumulator._removal_streak)
         ):
             return False
-        if (
-            self._paper_exposure.recovery_pending
-            and self._fill_recovery_waited < occlusion._RECOVERY_WAIT_PASSES
-        ):
+        if self._recovery_wait_open():
             # Streak de evidência de tinta contando num bloco
             # anômalo: as passadas que a guarda precisa para adotar
             # o preenchimento não podem contar como quietude —
             # dormir no meio da contagem congelava o traco antes de
-            # ele votar. O limite e o proprio prazo de adocao:
-            # pendente por mais passadas que ele sem borda nova e
-            # oscilacao de sombra, nao preenchimento — segurar a
-            # porta aí deixava a inferencia rodando sem fim depois
-            # da saida da mao (Devin Review do PR #144).
+            # ele votar. O prazo corre por item vivo (ver
+            # _recovery_wait_open): pendente por mais passadas que
+            # o teto mais a carencia e oscilacao de sombra, nao
+            # preenchimento — segurar a porta aí deixava a
+            # inferencia rodando sem fim depois da saida da mao
+            # (Devin Review do PR #144).
             return False
         if self._identity_recovery_requested and self._identity_reference is not None:
             return False
@@ -1218,10 +1242,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # fora do quad nao pode gastar a janela de confirmacao
             # pos-saida (review do PR #118).
             is_masked = visible is not None and not _crop_all_visible(visible, corners)
-            fill_pending = (
-                self._paper_exposure.recovery_pending
-                and self._fill_recovery_waited < occlusion._RECOVERY_WAIT_PASSES
-            )
+            fill_pending = self._recovery_wait_open()
             if (
                 self._post_exit_confirm_passes() > 1
                 and (is_pre_exit or is_masked or fill_pending)

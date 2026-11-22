@@ -64,9 +64,14 @@ _MIN_PAPER_LUMA = 24.0
 # uma anomalia persistente nunca entra em recuperação (espelha o hold
 # de `paper_ok` do guarda anterior, agora por tile).
 _RECOVERY_HOLD_PASSES = 4
-# Teto da espera da trabalhadora por recuperação pendente (streak de
-# preenchimento ou hold de recuperação): cobre os dois orçamentos —
-# hoje coincidem em 4, mas pertencem a mecanismos diferentes.
+# Teto do tempo morto da espera da trabalhadora por recuperação
+# pendente (streak de preenchimento ou hold de recuperação): cobre os
+# dois orçamentos — hoje coincidem em 4, mas pertencem a mecanismos
+# diferentes. O teto não corre sobre o pendente global direto: a
+# trabalhadora soma a idade do item pendente mais velho
+# (max_recovery_age) como carência, então o limite real é o teto
+# mais a idade dele — e como idade pendente é sempre menor que este
+# valor, a espera total nunca passa de 2*_RECOVERY_WAIT_PASSES - 1.
 _RECOVERY_WAIT_PASSES = max(_FILL_RECOVERY_PASSES, _RECOVERY_HOLD_PASSES)
 
 
@@ -134,6 +139,33 @@ class PaperExposureGuard:
     def recovery_pending(self):
         """Recuperação com trabalho pendente (streak ou hold ativo)."""
         return self.pending_fill_recovery or self.recovering
+
+    @property
+    def max_recovery_age(self):
+        """Idade do item pendente mais velho, em passadas; 0 sem pendente.
+
+        `recovery_pending` é global: um streak que nasce na passada em
+        que outro morre emenda os dois numa espera só, e a trabalhadora
+        cobrava do preenchimento novo as passadas gastas no que morreu
+        — a contagem fechava antes da leitura que o adota (Devin Review
+        do PR #144). A idade devolve a régua por item: o maior streak
+        ainda contando (o próprio valor) ou o hold decorrido há mais
+        tempo (_RECOVERY_HOLD_PASSES - restante). Todo item pendente é
+        mais novo que _RECOVERY_WAIT_PASSES, então a carência que a
+        trabalhadora soma ao teto da espera é limitada por construção.
+        """
+        age = 0
+        if self._ink_streak is not None:
+            streaks = self._ink_streak[
+                (self._ink_streak > 0) & (self._ink_streak < _FILL_RECOVERY_PASSES)
+            ]
+            if streaks.size:
+                age = int(streaks.max())
+        if self._recovering is not None:
+            holds = self._recovering[self._recovering > 0]
+            if holds.size:
+                age = max(age, _RECOVERY_HOLD_PASSES - int(holds.min()))
+        return age
 
     def _darkened(self, known, current):
         """(darkened, expected): luma por tile contra a referência."""

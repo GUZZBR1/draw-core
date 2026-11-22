@@ -385,6 +385,113 @@ def test_stationary_hand_samples_do_not_cancel_the_adopted_fill_vote(
     assert worker.stats()["resting"]
 
 
+def test_fill_streak_born_as_another_dies_still_reaches_adoption(monkeypatch):
+    """Regressão (Devin Review do PR #144): a sombra gasta 3
+    passadas de streak pós-saída e morre; o preenchimento que só
+    então fica à vista herdava a espera dos dois — a porta
+    fechava na 4a passada do novo e a trabalhadora dormia antes
+    da leitura que adota o bloco. A carência por idade deixa o
+    streak tardio completar o horizonte dele."""
+    config = InkConfig.production(pass_interval_s=0.02)
+    worker, ink, generation = _mature(monkeypatch, config, idle_probe=True)
+    try:
+        # Blocos 3x4+ tiles, longe da testemunha e do traco base.
+        fill = (slice(144, 216), slice(24, 120))  # tiles 6-8 x 1-4
+        shadow = (slice(24, 96), slice(240, 336))  # tiles 1-3 x 10-13
+        scene = _paper()
+        scene[fill] = (60, 62, 64)
+        scene[shadow] = (60, 62, 64)
+        masked = np.ones((H, W), bool)
+        masked[fill] = False  # a mão ainda cobre o preenchimento
+
+        worker.set_hand_presence(True)
+        for _ in range(2):
+            _pass(worker, generation, scene, masked)
+        worker.set_hand_presence(False)
+
+        # Pós-saída 1-3: a sombra lê como tinta enquanto a máscara
+        # segue sobre o preenchimento — os três skips se vão sem
+        # que o streak dele comece a contar.
+        prob = _prob()
+        prob[shadow] = 0.95
+        prob[fill] = 0.95
+        ink.content = prob
+        for _ in range(3):
+            _pass(worker, generation, scene, masked)
+
+        # Passada 4: a sombra perde o suporte e o preenchimento fica
+        # limpo — o streak dele nasce com a espera já gasta.
+        prob = _prob()
+        prob[fill] = 0.95
+        ink.content = prob
+        for _ in range(3):
+            _pass(worker, generation, scene)
+
+        # Sob o teto global antigo a porta já teria fechado: sem a
+        # carência a trabalhadora descansa aqui e o preenchimento
+        # nunca chega à 4a leitura.
+        assert not worker.stats()["resting"]
+        assert not worker.poll(generation, 0).confirmed[fill].any()
+
+        _pass_until(
+            worker,
+            generation,
+            scene,
+            lambda snap: snap.confirmed[fill].all(),
+            occlusion._FILL_RECOVERY_PASSES + 8,
+        )
+        assert worker.poll(generation, 0).confirmed[fill].all()
+
+        # Adotado e confirmado, o pendente some e o descanso volta a
+        # fechar normalmente.
+        _pass_until(
+            worker,
+            generation,
+            scene,
+            lambda _snap: worker.stats()["resting"],
+            6,
+        )
+        assert worker.stats()["resting"] is True
+    finally:
+        worker.stop()
+
+
+def test_alternating_fill_support_still_hits_the_wait_bound(monkeypatch):
+    """Vaivém sem adoção continua limitado: o suporte alternando
+    entre dois blocos mantém o pendente aceso sem borda de adoção;
+    a espera tem que fechar e a trabalhadora descansar."""
+    config = InkConfig.production(pass_interval_s=0.02)
+    worker, ink, generation = _mature(monkeypatch, config, idle_probe=True)
+    try:
+        shadow_a = (slice(24, 96), slice(240, 336))  # tiles 1-3 x 10-13
+        shadow_b = (slice(168, 240), slice(144, 216))  # tiles 7-9 x 6-8
+        scene = _paper()
+        scene[shadow_a] = (60, 62, 64)
+        scene[shadow_b] = (60, 62, 64)
+        prob_a = _prob()
+        prob_a[shadow_a] = 0.95
+        prob_b = _prob()
+        prob_b[shadow_b] = 0.95
+
+        worker.set_hand_presence(True)
+        _pass(worker, generation, scene)
+        worker.set_hand_presence(False)
+        for index in range(occlusion._RECOVERY_WAIT_PASSES * 3):
+            if worker.stats()["resting"]:
+                break
+            ink.content = prob_a if index % 2 == 0 else prob_b
+            _pass(worker, generation, scene)
+        # O suporte nunca sustenta um streak até a adoção, mas a
+        # espera estendida pela carência tem teto: descansa.
+        assert worker.stats()["resting"] is True
+        assert worker._fill_recovery_waited >= occlusion._RECOVERY_WAIT_PASSES
+        snap = worker.poll(generation, 0)
+        assert not snap.confirmed[shadow_a].any()
+        assert not snap.confirmed[shadow_b].any()
+    finally:
+        worker.stop()
+
+
 def test_mid_pass_generation_swap_writes_to_the_orphan_guard(monkeypatch):
     """new_generation durante a inferência troca a guarda; o observe
     da passada velha escreve na instância órfã — estado de página
