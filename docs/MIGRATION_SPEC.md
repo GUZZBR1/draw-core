@@ -269,7 +269,7 @@ or by the migration). Parity runs must account for them.
 - Pipeline: the detector's hand mask feeds `seg_hand_occlusion` regardless
   of `coverage` (legacy tied both detection extras to the same flag).
 - Ink worker: photometric occlusion guard (`InkConfig.paper_guard`, issue
-  #129). A stateful per-tile paper reference (luma + chroma + texture, only
+  #129). A stateful per-tile paper reference (luma + chroma, only
   refreshed upward) marks regions that do not look like exposed paper:
   any anomalous tile withholds removal evidence, and a connected 3x3-tile
   block also vetoes new votes — hand or shadow without a MediaPipe mask

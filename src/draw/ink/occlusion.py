@@ -11,7 +11,6 @@ _MIN_DARKENING = 5.0
 _DARKENING_FRACTION = 0.20
 _CHROMA_CHANGE = 0.20
 _VISIBLE_TILE_FRACTION = 0.85
-_TEXTURE_CHANGE = 0.015
 # Um deslocamento fotométrico da página inteira (luz da sala caindo,
 # auto-exposição da câmera, balanço de branco) move a quase totalidade
 # dos tiles de uma vez — não é oclusão local. Quando a parcela anômala
@@ -99,8 +98,6 @@ class PaperExposureGuard:
         self._last_fill_adoption = False
         self._recovering = None
         self._was_anomalous = None
-        self._texture_reference = None
-        self._page_texture_reference = None
 
     @property
     def pending_fill_recovery(self):
