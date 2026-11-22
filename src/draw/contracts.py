@@ -544,6 +544,12 @@ class ExposureAssessment:
     paper_exposed: np.ndarray | bool
 
     def __post_init__(self):
+        # O tipo declarado de paper_exposed não admite None: uma
+        # avaliação emitida sem veredito de papel não é "sem avaliação"
+        # (None no acumulador reabriria o contrato legado — Devin
+        # Review do PR #144), é "nada prova papel" — False congela.
+        if self.paper_exposed is None:
+            object.__setattr__(self, "paper_exposed", False)
         for name in ("visible", "paper_exposed"):
             mask = getattr(self, name)
             if mask is None:

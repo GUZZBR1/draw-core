@@ -149,7 +149,11 @@ class LayeredInkAccumulator:
         ):
             paper_exposed = np.asarray(paper_exposed, dtype=bool)
             if paper_exposed.shape != prob.shape:
-                paper_exposed = None
+                # Máscara em geometria errada é bug do chamador — o
+                # mesmo caso do visible acima: None devolveria a
+                # passada ao contrato legado (voto sem prova de
+                # papel, fail-open para o dreno), então congela.
+                paper_exposed = False
         if self._confirmed is None or self._confirmed.shape != prob.shape:
             self._removal_streak = None
             self._removal_stale_passes = 0
