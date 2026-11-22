@@ -272,6 +272,8 @@ class _Pass:
     prob: object = None
     exposure: object = None
     exposure_guard: object = None
+    exposure_confirmed_ink: object = None
+    exposure_confirmed_anchor: object = None
     # estado de ancora / registro
     first_pass: bool = False
     recovering: bool = False
@@ -1340,6 +1342,15 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # estado de pagina velha nao semeia referencia na pagina
             # nova (Devin Review do PR #144).
             p.exposure_guard = self._paper_exposure
+            if p.generation == self._worker_generation:
+                confirmed = self._accumulator._confirmed
+                if confirmed is not None:
+                    p.exposure_confirmed_ink = (confirmed > 0).copy()
+                    p.exposure_confirmed_anchor = (
+                        None
+                        if self._anchor_corners is None
+                        else self._anchor_corners.copy()
+                    )
         # Uma excecao do modelo (shape errado, sessao morta, ONNX
         # sem memoria) matava esta thread em silencio: o canvas
         # congelava no ultimo quadro e nada era impresso. O erro
@@ -1449,12 +1460,33 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         # ficava vetado para sempre (Devin Review do PR #144). A
         # guarda mede a imagem FOTOMETRICA (antes do divnorm) — o
         # normalizado muda a luminancia que a referencia compara.
+        confirmed_ink = p.exposure_confirmed_ink
+        if (
+            confirmed_ink is not None
+            and p.corners is not None
+            and p.exposure_confirmed_anchor is not None
+        ):
+            matrix = registration._registration_matrix(
+                p.exposure_confirmed_anchor, p.corners, p.prob.shape
+            )
+            if not registration._registration_is_identity(matrix):
+                confirmed_ink = (
+                    cv2.warpPerspective(
+                        confirmed_ink.astype(np.uint8),
+                        np.linalg.inv(matrix),
+                        (p.prob.shape[1], p.prob.shape[0]),
+                        flags=cv2.INTER_NEAREST,
+                        borderValue=0,
+                    )
+                    > 0
+                )
         p.exposure = (
             p.exposure_guard.observe(
                 photometric_image,
                 p.visible,
                 ink_prob=p.prob,
                 ink_support_threshold=self._config.vote_hit,
+                confirmed_ink=confirmed_ink,
             )
             if self._config.paper_guard
             else None

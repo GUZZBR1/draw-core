@@ -448,11 +448,18 @@ def test_global_dimming_flattens_the_former_bright_region():
     assert guard.observe(lit, visible).paper_exposed is True
     assert guard.observe(lit, visible).paper_exposed is True
 
+    transient_texture = lit.copy()
+    region = transient_texture[24:96, 24:96]
+    yy, xx = np.indices(region.shape[:2])
+    region[:] = np.where(((xx + yy) % 2)[..., None], 220, 255)
+    transient = guard.observe(transient_texture, visible)
+    assert not transient.paper_exposed[24:96, 24:96].all()
+
     dim = np.full((120, 160, 3), 140, dtype=np.uint8)  # lâmpada apagada
     for _ in range(2):
         assessment = guard.observe(dim, visible)
         assert assessment.visible is None
-        assert assessment.paper_exposed is True
+        assert np.asarray(assessment.paper_exposed).all()
 
 
 def test_fill_recovery_exempts_supported_pixels_across_tile_borders():
@@ -497,7 +504,7 @@ def test_texture_mismatch_blocks_removal_under_a_paper_colored_ruler():
         threshold = 0.7
 
         def __init__(self):
-            self.prob = old
+            self.prob = np.zeros(shape, np.float32)
 
         def ink_prob(self, _image):
             return self.prob
@@ -507,6 +514,13 @@ def test_texture_mismatch_blocks_removal_under_a_paper_colored_ruler():
     worker = rr.make_ink_worker(page_clean, clock)
     generation = worker.new_generation()
     corners = rr.base_quad(shape)
+    for _ in range(4):
+        clock.now += 1
+        worker.submit(WarpedPage(paper, generation, corners))
+        assert worker.pump()
+        assert worker.error is None
+
+    page_clean.prob = old
     for _ in range(16):
         clock.now += 1
         worker.submit(WarpedPage(paper, generation, corners))
@@ -563,7 +577,7 @@ def test_marked_ruler_does_not_erase_the_covered_stroke():
         threshold = 0.7
 
         def __init__(self):
-            self.prob = old
+            self.prob = np.zeros(shape, np.float32)
 
         def ink_prob(self, _image):
             return self.prob
@@ -573,6 +587,13 @@ def test_marked_ruler_does_not_erase_the_covered_stroke():
     worker = rr.make_ink_worker(page_clean, clock)
     generation = worker.new_generation()
     corners = rr.base_quad(shape)
+    for _ in range(4):
+        clock.now += 1
+        worker.submit(WarpedPage(paper, generation, corners))
+        assert worker.pump()
+        assert worker.error is None
+
+    page_clean.prob = old
     for _ in range(16):
         clock.now += 1
         worker.submit(WarpedPage(page, generation, corners))
@@ -590,18 +611,36 @@ def test_marked_ruler_does_not_erase_the_covered_stroke():
     records = worker.telemetry_snapshot()["records"]
     assert sum(r["removed_confirmed_px"] for r in records) == 0
 
+    # A mudança global de luz não pode limpar o veto dos ticks locais.
+    dimmed_ruler = np.rint(ruler.astype(np.float32) * (160.0 / 220.0)).astype(np.uint8)
+    for _ in range(registration_mod._REMOVAL_PASSES + 2):
+        clock.now += 1
+        worker.submit(WarpedPage(dimmed_ruler, generation, corners))
+        assert worker.pump()
+        assert worker.error is None
+    assert worker._accumulator._confirmed[target].all()
+
 
 def test_partial_erasure_of_a_dense_patch_still_counts_cleared_pixels():
     """Metade do tile apagada: a cobertura insuficiente para APRENDER
     a referência não pode vetar o voto de remoção dos pixels limpos.
     O veto por pixel (dark_ink) já protege a metade ainda grafite
-    (Devin Review do PR #144)."""
+    (Devin Review do PR #144).
+
+    O tile do patch nunca aprendeu referência (58% de tinta já na
+    primeira observação), então a evidência corre por pixel. Fronteira
+    conservadora documentada: sobre tile aprendido LIMPO, uma mancha
+    que segue lida como tinta ≥5% é indistinguível de marcas de
+    oclusor e o veto `new_ink` segura o tile inteiro — a borda limpa
+    espera a mancha sair da leitura do modelo. Perder tinta real é o
+    modo de falha que a PR existe para impedir; segurar um pouco mais
+    é o lado seguro."""
     shape = (120, 160)
     paper = np.full((*shape, 3), 220, dtype=np.uint8)
     patch = (slice(24, 48), slice(0, 14))  # ~58% do tile (1,0)
     page = paper.copy()
     page[patch] = 160
-    witness = (slice(80, 96), slice(96, 144))
+    witness = (slice(60, 120), slice(88, 160))
     page[witness] = 60
 
     prob_full = np.zeros(shape, np.float32)
@@ -719,6 +758,36 @@ def test_tile_hidden_at_startup_learns_its_local_rule_texture():
     # Página limpa pode devolver o True escalar (papel todo exposto)
     # ou a máscara — as duas formas têm de incluir o traço apagado.
     assert clear_read.paper_exposed is True or clear_read.paper_exposed[stroke].all()
+
+
+def test_hidden_blank_tile_uses_the_local_majority_beside_print():
+    """Um único vizinho impresso não pode ensinar textura falsa ao tile
+    em branco que ficou escondido na primeira observação."""
+    shape = (168, 168)
+    paper = np.full((*shape, 3), 220, dtype=np.uint8)
+    printed = paper.copy()
+    for row in range(26, 47, 4):
+        cv2.line(printed, (48, row), (71, row), (190, 190, 190), 1)
+
+    visible = np.ones(shape, dtype=bool)
+    hidden_tile = (slice(24, 48), slice(24, 48))
+    visible[hidden_tile] = False
+    hand = printed.copy()
+    hand[hidden_tile] = 60
+    guard = occlusion_mod.PaperExposureGuard()
+    guard.observe(hand, visible)
+
+    assessment = guard.observe(paper, ink_prob=np.zeros(shape, np.float32))
+    assert np.asarray(assessment.paper_exposed)[hidden_tile].all()
+
+    stroke = (slice(30, 32), slice(28, 46))
+    pencil = paper.copy()
+    pencil[stroke] = 60
+    ink = np.zeros(shape, np.float32)
+    ink[stroke] = 0.95
+    guard.observe(pencil, ink_prob=ink)
+    erased = guard.observe(paper, ink_prob=np.zeros_like(ink))
+    assert np.asarray(erased.paper_exposed)[stroke].all()
 
 
 def test_texture_is_stable_under_small_quantized_lighting_drift():

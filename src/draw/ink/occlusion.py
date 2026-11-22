@@ -18,7 +18,8 @@ _TEXTURE_MIN_PAPER_FRACTION = 0.6
 # Fração de tinta lida pelo modelo num tile cuja referência foi
 # formada em papel: marca nova sobre papel é oclusão suspeita, não
 # textura aprendida.
-_TEXTURE_NEW_INK_FRACTION = 0.05
+_TEXTURE_NEW_INK_FRACTION = 0.01
+_TEXTURE_NEW_INK_MAX_FRACTION = 0.18
 # Um deslocamento fotométrico da página inteira (luz da sala caindo,
 # auto-exposição da câmera, balanço de branco) move a quase totalidade
 # dos tiles de uma vez — não é oclusão local. Quando a parcela anômala
@@ -52,14 +53,9 @@ _CHROMA_REFERENCE_MAX = 255.0 / _CHROMA_LUMA_FLOOR
 # A remoção segue exigindo papel exposto, que o preenchimento nunca
 # produz: o tile continua anômalo para o segundo veredito.
 _FILL_INK_PIXEL_THRESHOLD = 0.7
-_FILL_INK_TILE_SUPPORT = 0.15
-# Fração de pixels fortes não basta: uma faixa fina e forte — a borda
-# de uma sombra parada lida como tinta — cobre ~15% dos pixels do tile
-# a 0,9 e adotava o veto errado (média ~0,15). O piso de média exige
-# que a evidência de tinta domine o tile: um preenchimento real
-# sustenta média bem maior (>= ~0,4 nas tiles parcialmente cobertas
-# dos testes), a faixa fina fica em ~0,15 (Devin Review do PR #144).
-_FILL_INK_TILE_MEAN = 0.25
+# Fração do tile lendo tinta forte que conta como fill: metade do
+# tile — uma faixa fina de tinta falsa na borda de sombra não alcança.
+_FILL_INK_TILE_SUPPORT = 0.5
 _FILL_RECOVERY_PASSES = 4
 # Piso absoluto de papel exposto: a absorção de deslocamento global
 # segue a iluminação, mas uma página mediana abaixo deste nível não
@@ -107,7 +103,6 @@ class PaperExposureGuard:
         self._page_reference = None
         self._page_color_reference = None
         self._texture_reference = None
-        self._was_texture_anomalous = None
         self._ink_streak = None
         self._fill_adopted = None
         self._last_fill_adoption = False
@@ -199,7 +194,14 @@ class PaperExposureGuard:
         )
         return np.linalg.norm(chroma - expected_color, axis=2) > _CHROMA_CHANGE
 
-    def observe(self, image, visible=None, ink_prob=None, ink_support_threshold=None):
+    def observe(
+        self,
+        image,
+        visible=None,
+        ink_prob=None,
+        ink_support_threshold=None,
+        confirmed_ink=None,
+    ):
         """Return separate masks for safe additions and paper exposure.
 
         Only uint8 camera images carry reliable photometric evidence. An
@@ -301,6 +303,11 @@ class PaperExposureGuard:
                 )
                 updateable = fraction >= _VISIBLE_TILE_FRACTION
 
+        if confirmed_ink is not None:
+            confirmed_ink = np.asarray(confirmed_ink, dtype=bool)
+            if confirmed_ink.shape != (height, width):
+                return None
+
         if self._reference is None or self._reference.shape != current.shape:
             self._reference = np.full(current.shape, np.nan, dtype=np.float32)
             self._color_reference = (
@@ -312,7 +319,6 @@ class PaperExposureGuard:
             self._page_color_reference = None
             self._texture_reference = np.full(current.shape, np.nan, dtype=np.float32)
             self._texture_learned_clean = np.zeros(current.shape, dtype=bool)
-            self._was_texture_anomalous = np.zeros(current.shape, dtype=bool)
             self._ink_streak = np.zeros(current.shape, dtype=np.uint8)
             self._fill_adopted = np.zeros(current.shape, dtype=bool)
             self._recovering = np.zeros(current.shape, dtype=np.uint8)
@@ -348,41 +354,47 @@ class PaperExposureGuard:
         color_anomaly = self._color_anomaly(known, chroma, current.shape)
 
         texture_known = np.isfinite(self._texture_reference)
-        left = np.roll(self._texture_reference, 1, axis=1)
-        right = np.roll(self._texture_reference, -1, axis=1)
-        up = np.roll(self._texture_reference, 1, axis=0)
-        down = np.roll(self._texture_reference, -1, axis=0)
-        left[:, 0] = np.nan
-        right[:, -1] = np.nan
-        up[0, :] = np.nan
-        down[-1, :] = np.nan
-        horizontal_count = np.isfinite(left).astype(np.uint8) + np.isfinite(right)
-        vertical_count = np.isfinite(up).astype(np.uint8) + np.isfinite(down)
-        horizontal_reference = np.divide(
-            np.nan_to_num(left, nan=0.0) + np.nan_to_num(right, nan=0.0),
-            horizontal_count,
-            out=np.zeros(current.shape, dtype=np.float32),
-            where=horizontal_count > 0,
+        neighbors = []
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if dx == 0 and dy == 0:
+                    continue
+                neighbor = np.roll(self._texture_reference, (dy, dx), axis=(0, 1))
+                if dy < 0:
+                    neighbor[-1, :] = np.nan
+                elif dy > 0:
+                    neighbor[0, :] = np.nan
+                if dx < 0:
+                    neighbor[:, -1] = np.nan
+                elif dx > 0:
+                    neighbor[:, 0] = np.nan
+                neighbors.append(neighbor)
+        neighbor_values = np.stack(neighbors)
+        neighbor_valid = np.isfinite(neighbor_values)
+        neighbor_count = neighbor_valid.sum(axis=0)
+        ordered_neighbors = np.sort(
+            np.where(neighbor_valid, neighbor_values, np.inf), axis=0
         )
-        vertical_reference = np.divide(
-            np.nan_to_num(up, nan=0.0) + np.nan_to_num(down, nan=0.0),
-            vertical_count,
-            out=np.zeros(current.shape, dtype=np.float32),
-            where=vertical_count > 0,
-        )
-        neighbor_reference = np.where(
-            horizontal_count > 0, horizontal_reference, vertical_reference
-        )
-        neighbor_count = np.where(
-            horizontal_count > 0, horizontal_count, vertical_count
-        )
+        lower = np.take_along_axis(
+            ordered_neighbors,
+            np.maximum((neighbor_count - 1) // 2, 0)[None],
+            axis=0,
+        )[0]
+        upper = np.take_along_axis(
+            ordered_neighbors, (neighbor_count // 2)[None], axis=0
+        )[0]
+        neighbor_reference = np.where(neighbor_count > 0, (lower + upper) * 0.5, 0.0)
         texture_reference = np.where(
             texture_known, self._texture_reference, neighbor_reference
         )
-        texture_comparable = texture_known | (neighbor_count > 0)
+        texture_comparable = texture_known | (neighbor_count >= 2)
         texture_mismatch = texture_comparable & (
             np.abs(texture - texture_reference)
             > np.maximum(_TEXTURE_CHANGE, texture_reference * 0.5)
+        )
+        local_texture_match = (neighbor_count >= 2) & (
+            np.abs(texture - neighbor_reference)
+            <= np.maximum(_TEXTURE_CHANGE, neighbor_reference * 0.5)
         )
         # Tinta nova sobre tile aprendida limpa: as marcas de um
         # oclusor podem ser lidas como tinta e sair da amostra
@@ -391,11 +403,17 @@ class PaperExposureGuard:
         # papel: tile que sempre teve tinta não é "novo". Cobertura
         # insuficiente barra só o aprendizado (texture_valid ali),
         # não o veto por pixel — a metade apagada de um patch denso
-        # precisa poder provar papel (Devin Review do PR #144).
+        # precisa poder provar papel. A contagem usa TODA a tinta que
+        # o modelo lê: confirmar a marca por voto não a torna papel —
+        # se a leitura parasse em "não confirmada", a régua marcada
+        # confirmaria os próprios ticks em ~3 passadas e o veto
+        # evaporaria sobre o traço que ela cobre (Devin Review do
+        # PR #144).
         new_ink = (
             texture_known
             & self._texture_learned_clean
             & (ink_fraction >= _TEXTURE_NEW_INK_FRACTION)
+            & (ink_fraction <= _TEXTURE_NEW_INK_MAX_FRACTION)
         )
         texture_anomaly = texture_mismatch | new_ink
 
@@ -474,7 +492,8 @@ class PaperExposureGuard:
             flattened = (
                 updateable
                 & (anomalous | texture_anomaly)
-                & ~(self._was_texture_anomalous & texture_anomaly)
+                & (~texture_anomaly | local_texture_match)
+                & ~new_ink
                 & ~color_anomaly
                 & (current >= page_reference - page_drop)
             )
@@ -505,12 +524,46 @@ class PaperExposureGuard:
                 pixel_support.astype(np.float32), size, interpolation=cv2.INTER_AREA
             )
             support_mean = cv2.resize(ink_prob, size, interpolation=cv2.INTER_AREA)
-            supported = (
+            # A adoção exige evidência DENSA no nível que o voto
+            # configurado atua: metade do tile lendo tinta forte, ou a
+            # média do tile no nível do hit. Um bloco preenchido
+            # sustentado adota mesmo sem todos os pixels no hit; já a
+            # faixa fina de tinta falsa na borda de uma sombra (~15-30%
+            # do tile, média ~0,15) nunca semeia — antes 15% de pixels
+            # fortes bastava para adotar a sombra como fill
+            # (Devin Review do PR #144).
+            # A média do tile no nível do hit conta evidência densa
+            # sustentada que o voto configurado confirmaria (um bloco
+            # preenchido a 0,68 sob Sketch) mesmo sem todos os pixels
+            # no hit (Devin Review do PR #144).
+            tile_support = (
                 anomalous
                 & updateable
-                & (support_fraction >= _FILL_INK_TILE_SUPPORT)
-                & (support_mean >= _FILL_INK_TILE_MEAN)
+                & (
+                    (
+                        (support_fraction >= _FILL_INK_TILE_SUPPORT)
+                        & (support_mean >= _FILL_INK_TILE_MEAN)
+                    )
+                    | (support_mean >= support_level)
+                )
             )
+            # Só um suporte 2-D pode semear a recuperação: o veto de
+            # adição só existe para manchas que cobrem >= 2 tiles em
+            # ambas as dimensões, então uma faixa de uma linha de tile —
+            # a borda de sombra que o modelo lê como tinta — não tinha
+            # nada a recuperar e não pode ser adotada como fill
+            # (Devin Review do PR #144).
+            if np.any(tile_support):
+                count, labels = cv2.connectedComponents(
+                    tile_support.astype(np.uint8), connectivity=8
+                )
+                for index in range(1, count):
+                    rows, cols = np.where(labels == index)
+                    if (
+                        rows.max() - rows.min() + 1 >= 2
+                        and cols.max() - cols.min() + 1 >= 2
+                    ):
+                        supported |= labels == index
         self._ink_streak[supported] = np.minimum(
             self._ink_streak[supported].astype(np.uint16) + 1, 255
         ).astype(np.uint8)
@@ -578,7 +631,7 @@ class PaperExposureGuard:
             )
             > 0
         )
-        if pixel_support is not None:
+        if pixel_support is not None or confirmed_ink is not None:
             expected_pixels = cv2.resize(
                 expected, (width, height), interpolation=cv2.INTER_NEAREST
             )
@@ -589,7 +642,14 @@ class PaperExposureGuard:
             # contains a solid dark fill. Strong ink pixels over dark
             # camera pixels never prove exposed paper, including tiles
             # that are only partially covered by the fill.
-            dark_ink = pixel_support & (gray < expected_pixels - pixel_drop)
+            dark_ink = np.zeros((height, width), dtype=bool)
+            if pixel_support is not None:
+                dark_ink |= pixel_support & (gray < expected_pixels - pixel_drop)
+            if confirmed_ink is not None:
+                # A confirmed stroke remains non-paper if the model
+                # misses it in this pass. Cleared pixels return to the
+                # paper luminance and can vote for removal independently.
+                dark_ink |= confirmed_ink & (gray < expected_pixels - pixel_drop)
             if np.any(dark_ink):
                 if isinstance(paper_exposed, (bool, np.bool_)):
                     paper_exposed = np.full((height, width), paper_exposed, dtype=bool)
@@ -650,7 +710,6 @@ class PaperExposureGuard:
         self._recovering[anomalous] = 0
         self._recovering[self._was_anomalous & ~anomalous] = _RECOVERY_HOLD_PASSES
         self._was_anomalous = anomalous.copy()
-        self._was_texture_anomalous = texture_anomaly.copy()
         return ExposureAssessment(
             visible=unblocked,
             paper_exposed=paper_exposed,
