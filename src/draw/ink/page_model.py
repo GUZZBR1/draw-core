@@ -698,6 +698,7 @@ class PageModel:
         region=None,
         prenormalized=False,
         with_unsure=False,
+        sampled=None,
     ):
         """Evidencia fotometrica da tinta salva nas posicoes `at`.
 
@@ -720,18 +721,22 @@ class PageModel:
 
         `region`=(y0, y1, x0, x1) e um bbox que contem `at` (evita a
         varredura da grade inteira); `prenormalized` como em
-        `darker_than_reference`. `with_unsure` acrescenta um terceiro
-        mask: as posicoes de `at` tiradas de `distinct` so pela amostra
-        escondida — nao julgaveis nesta passada, como tinta sob a mao.
+        `darker_than_reference`. `with_unsure` acrescenta dois masks:
+        unsure, as posicoes de `at` tiradas de `distinct` so pela
+        amostra escondida — nao julgaveis nesta passada — e occluded,
+        o subconjunto cujo veto depende de amostra escondida DENTRO de
+        `sampled` (a pegada do registro; None = grade inteira): mao
+        sobre a folha, nao recorte geometrico.
         """
         height, width = self.shape
         distinct = np.zeros(self.shape, dtype=bool)
         matched_obs = np.zeros(self.shape, dtype=bool)
         unsure_saved = np.zeros(self.shape, dtype=bool)
+        occluded_saved = np.zeros(self.shape, dtype=bool)
 
         def result():
             if with_unsure:
-                return distinct, matched_obs, unsure_saved
+                return distinct, matched_obs, unsure_saved, occluded_saved
             return distinct, matched_obs
 
         if not self._has_seeded or levels is None or levels.shape != self.shape:
@@ -759,6 +764,7 @@ class PageModel:
             else self._normalized(gray, visible)
         )
         vis = None if visible is None else np.asarray(visible, dtype=bool)
+        foot = None if sampled is None else np.asarray(sampled, dtype=bool)
         matched_saved = np.zeros(self.shape, dtype=bool)
         for oy, ox in {(0, 0), (int(dy), int(dx))}:
             qy, qx = ys + oy, xs + ox
@@ -782,12 +788,13 @@ class PageModel:
             # que tambem ficou.
             near_i = int(near)
             clean_gap = _nearest_reference_gap(ref_inf, py, px, obs, near_i)
-            unsure = None
+            unsure = occluded = None
             if (oy, ox) != (int(dy), int(dx)) and py.size:
-                moved_ref, known_ref, my0, mx0 = self._moved_reference(
+                moved_ref, known_ref, occl_ref, my0, mx0 = self._moved_reference(
                     ref_inf,
                     norm_gray,
                     vis,
+                    foot,
                     py - int(dy),
                     px - int(dx),
                     near_i,
@@ -798,12 +805,16 @@ class PageModel:
                 known_gap = np.minimum(
                     clean_gap, _nearest_reference_gap(known_ref, ry, rx, obs, near_i)
                 )
+                occl_gap = np.minimum(
+                    clean_gap, _nearest_reference_gap(occl_ref, ry, rx, obs, near_i)
+                )
                 np.minimum(
                     clean_gap,
                     _nearest_reference_gap(moved_ref, ry, rx, obs, near_i),
                     out=clean_gap,
                 )
                 unsure = (saved_gap <= self.novel_delta) & (saved_gap < known_gap)
+                occluded = (saved_gap <= self.novel_delta) & (saved_gap < occl_gap)
             hit = (saved_gap <= self.novel_delta) & (saved_gap < clean_gap)
             matched_obs[qy[hit], qx[hit]] = True
             matched_saved[py[hit], px[hit]] = True
@@ -813,14 +824,17 @@ class PageModel:
                 # ausencia provada — o pixel volta a ser ambiguo.
                 unsure &= ~hit
                 unsure_saved[py[unsure], px[unsure]] = True
+                occluded &= unsure
+                occluded_saved[py[occluded], px[occluded]] = True
         unsure_saved &= ~matched_saved
+        occluded_saved &= unsure_saved
         distinct &= ~unsure_saved
         return result()
 
     @staticmethod
-    def _moved_reference(ref_inf, norm_gray, vis, cy, cx, reach, dy, dx):
+    def _moved_reference(ref_inf, norm_gray, vis, foot, cy, cx, reach, dy, dx):
         """Recortes de `ref_inf` cobrindo (cy, cx) +- reach para o quadro
-        medido (dy, dx). Devolve (moved, known, y0, x0):
+        medido (dy, dx). Devolve (moved, known, occluded, y0, x0):
 
         - moved: inf so onde a aparencia limpa provadamente FICOU no
           lugar — a observacao em r reproduz ref[r] mais de
@@ -830,6 +844,9 @@ class PageModel:
         - known: `moved` tambem com inf onde alguma das duas amostras
           esta escondida ou fora da grade — so a referencia julgada
           pela aparencia visivel.
+        - occluded: `moved` com inf so onde a amostra escondida esta
+          dentro da grade e de `foot` (mao, nao recorte do registro):
+          o veto que sobra nele independe da oclusao.
         """
         height, width = ref_inf.shape
         y0 = max(int(cy.min()) - reach, 0)
@@ -838,10 +855,11 @@ class PageModel:
         x1 = min(int(cx.max()) + reach + 1, width)
         moved = ref_inf[y0:y1, x0:x1].copy()
         known = np.full(moved.shape, np.inf, dtype=np.float32)
+        occluded = moved.copy()
         ty0, ty1 = max(y0, -dy), min(y1, height - dy)
         tx0, tx1 = max(x0, -dx), min(x1, width - dx)
         if ty1 <= ty0 or tx1 <= tx0:
-            return moved, known, y0, x0
+            return moved, known, occluded, y0, x0
         ref = ref_inf[ty0:ty1, tx0:tx1]
         here = norm_gray[ty0:ty1, tx0:tx1]
         there = norm_gray[ty0 + dy : ty1 + dy, tx0 + dx : tx1 + dx]
@@ -855,7 +873,13 @@ class PageModel:
         win = (slice(ty0 - y0, ty1 - y0), slice(tx0 - x0, tx1 - x0))
         moved[win][stayed] = np.inf
         known[win] = np.where(judged & ~stayed, ref, np.inf)
-        return moved, known, y0, x0
+        hidden = ~judged
+        if foot is not None:
+            hidden &= (
+                foot[ty0:ty1, tx0:tx1] & foot[ty0 + dy : ty1 + dy, tx0 + dx : tx1 + dx]
+            )
+        occluded[win] = np.where(stayed | hidden, np.inf, ref)
+        return moved, known, occluded, y0, x0
 
     @property
     def observed_normalized_gray(self):

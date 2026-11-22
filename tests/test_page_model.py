@@ -2476,12 +2476,31 @@ def test_saved_tone_evidence_hidden_projected_rule_stays_ambiguous():
     gray[29:31, 25:105] = 85.0
     hand = vis.copy()
     hand[32:34, :] = False
-    distinct, matched, unsure = model.saved_tone_evidence(
+    distinct, matched, unsure, occluded = model.saved_tone_evidence(
         gray, levels, at, dy=-2, dx=0, near=3, visible=hand, with_unsure=True
     )
     assert not distinct[29:31, 25:105].any()
     assert not matched.any()
     assert unsure[29:31, 25:105].all()
+    assert occluded[29:31, 25:105].all()
+    # Mesmo veto, mas a amostra esta fora da pegada do registro (pose
+    # recortada, sem mao): incerto, nao ocluido.
+    clip = vis.copy()
+    clip[32:, :] = False
+    distinct, matched, unsure, occluded = model.saved_tone_evidence(
+        gray,
+        levels,
+        at,
+        dy=-2,
+        dx=0,
+        near=3,
+        visible=clip,
+        with_unsure=True,
+        sampled=clip,
+    )
+    assert not distinct[29:31, 25:105].any()
+    assert unsure[29:31, 25:105].all()
+    assert not occluded.any()
     # A mao sai: a regra provadamente ficou e o traco reaparece.
     distinct, matched = model.saved_tone_evidence(
         gray, levels, at, dy=-2, dx=0, near=3, visible=vis
@@ -2573,6 +2592,53 @@ def test_page_model_hidden_projected_rule_fragment_does_not_restore(monkeypatch)
         assert decisions and "same_page" not in decisions
     finally:
         worker.stop()
+
+
+def test_identity_hidden_projected_rule_holds_only_under_the_hand():
+    """worker.py:804: o mesmo traco salvo e a mesma regra projetada,
+    escondida uma vez pela mao (hold) e outra pelo recorte do registro
+    (adia sem hold, sujeito ao timeout)."""
+    model = pm_mod.PageModel((H, W))
+    form = np.full((H, W), PAPER, dtype=np.float32)
+    form[34:36, 10:110] = 95.0
+    vis = np.ones((H, W), dtype=bool)
+    for _ in range(4):
+        model.observe(form, visible=vis, paper=vis)
+    baseline = form < 200
+    ref = np.zeros((H, W), dtype=np.uint8)
+    ref[29:31, 25:105] = 255
+    gray_ref = np.full((H, W), np.nan, dtype=np.float32)
+    gray_ref[29:31, 25:105] = 65.0
+    gray = np.full((H, W), PAPER, dtype=np.float32)
+    gray[32:34, 10:110] = 95.0
+    gray[29:31, 25:105] = 85.0
+    candidate = _identity_candidate(gray)
+    hand = vis.copy()
+    hand[32:34, :] = False
+    clip = vis.copy()
+    clip[32:, :] = False
+
+    def run(visible, sampled):
+        return worker_mod._evaluate_page_identity(
+            ref,
+            baseline,
+            candidate,
+            visible,
+            sampled,
+            None,
+            False,
+            0.2,
+            identity_gray=gray,
+            identity_model=model,
+            identity_gray_ref=gray_ref,
+        )
+
+    covered = run(hand, vis)
+    assert covered[5] is True and covered[6] == "occlusion"
+    assert covered[7] is True
+    clipped = run(clip, clip)
+    assert clipped[0] is False and clipped[5] is True
+    assert clipped[7] is False
 
 
 def _ruled_form():

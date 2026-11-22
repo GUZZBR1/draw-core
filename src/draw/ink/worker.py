@@ -551,7 +551,7 @@ def _evaluate_page_identity(
             )
         ambiguous = None
         ambiguous_px = 0
-        unsure = None
+        unsure = occluded = None
         tone_obs = None
         photometric = (
             darker is not None
@@ -580,7 +580,12 @@ def _evaluate_page_identity(
                     # contra a pior vizinha nao admite), nao casar
                     # prova ausencia (a pauta vista onde a tinta
                     # estava).
-                    distinct, tone_obs, unsure = identity_model.saved_tone_evidence(
+                    (
+                        distinct,
+                        tone_obs,
+                        unsure,
+                        occluded,
+                    ) = identity_model.saved_tone_evidence(
                         identity_norm,
                         identity_gray_ref,
                         ambiguous,
@@ -591,6 +596,7 @@ def _evaluate_page_identity(
                         region=region,
                         prenormalized=True,
                         with_unsure=True,
+                        sampled=identity_sampled,
                     )
                     ambiguous &= ~(distinct | unsure)
                     if np.any(unsure):
@@ -622,7 +628,7 @@ def _evaluate_page_identity(
         darker = None
         ambiguous = None
         ambiguous_px = 0
-        unsure = None
+        unsure = occluded = None
     # Dominio inspecionado da comparacao: a guarda do quad salvo,
     # cruzada com a visibilidade. Resposta de borda fora da area
     # util nao pode derrubar o containment nem rejeitar a pagina
@@ -730,12 +736,14 @@ def _evaluate_page_identity(
         prior_guard if identity_sampled is None else (prior_guard & identity_sampled)
     )
     prior_domain_px = int(np.count_nonzero(prior_domain))
-    # Tinta no dominio cujo veto limpo depende de amostra escondida:
-    # nao julgavel nesta passada, mas pode ser a tinta salva.
-    unsure_domain_px = (
+    # Tinta no dominio cujo veto limpo depende de amostra escondida
+    # pela mao: nao julgavel nesta passada, mas pode ser a tinta salva.
+    # Amostra fora da pegada do registro nao conta: a pose nao muda
+    # sozinha, e o adiamento geometrico segue sujeito ao timeout.
+    occluded_domain_px = (
         0
-        if unsure is None or not np.any(unsure)
-        else int(np.count_nonzero(unsure & prior_domain))
+        if occluded is None or not np.any(occluded)
+        else int(np.count_nonzero(occluded & prior_domain))
     )
     prior_eval = (
         prior_domain if identity_visible is None else (prior_domain & identity_visible)
@@ -801,7 +809,7 @@ def _evaluate_page_identity(
                 prior_eval_px,
                 True,
                 "occlusion",
-                hold_seen or ambiguous_px > 0 or unsure_domain_px > 0,
+                hold_seen or ambiguous_px > 0 or occluded_domain_px > 0,
             )
     if prior_eval_px == 0:
         unobserved_px = 0 if identity_sampled is None else usable_total_px - usable_px
