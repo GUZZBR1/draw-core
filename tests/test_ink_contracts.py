@@ -54,6 +54,7 @@ TABLE_GRAY = 45.0
 RULING_GRAY = 185.0
 CREASE_GRAY = 168.0
 PENCIL_GRAY = 140.0
+OCCLUDER_GRAY = 110.0
 
 # Linhas de pauta impressa na cena (fonte unica: os testes que as
 # desenham e o traco que as cruza leem daqui).
@@ -84,14 +85,18 @@ class _ScriptInk:
 
     Escuro de traco (>~100) vira 0,95; cinzas de pauta, vinco,
     lapis e pele de mao (100..204) viram 0,45 — incerteza como a do
-    modelo real sobre conteudo impresso; claro vira 0.
+    modelo real sobre conteudo impresso; claro vira 0. A faixa
+    105..119 e o objeto escuro que nao e tinta (manga, sombra densa):
+    escuro demais para a fotometria chamar de papel, escuro demais
+    para o modelo chamar de tinta — prob 0,05.
     """
 
     def ink_prob(self, warped):
         gray = warped if warped.ndim == 2 else warped.mean(axis=2)
         prob = np.zeros(gray.shape, dtype=np.float32)
         prob[gray < 100] = 0.95
-        prob[(gray >= 100) & (gray < 205)] = 0.45
+        prob[(gray >= 105) & (gray < 120)] = 0.05
+        prob[(gray >= 120) & (gray < 205)] = 0.45
         return prob
 
 
@@ -245,22 +250,25 @@ def _beyond(got, want, px):
 
 
 # Regimes sob medicao. "production" e o preset do PipelineConfig.
-# "page_model_solo" liga o PageModel e desliga os remendos que ele
-# propoe subsumir (pauta por DP, guarda de borda, guarda de papel):
-# se este regime sustentar os mesmos contratos, a pilha de remendos
-# #129-#132 e redundante para o produto.
+# "page_model_guarded" e o candidato PageModel que os contratos 9
+# (oclusor sem mascara) e 4 (faixa de mesa sustentada) mediram como
+# necessario: o modelo subsumiu o removedor de pauta, mas NAO a
+# guarda fotometrica (pm.exposed devolve tudo-True antes da
+# sementeira; sem paper_ok um oclusor escuro de prob baixa apaga
+# traco confirmado por voto de remocao) nem o recuo de borda
+# (sem mascara de cobertura, uma faixa de mesa escura dentro do
+# quad confirma como linha de margem). A variante sem guardas
+# (paper_guard=False, border_guard_px=0) falha nos dois contratos.
 PRODUCTION = InkConfig.production()
-PAGE_MODEL_SOLO = dataclasses.replace(
+PAGE_MODEL_GUARDED = dataclasses.replace(
     PRODUCTION,
     page_model=True,
     ruling_removal=False,
-    paper_guard=False,
-    border_guard_px=0,
 )
 
 REGIMES = {
     "production": PRODUCTION,
-    "page_model_solo": PAGE_MODEL_SOLO,
+    "page_model_guarded": PAGE_MODEL_GUARDED,
 }
 
 
@@ -388,12 +396,24 @@ def test_border_jitter_over_dark_table_makes_no_ink(ink):
     generation = worker.new_generation()
     scene = _Scene()
     scene.send_coverage = False  # sem mascara seg: so o warp fala
+    # Papel limpo assenta primeiro: a faixa de mesa so e admitida
+    # como evidencia se a referencia (e o dominio do voto) ja
+    # cobrirem a borda — e o cenario do review do #162.
+    _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE, must=True)
     moves = [(1, 0), (2, 0), (3, 1), (1, 2), (0, 3), (-2, 1), (-3, 0), (-1, -2)]
     for dx, dy in moves:
         # O quad desliza (dx, dy); o conteudo escorrega o oposto e a
         # borda recolhida admite mesa escura.
         img = scene.shifted((dx, dy), (-dx, -dy))
         _feed(worker, clock, scene.frame(generation, img=img, bare=True), _DT_IDLE)
+    # O jitter alterna a faixa e ela nunca junta votos. Um deslize
+    # sustentado na mesma direcao com o quad parado (rastreio nao
+    # acompanha) deixa a MESMA faixa de mesa exposta dentro da folha
+    # por toda a janela de votos — sem o recuo projetado automatico
+    # ela confirmaria como linha de margem.
+    for _ in range(5):
+        img = scene.shifted((0, 0), (5, 0))
+        _feed(worker, clock, scene.frame(generation, img=img), _DT_IDLE)
     got = _confirmed(worker, generation) > 0
     margin = np.zeros((H, W), dtype=bool)
     margin[:8, :] = margin[-8:, :] = margin[:, :8] = margin[:, -8:] = True
@@ -514,3 +534,54 @@ def test_light_sheet_slide_does_not_duplicate_ink(ink):
     # Eco mais fino que o residuo merge no proprio traco (o total
     # acima limita); fora da vizinhanca nao pode haver copia.
     assert _beyond(got, before, 2) == 0
+
+
+# ------------------------------------------------------------------
+# Contrato 9: objeto escuro sem mascara sobre traco confirmado nao o
+# apaga — a guarda fotometrica congela a regiao para o voto de
+# remocao, com ou sem deteccao de mao. (O contrato 8, traco visto
+# uma vez antes da mao sair, chega por outro PR.)
+# ------------------------------------------------------------------
+
+
+def test_unmasked_dark_occluder_does_not_erase_confirmed_ink(ink):
+    worker, clock = ink
+    generation = worker.new_generation()
+    scene = _Scene()
+    _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE, must=True)
+
+    # Tres tracos: com um deles coberto, o restante continua visivel
+    # e satisfaz a testemunha de remocao (a folha ainda e a mesma) —
+    # e o cenario exato em que o voto de remocao agiria.
+    stroke_a = (90, 96, 60, 260)
+    _write_stroke(worker, clock, generation, scene, stroke_a)
+    want_a = _stroke_mask(scene)
+    _write_stroke(worker, clock, generation, scene, (150, 156, 60, 200))
+    _write_stroke(worker, clock, generation, scene, (200, 206, 60, 260))
+    want = _stroke_mask(scene)
+    got0 = _confirmed(worker, generation) > 0
+    assert _frac(got0, want) >= 0.9
+
+    # Uma manga/objeto escuro pousa sobre parte do traco A e a
+    # mascara de mao o erra por completo: o warp traz o objeto
+    # (cinza ~110, prob de tinta baixa) e a mascara reporta tudo
+    # visivel. Sem a guarda fotometrica o escuro conta como papel
+    # exposto e o voto de remocao apaga o traco fisico em seis
+    # passadas — sem borracha alguma na cena.
+    clock.advance(2.1)  # elegibilidade de remocao apos a confirmacao
+    cover = np.zeros((H, W), dtype=bool)
+    cover[70:110, 40:180] = True
+    occluded = scene.page.copy()
+    occluded[cover] = OCCLUDER_GRAY
+    for _ in range(8):
+        # A mao que segura o objeto continua trabalhando — parada
+        # ela poria a trabalhadora em descanso e os quadros nao
+        # rodariam, deixando o teste ler o canvas anterior.
+        worker.set_hand_presence(True, moved=True)
+        _feed(worker, clock, scene.frame(generation, img=occluded))
+
+    got = _confirmed(worker, generation) > 0
+    covered = want_a & cover
+    assert _frac(got, covered) >= 0.9, "traco sob objeto escuro sumiu"
+    assert _frac(got, want) >= 0.9
+    assert _beyond(got, want, 3) == 0
