@@ -10,7 +10,7 @@ import numpy as np
 
 from .. import config as paper_config
 from .. import photometry
-from ..contracts import InkDelta, InkDisplaySnapshot, InkSnapshot
+from ..contracts import InkBaselineState, InkDelta, InkDisplaySnapshot, InkSnapshot
 from . import (
     accumulator,
     identity,
@@ -304,6 +304,19 @@ def _reg_triple(anchor, reg_corners, corners):
     )
 
 
+def _mask_bbox(mask):
+    """(y0, y1, x0, x1) exclusivo dos pixels ligados, ou None.
+
+    Reducoes por eixo em vez de np.nonzero: numa grade A4 com tinta
+    espalhada o nonzero completo custava ms por chamada.
+    """
+    rows = np.flatnonzero(np.any(mask, axis=1))
+    if rows.size == 0:
+        return None
+    cols = np.flatnonzero(np.any(mask[rows[0] : rows[-1] + 1], axis=0))
+    return int(rows[0]), int(rows[-1]) + 1, int(cols[0]), int(cols[-1]) + 1
+
+
 def _shift_bool_mask(mask, dy, dx):
     if dy == 0 and dx == 0:
         return mask
@@ -322,22 +335,57 @@ def _shift_bool_mask(mask, dy, dx):
 
 
 def _align_identity_baseline(identity_baseline, seen, prior, radius, kernel):
-    base_nonprior = identity_baseline & ~prior
+    """Alinha a pauta impressa a evidencia independente do prior.
+
+    Devolve (baseline_alinhado, dy, dx): o deslocamento medido da
+    pauta e o mesmo da folha — a escrita salva reaparece no quadro
+    deslocado junto com ela.
+    """
+    base_nonprior = identity_baseline if prior is None else identity_baseline & ~prior
     if radius <= 0 or not np.any(base_nonprior) or not np.any(seen):
-        return identity_baseline
-    prior_d = cv2.dilate(prior.astype(np.uint8), kernel) > 0
-    seen_indep = seen & ~prior_d
-    if not np.any(seen_indep):
-        return identity_baseline
+        return identity_baseline, 0, 0
     active_rows = np.flatnonzero(np.any(base_nonprior, axis=1))
     if active_rows.size == 0:
-        return identity_baseline
+        return identity_baseline, 0, 0
     base_rows = base_nonprior[active_rows]
     active_cols = np.flatnonzero(np.any(base_rows, axis=0))
     x0 = int(active_cols[0])
     x1 = int(active_cols[-1]) + 1
+    h, w = seen.shape
+    # A evidencia independente so e lida dentro da banda ao redor do
+    # bbox do base (± radius nas duas direcoes): o recorte evita
+    # copiar e dilatar a folha inteira — em grade A4 era a parte
+    # mais cara do ajuste.
+    sy0 = max(0, int(active_rows[0]) - radius)
+    sy1 = min(h, int(active_rows[-1]) + radius + 1)
+    sx0 = max(0, x0 - radius)
+    sx1 = min(w, x1 + radius)
+    seen_indep = seen[sy0:sy1, sx0:sx1]
+    if prior is not None:
+        # ~prior dilatado so difere de `seen` num raio do bbox do
+        # prior, recortado ainda mais para dentro da banda.
+        prior_box = _mask_bbox(prior)
+        if prior_box is not None:
+            pm = kernel.shape[0] // 2
+            py0 = max(sy0, prior_box[0] - pm)
+            py1 = min(sy1, prior_box[1] + pm)
+            px0 = max(sx0, prior_box[2] - pm)
+            px1 = min(sx1, prior_box[3] + pm)
+            if py1 > py0 and px1 > px0:
+                # A dilatacao le o prior com a margem do kernel ALEM da
+                # banda: tinta salva logo fora do recorte ainda projeta
+                # o halo dela para dentro.
+                wy0, wy1 = max(0, py0 - pm), min(h, py1 + pm)
+                wx0, wx1 = max(0, px0 - pm), min(w, px1 + pm)
+                prior_d = (
+                    cv2.dilate(prior[wy0:wy1, wx0:wx1].astype(np.uint8), kernel) > 0
+                )[py0 - wy0 : py1 - wy0, px0 - wx0 : px1 - wx0]
+                seen_indep = seen_indep.copy()
+                iy0, ix0 = py0 - sy0, px0 - sx0
+                seen_indep[iy0 : iy0 + (py1 - py0), ix0 : ix0 + (px1 - px0)] &= ~prior_d
+    if not np.any(seen_indep):
+        return identity_baseline, 0, 0
     packed_base_active = np.packbits(base_rows[:, x0:x1], axis=1)
-    h, w = seen_indep.shape
     row_band_mask = np.zeros(h + 2 * radius, dtype=bool)
     for dy in range(-radius, radius + 1):
         row_band_mask[active_rows + (radius + dy)] = True
@@ -356,7 +404,7 @@ def _align_identity_baseline(identity_baseline, seen, prior, radius, kernel):
     dst_x1 = dst_x0 + (src_x1 - src_x0)
     if valid_band_idx.size > 0 and src_x1 > src_x0:
         seen_band[valid_band_idx, dst_x0:dst_x1] = seen_indep[
-            valid_src_rows, src_x0:src_x1
+            valid_src_rows - sy0, src_x0 - sx0 : src_x1 - sx0
         ]
     span_w = x1 - x0
     packed_shifts = [
@@ -387,7 +435,7 @@ def _align_identity_baseline(identity_baseline, seen, prior, radius, kernel):
                 best_overlap = overlap
                 best_dy, best_dx = dy, dx
                 best_dist = dist
-    return _shift_bool_mask(identity_baseline, best_dy, best_dx)
+    return _shift_bool_mask(identity_baseline, best_dy, best_dx), best_dy, best_dx
 
 
 def _evaluate_page_identity(
@@ -399,6 +447,9 @@ def _evaluate_page_identity(
     identity_guard,
     hold_seen,
     threshold,
+    identity_gray=None,
+    identity_model=None,
+    identity_gray_ref=None,
 ):
     """Compara a passada com a referencia de identidade, fora do lock.
 
@@ -411,6 +462,9 @@ def _evaluate_page_identity(
     qualquer folha tipo caderno.
     """
     prior = identity_reference > 0
+    # Visibilidade do registro antes de a incerteza fotometrica tirar
+    # pixels dela: separa tinta coberta pela mao de tinta nao julgavel.
+    hand_visible = identity_visible
     has_baseline = (
         identity_baseline is not None
         and identity_baseline.shape == candidate.shape
@@ -418,6 +472,7 @@ def _evaluate_page_identity(
     )
     prior_px = int(np.count_nonzero(prior))
     kernel = np.ones((identity._IDENTITY_DILATION_KERNEL,) * 2, np.uint8)
+    radius = identity._IDENTITY_DILATION_KERNEL // 2
     if prior_px == 0:
         seen_any = candidate > threshold
         if has_baseline:
@@ -439,6 +494,10 @@ def _evaluate_page_identity(
         )
 
     seen = candidate > threshold
+    # Evidencia bruta antes da subtracao de pauta: a admissao de
+    # re-observacao la embaixo volta a incluir pixels removidos por
+    # ~aligned_baseline — mas so onde a aparencia prova escrita.
+    seen_raw = seen
     # Marca impressa nao carrega escrita: sai da referencia julgavel
     # E da evidencia vista (alinhada sub-pixel antes de subtrair).
     if has_baseline:
@@ -448,14 +507,131 @@ def _evaluate_page_identity(
             prior_excluded = None
         else:
             prior_excluded = prior & ~prior_judgeable
-            radius = identity._IDENTITY_DILATION_KERNEL // 2
-            aligned_baseline = _align_identity_baseline(
-                identity_baseline, seen, prior_judgeable, radius, kernel
+        aligned_baseline, baseline_dy, baseline_dx = _align_identity_baseline(
+            identity_baseline, seen, prior_judgeable, radius, kernel
+        )
+        # Pixel escuro na posicao salva DENTRO da margem impressa so e
+        # escrita se estiver mais escuro que a pior aparencia limpa do
+        # lugar — a referencia local do PageModel alinhada pelo mesmo
+        # deslocamento que a pauta mediu, normalizada pela iluminacao
+        # da passada. Escuro sem esse escurecimento local (a pauta
+        # vista na posicao do traco, ou traco tao escuro quanto a
+        # pauta) nao prova presenca nem ausencia: e ambiguo e sai do
+        # dominio julgavel como a pauta coberta — abstencao, nao voto.
+        baseline_d = cv2.dilate(aligned_baseline.astype(np.uint8), kernel) > 0
+        darker = None
+        if (
+            identity_gray is not None
+            and identity_model is not None
+            and identity_model.shape == candidate.shape
+        ):
+            # Todo consumidor do resultado mora num raio do prior:
+            # o ambiguo (subconjunto dele), a banda do ajuste de
+            # deslocamento e o re-observado deslocado — a regiao ja
+            # inclui esse raio, e o metodo completa com a margem
+            # interna (near + |shift|). Fora dela a comparacao nao
+            # pode provar nada — e numa folha A4 a varredura inteira
+            # custava mais que o resto da avaliacao.
+            prior_box = _mask_bbox(prior)
+            region = (
+                max(0, prior_box[0] - radius),
+                min(candidate.shape[0], prior_box[1] + radius),
+                max(0, prior_box[2] - radius),
+                min(candidate.shape[1], prior_box[3] + radius),
             )
-            seen = seen & ~aligned_baseline
+            # Uma normalizacao por passada: o ganho e a parte cara e
+            # as duas comparacoes fotometricas usam a mesma.
+            identity_norm = identity_model.normalize(identity_gray, identity_visible)
+            darker, _ = identity_model.darker_than_reference(
+                identity_norm,
+                dy=baseline_dy,
+                dx=baseline_dx,
+                near=radius,
+                visible=identity_visible,
+                region=region,
+                prenormalized=True,
+                with_expected=False,
+            )
+        ambiguous = None
+        ambiguous_px = 0
+        unsure = occluded = None
+        tone_obs = None
+        photometric = (
+            darker is not None
+            and identity_gray_ref is not None
+            and identity_gray_ref.shape == candidate.shape
+        )
+        if photometric and prior_excluded is not None:
+            # Com o tom da tinta salva conhecido, o traco sobre a pauta
+            # e julgavel como o resto: a fotometria abaixo o separa em
+            # presente, ausente provado ou ambiguo. Exclui-lo inteiro
+            # deixava a mesma folha mista sem containment (a evidencia
+            # admitida sem referencia) e a copia limpa presa no hold.
+            prior_judgeable = prior.copy()
+            prior_excluded = None
+        amb_prior = prior & baseline_d
+        if np.any(amb_prior):
+            ambiguous = amb_prior & seen_raw
+            if darker is not None:
+                ambiguous &= ~darker
+                if photometric:
+                    # Escuro na posicao salva sem escurecer a referencia
+                    # local so e indistinguivel quando alguma aparencia
+                    # limpa alcancavel reproduz o tom salvo. Tom salvo
+                    # distinto de todas: casar com ele prova presenca
+                    # (lapis de 70 colado a pauta de 40, que o `darker`
+                    # contra a pior vizinha nao admite), nao casar
+                    # prova ausencia (a pauta vista onde a tinta
+                    # estava).
+                    (
+                        distinct,
+                        tone_obs,
+                        unsure,
+                        occluded,
+                    ) = identity_model.saved_tone_evidence(
+                        identity_norm,
+                        identity_gray_ref,
+                        ambiguous,
+                        dy=baseline_dy,
+                        dx=baseline_dx,
+                        near=radius,
+                        visible=identity_visible,
+                        region=region,
+                        prenormalized=True,
+                        with_unsure=True,
+                        sampled=identity_sampled,
+                    )
+                    ambiguous &= ~(distinct | unsure)
+                    if np.any(unsure):
+                        # Veto que depende de amostra escondida pela mao
+                        # nao e ambiguidade de tom: a tinta conta como
+                        # escondida — fica no denominador dos pisos de
+                        # evidencia (fragmento nao restaura o resto) e
+                        # volta a ser julgada quando a mao sai.
+                        identity_visible = (
+                            ~unsure
+                            if identity_visible is None
+                            else (identity_visible & ~unsure)
+                        )
+            ambiguous_px = int(np.count_nonzero(ambiguous))
+            if ambiguous_px == 0:
+                ambiguous = None
+        if ambiguous is not None:
+            # Sem `&=`: prior_judgeable pode ser o proprio `prior` (tinta
+            # toda sobre a pauta) e mutar zerava a referencia inteira.
+            prior_judgeable = prior_judgeable & ~ambiguous
+            prior_excluded = (
+                ambiguous if prior_excluded is None else prior_excluded | ambiguous
+            )
     else:
         prior_judgeable = prior
         prior_excluded = None
+        baseline_dy = baseline_dx = 0
+        baseline_d = None
+        darker = None
+        ambiguous = None
+        ambiguous_px = 0
+        unsure = occluded = None
     # Dominio inspecionado da comparacao: a guarda do quad salvo,
     # cruzada com a visibilidade. Resposta de borda fora da area
     # util nao pode derrubar o containment nem rejeitar a pagina
@@ -465,6 +641,60 @@ def _evaluate_page_identity(
         inspected = identity_guard
     elif identity_guard is not None:
         inspected = inspected & identity_guard
+    admitted = None
+    if has_baseline:
+        # Pele da pauta vazada por alinhamento imperfeito entrava em
+        # `seen` e a dilatacao do recall a projetava sobre a escrita
+        # escondida — uma folha limpa do mesmo formulario herdava o
+        # desenho. Sem referencia local alinhada confiavel (darker
+        # ausente) a posicao so nao prova escrita: os pixels da
+        # margem impressa saem da evidencia em vez de valer pelo lugar.
+        seen = seen & ~baseline_d
+        if darker is not None:
+            # A evidencia que sustenta o match tem de distinguir
+            # escrita de pauta: o pixel exato da tinta salva
+            # (re-observado) ou pixel fora do alcance dilatado da
+            # marca impressa.
+            reobserved = prior
+            if baseline_dy != 0 or baseline_dx != 0:
+                # A pauta mediu o deslocamento da folha: a escrita
+                # salva reaparece no quadro deslocado junto com ela.
+                # Um traco fino colado a margem impressa que desceu
+                # 1 px cai dentro de baseline_d sem tocar a posicao
+                # salva — sem o quadro deslocado a evidencia dele
+                # era descartada e a mesma folha votava como nova.
+                # Os dois quadros valem: jitter de registro pode
+                # deixar o traco entre um e outro.
+                reobserved = prior | _shift_bool_mask(prior, baseline_dy, baseline_dx)
+            if np.any(darker):
+                # A pauta pode nao medir deslocamento nenhum: a
+                # marca impressa colada a tinta salva sai do ajuste
+                # por prior_d e nao sobra evidencia para transladar.
+                # A evidencia local (darker) nao pode ser forjada por
+                # pauta — alinhar o proprio traco salvo contra ela
+                # mede o deslocamento real que a pauta nao viu,
+                # mantendo "uma translacao por folha".
+                ink_aligned, ink_dy, ink_dx = _align_identity_baseline(
+                    prior, darker, None, radius, kernel
+                )
+                if ink_dy != 0 or ink_dx != 0:
+                    reobserved = reobserved | ink_aligned
+            # Posicao salva nao basta: dentro da margem impressa a
+            # admissao exige evidencia LOCAL de escrita — o pixel tem
+            # de estar mais escuro que a pior aparencia limpa que
+            # poderia ocupar o lugar (o `darker` medido acima; o
+            # `near` cobre a variacao de borda da marca). A pele da
+            # pauta ou a copia limpa mantem a aparencia esperada e
+            # ficam de fora; o traco escurece o local e volta a
+            # contar — inclusive o tracado inteiro sobre a pauta, que
+            # a subtracao de aligned tinha apagado da evidencia, e o
+            # traco claro ao lado da pauta, que a comparacao contra
+            # o proprio papel admite.
+            admitted = reobserved & seen_raw
+            if inspected is not None:
+                admitted &= inspected
+            admitted &= darker if tone_obs is None else (darker | tone_obs)
+            seen |= admitted
     # A guarda e estatica: o que ela exclui nao volta a aparecer e
     # sai do denominador da oclusao, que mede so o escondido pela
     # mao DESTA passada — senao a tinta sob a faixa segura a
@@ -475,6 +705,19 @@ def _evaluate_page_identity(
         else (prior_judgeable & identity_guard)
     )
     prior_guard_px = int(np.count_nonzero(prior_guard))
+    # Dominio sob a guarda SEM descontar ambiguidade nem pauta:
+    # o pixel ambiguo (escuro na posicao salva sem escurecer a
+    # referencia local) ou coberto pela marca impressa continua
+    # podendo conter a tinta — so nao e julgavel NESTA passada.
+    # Os pisos que autorizam um veredito medem contra o dominio
+    # completo: uma fracao julgavel minuscula nao pode chamar a
+    # si mesma de "evidencia completa".
+    if identity_guard is None:
+        prior_guard_full = prior
+        prior_guard_full_px = prior_px
+    else:
+        prior_guard_full = prior & identity_guard
+        prior_guard_full_px = int(np.count_nonzero(prior_guard_full))
     # So pixel realmente amostrado pode ser julgado: a faixa que o
     # registro preencheu de zeros entra em ~visible como se fosse
     # mao, mas nada nasce ali — contar como escondido adiaria a
@@ -496,6 +739,43 @@ def _evaluate_page_identity(
         prior_guard if identity_sampled is None else (prior_guard & identity_sampled)
     )
     prior_domain_px = int(np.count_nonzero(prior_domain))
+    # Tinta no dominio cujo veto limpo depende de amostra escondida
+    # pela mao: nao julgavel nesta passada, mas pode ser a tinta salva.
+    # Amostra fora da pegada do registro nao conta: a pose nao muda
+    # sozinha, e o adiamento geometrico segue sujeito ao timeout.
+    occluded_domain_px = (
+        0
+        if occluded is None or not np.any(occluded)
+        else int(np.count_nonzero(occluded & prior_domain))
+    )
+    unsure_in_domain = unsure is not None and bool(np.any(unsure & prior_domain))
+    # Incerteza geometrica (recorte) somada a tinta coberta direto pela
+    # mao no dominio: descobrir essa tinta pode bastar para o piso, e
+    # o prazo nao pode apagar o desenho antes de a mao sair.
+    uncovered_px = (
+        0
+        if not unsure_in_domain or hand_visible is None
+        else int(np.count_nonzero(prior_domain & ~hand_visible & ~unsure))
+    )
+    # Hold anterior so persiste abaixo do piso enquanto a mao ainda
+    # cobre tinta do dominio: veto so geometrico (recorte) com a mao
+    # fora nao e oclusao, e o prazo volta a correr nessa pose.
+    hand_hidden = hand_visible is not None and bool(
+        np.any(prior_domain & ~hand_visible)
+    )
+    if (
+        not hand_hidden
+        and unsure_in_domain
+        and hand_visible is not None
+        and (baseline_dy or baseline_dx)
+    ):
+        # A tinta inconclusiva tambem e comparada na posicao deslocada
+        # com a pauta: a mao ali (dentro da pegada) ainda e oclusao.
+        shifted = _shift_bool_mask(unsure & prior_domain, baseline_dy, baseline_dx)
+        shifted &= ~hand_visible
+        if identity_sampled is not None:
+            shifted &= identity_sampled
+        hand_hidden = bool(np.any(shifted))
     prior_eval = (
         prior_domain if identity_visible is None else (prior_domain & identity_visible)
     )
@@ -506,7 +786,9 @@ def _evaluate_page_identity(
     # provar.
     ambig_visible_px = (
         0
-        if prior_excluded is None or identity_visible is None
+        if prior_excluded is None
+        or identity_visible is None
+        or not np.any(prior_excluded)
         else int(np.count_nonzero(prior_excluded & identity_visible))
     )
     if identity_sampled is not None and usable_px < max(
@@ -520,8 +802,14 @@ def _evaluate_page_identity(
         # limitado ate o timeout.
         return (False, None, None, prior_px, 0, True, "no_overlap", False)
     if identity_visible is not None and prior_domain_px > 0:
+        # Gate precoce de "evidencia suficiente para avaliar", nao de
+        # restauracao: a tinta ambigua (sobre pauta) visivel nao pode
+        # carregar atribuicao, entao desconta do bound INTEIRO. Um
+        # match na fatia clara ainda passa pelo piso estrito la embaixo
+        # — mas se entrar, pode estabelecer o hold de oclusao em vez de
+        # queimar a quarentena adiando ate o timeout.
         min_eval_px = min(
-            prior_guard_px,
+            prior_guard_full_px,
             max(
                 1,
                 max(
@@ -532,12 +820,18 @@ def _evaluate_page_identity(
             ),
         )
         if prior_eval_px < min_eval_px:
-            # Tinta anterior quase toda coberta pela mao: decidir
-            # agora seria condenar a pagina pelo que a passada nao
-            # ve. Adia; a referencia fica para a proxima passada.
-            # Uma vez iniciado o hold por match parcial, a oclusao
-            # apertando nao e evidencia nova: queimar o prazo
-            # apagaria o desenho que o hold existe para proteger.
+            # Tinta anterior quase toda coberta pela mao — ou
+            # indistinguivel por aparencia dentro da margem da
+            # pauta: decidir agora seria condenar a pagina pelo que
+            # a passada nao ve. Adia; a referencia fica para a
+            # proxima passada. Uma vez iniciado o hold por match
+            # parcial, a oclusao apertando nao e evidencia nova:
+            # queimar o prazo apagaria o desenho que o hold existe
+            # para proteger. Ambiguidade fotometrica vale o mesmo:
+            # o escuro indistinguivel pode ser a tinta salva —
+            # estabelece o hold em vez de emprestar o hold_seen. Idem
+            # a tinta bloqueada por amostra escondida: a mao sobre a
+            # regra projetada nao pode queimar o prazo.
             return (
                 False,
                 None,
@@ -546,7 +840,10 @@ def _evaluate_page_identity(
                 prior_eval_px,
                 True,
                 "occlusion",
-                hold_seen,
+                (hold_seen and (hand_hidden or not unsure_in_domain))
+                or ambiguous_px > 0
+                or occluded_domain_px > 0
+                or (uncovered_px > 0 and prior_eval_px + uncovered_px >= min_eval_px),
             )
     if prior_eval_px == 0:
         unobserved_px = 0 if identity_sampled is None else usable_total_px - usable_px
@@ -571,8 +868,79 @@ def _evaluate_page_identity(
         seen_any = seen
         if inspected is not None:
             seen_any = seen_any & inspected
-        keep_page = bool(not np.any(seen_any))
-        recall = 1.0 if keep_page else 0.0
+        ambiguous_seen = ambiguous is not None and bool(
+            np.any(ambiguous if inspected is None else (ambiguous & inspected))
+        )
+        # Dominio julgavel: a tinta salva sob a guarda e na pegada
+        # amostrada. Faixa de borda e faixa nao amostrada nunca
+        # reaparecem — nao contam como escondidas para o hold.
+        prior_dom = prior_guard_full
+        if identity_sampled is not None:
+            prior_dom = prior_dom & identity_sampled
+        prior_dom_px = int(np.count_nonzero(prior_dom))
+        prior_vis = prior_dom
+        if identity_visible is not None:
+            prior_vis = prior_vis & identity_visible
+        prior_vis_px = int(np.count_nonzero(prior_vis))
+        containment = None
+        if admitted is not None and np.any(admitted) and prior_vis_px > 0:
+            # O dominio julgavel esvaziou por ambiguidade, mas a
+            # aparencia provou escrita em posicoes salvas: restaura so
+            # se essa evidencia cobre a tinta visivel (recall) e
+            # explica a tinta vista (containment) — um fragmento
+            # coincidente numa folha com outro desenho nao basta.
+            # Evidencia insuficiente e inconclusiva, nao voto.
+            admitted_d = cv2.dilate(admitted.astype(np.uint8), kernel) > 0
+            recall = float(np.count_nonzero(prior_vis & admitted_d)) / prior_vis_px
+            seen_any_px = int(np.count_nonzero(seen_any))
+            prior_vis_d = cv2.dilate(prior_vis.astype(np.uint8), kernel) > 0
+            containment = (
+                0.0
+                if seen_any_px == 0
+                else float(np.count_nonzero(seen_any & prior_vis_d)) / seen_any_px
+            )
+            if not (
+                recall >= identity._PAGE_IDENTITY_MIN_RECALL
+                and containment >= identity._PAGE_IDENTITY_MIN_CONTAINMENT
+            ):
+                # Hold (prazo congelado) so quando parte da tinta salva
+                # esta escondida e ainda pode reaparecer. Com ela toda
+                # a vista, outra passada igual nao traz evidencia nova:
+                # o adiamento queima a quarentena e termina.
+                return (
+                    False,
+                    recall,
+                    containment,
+                    prior_px,
+                    0,
+                    True,
+                    "occlusion",
+                    prior_vis_px < prior_dom_px,
+                )
+            keep_page = True
+        elif ambiguous_seen:
+            # Posicao salva escura dentro da margem sem escurecer a
+            # referencia local: pode ser a pauta ou a tinta — a
+            # passada nao distingue. Nem prova nem refuta: INCONCLUSIVO
+            # com hold — a referencia fica protegida em vez de virar
+            # match posicional (heranca) ou voto negativo (perda). Tinta
+            # nova em outro lugar da folha nao prova que a salva sumiu.
+            return (
+                False,
+                None,
+                None,
+                prior_px,
+                0,
+                True,
+                "occlusion",
+                True,
+            )
+        elif np.any(seen_any):
+            keep_page = False
+            recall = 0.0
+        else:
+            keep_page = True
+            recall = 1.0
         hidden_domain = None
         if identity_visible is not None:
             hidden = ~identity_visible
@@ -590,7 +958,7 @@ def _evaluate_page_identity(
             return (
                 keep_page,
                 recall,
-                None,
+                containment,
                 prior_px,
                 prior_eval_px,
                 True,
@@ -600,7 +968,7 @@ def _evaluate_page_identity(
         return (
             keep_page,
             recall,
-            None,
+            containment,
             prior_px,
             prior_eval_px,
             False,
@@ -609,26 +977,87 @@ def _evaluate_page_identity(
         )
     if inspected is not None:
         seen = seen & inspected
-    seen_d = cv2.dilate(seen.astype(np.uint8), kernel) > 0
-    prior_d = cv2.dilate(prior_eval.astype(np.uint8), kernel) > 0
-    recall = np.count_nonzero(prior_eval & seen_d) / prior_eval_px
+    # recall e containment medem sobreposicao num raio da referencia:
+    # todo o trabalho mora no bbox do prior_eval + a margem do kernel.
+    # Dilatar a grade inteira dominava a avaliacao numa folha A4.
+    pe_box = _mask_bbox(prior_eval)
+    pe_y0 = max(0, pe_box[0] - radius)
+    pe_y1 = min(candidate.shape[0], pe_box[1] + radius)
+    pe_x0 = max(0, pe_box[2] - radius)
+    pe_x1 = min(candidate.shape[1], pe_box[3] + radius)
+    seen_d = cv2.dilate(seen[pe_y0:pe_y1, pe_x0:pe_x1].astype(np.uint8), kernel) > 0
+    recall = (
+        np.count_nonzero(prior_eval[pe_y0:pe_y1, pe_x0:pe_x1] & seen_d) / prior_eval_px
+    )
+    prior_d = (
+        cv2.dilate(prior_eval[pe_y0:pe_y1, pe_x0:pe_x1].astype(np.uint8), kernel) > 0
+    )
     seen_px = int(np.count_nonzero(seen))
-    containment = 0.0 if seen_px == 0 else (np.count_nonzero(seen & prior_d) / seen_px)
+    containment = (
+        0.0
+        if seen_px == 0
+        else (np.count_nonzero(seen[pe_y0:pe_y1, pe_x0:pe_x1] & prior_d) / seen_px)
+    )
     keep_page = bool(
         recall >= identity._PAGE_IDENTITY_MIN_RECALL
         and containment >= identity._PAGE_IDENTITY_MIN_CONTAINMENT
     )
-    if keep_page and prior_domain_px < min(
-        prior_guard_px,
-        max(
-            1,
+    # O desconto de ambiguidade abriu a banda para a fatia clara
+    # tentar match e entrar em hold — mas um mismatch medido com
+    # evidencia abaixo do piso SEM desconto nao e prova de troca:
+    # tinta nova na fatia vista ou a mao cobrindo o resto explicam
+    # a divergencia sem a folha ter mudado. Estabelece o hold de
+    # oclusao em vez de votar — como o match parcial, o mismatch
+    # coberto tambem segura a quarentena: enquanto a evidencia nao
+    # desobstrui, o timeout nao pode destruir a referencia.
+    if (
+        not keep_page
+        and identity_visible is not None
+        and prior_domain_px > 0
+        and prior_eval_px
+        < min(
+            prior_guard_full_px,
             max(
-                identity._IDENTITY_MIN_VISIBLE_PX,
-                int(identity._PAGE_IDENTITY_MIN_REFERENCE_FRACTION * prior_guard_px),
-            )
-            - ambig_visible_px,
-        ),
+                1,
+                max(
+                    identity._IDENTITY_MIN_VISIBLE_PX,
+                    int(identity._IDENTITY_MIN_VISIBLE_FRACTION * prior_domain_px),
+                ),
+            ),
+        )
     ):
+        return (
+            False,
+            recall,
+            containment,
+            prior_px,
+            prior_eval_px,
+            True,
+            "occlusion",
+            True,
+        )
+    coverage_bound = max(
+        1,
+        max(
+            identity._IDENTITY_MIN_VISIBLE_PX - ambig_visible_px,
+            int(identity._PAGE_IDENTITY_MIN_REFERENCE_FRACTION * prior_guard_px),
+        ),
+    )
+    # Sem o rastreio de baseline, o piso e o absoluto da
+    # referencia classica: tinta menor que a massa minima nao
+    # prova a folha. Com o rastreio ativo — PageModel ligado,
+    # mesmo em folha em branco onde o baseline capturado veio
+    # vazio — a comparacao ja esta ancorada e o piso nao pode
+    # exigir mais do que a massa julgavel inteira: senao uma
+    # marca de 20 px deferia ate o timeout e o modelo novo
+    # aprenderia o traco dela como pagina.
+    baseline_tracked = (
+        identity_baseline is not None and identity_baseline.shape == candidate.shape
+    )
+    coverage_floor = (
+        min(prior_guard_px, coverage_bound) if baseline_tracked else coverage_bound
+    )
+    if keep_page and prior_domain_px < coverage_floor:
         # Fragmento: a pegada alcancou so uma fatia da referencia
         # julgavel — restaurar o resto seria aceitar como prova o
         # que a passada nunca comparou. Inconclusivo geometrico:
@@ -643,17 +1072,7 @@ def _evaluate_page_identity(
             "no_overlap",
             False,
         )
-    if keep_page and prior_eval_px < min(
-        prior_guard_px,
-        max(
-            1,
-            max(
-                identity._IDENTITY_MIN_VISIBLE_PX,
-                int(identity._PAGE_IDENTITY_MIN_REFERENCE_FRACTION * prior_guard_px),
-            )
-            - ambig_visible_px,
-        ),
-    ):
+    if keep_page and prior_eval_px < coverage_floor:
         # A geometria alcancou a referencia, mas a mao cobre a
         # maior parte da tinta julgavel: o match na fatia visivel
         # nao distingue a mesma folha de uma substituta cujas
@@ -747,6 +1166,8 @@ class _Pass:
     identity_geometry_registered: bool = False
     identity_pending: bool = False
     identity_owned: bool = False
+    pm_rezero: bool = False
+    pm_rezero_applied: bool = False
     keep_page: bool = False
     quarantine_reason: object = None
     quarantine_frames: int = 0
@@ -874,6 +1295,14 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._pm_confirm_obs = page_model._CONFIRM_OBS
         self._pm_baseline_ink = None
         self._identity_baseline = None
+        # Re-zero manual (tecla z, #130) pendente, e o ultimo estado
+        # publicado do PageModel: (epoca do modelo, fracao semeada,
+        # pixels visiveis pendentes).
+        self._pm_rezero_requested = False
+        # Semeadura pos re-zero em curso: segura o descanso ate o modelo
+        # novo semear, senao a pagina parada dorme sem referencia.
+        self._pm_rezero_seeding = False
+        self._pm_status = None
         # Relogio monotonico injetavel: o padrao e o do processo;
         # replays com pump() passam o relogio da cena.
         self._clock = clock
@@ -946,6 +1375,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._canvas_epoch = 0
         self._identity_reference = None
         self._identity_reference_corners = None
+        self._identity_gray_ref = None
         self._identity_recovery_requested = False
         self._identity_defer_count = 0
         self._identity_switch_votes = 0
@@ -1040,6 +1470,14 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._identity_defer_count = 0
             self._identity_switch_votes = 0
             self._identity_hold_seen = False
+            # Fonte/folha nova (sem identidade preservada) cancela o
+            # re-zero pendente: o pedido era sobre a folha anterior. Com
+            # identidade preservada o pedido sobrevive: fica bloqueado
+            # (p.identity_owned) ate a identidade decidir, e so cancela
+            # se a folha for outra.
+            if not preserve_identity:
+                self._pm_rezero_requested = False
+                self._pm_rezero_seeding = False
             self._guard_memo.clear()
             self._previous_corners = None
             self._paper_ref = None
@@ -1064,6 +1502,18 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         if self._pm_baseline_ink is None
                         else self._pm_baseline_ink.copy()
                     )
+                    # Nivel de cinza da tinta salva (normalizado): o
+                    # que separa "a pauta vista na posicao" de "a
+                    # tinta escondida na pauta" — mesma aparencia do
+                    # modelo, mesma base da comparacao local. So a
+                    # ultima observacao VALIDA de cada pixel: o tom da
+                    # mao que cobria o traco na ultima passada nao e o
+                    # da tinta (NaN onde nunca foi visto).
+                    self._identity_gray_ref = (
+                        None
+                        if self._page_model is None
+                        else self._page_model.observed_normalized_gray.copy()
+                    )
                 # Toda geracao preservada zera o acumulador, com ou
                 # sem captura nova: a referencia pendente e a unica
                 # dona do desenho anterior — tinta confirmada numa
@@ -1077,6 +1527,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             else:
                 self._identity_reference = None
                 self._identity_reference_corners = None
+                self._identity_gray_ref = None
                 self._identity_baseline = None
                 self._pm_baseline_ink = None
                 self._pm_reset_seq += 1
@@ -1146,6 +1597,34 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         if self._config.border_guard_px == 0:
             return None
         return registration._observed_footprint(anchor, corners, live_corners, shape)
+
+    def _identity_gray(self, p):
+        """Gray da passada na grade ancora, pelo MESMO warp que
+        produziu registered_prob. A comparacao de aparencia da
+        re-observacao (pauta limpa vs traco que a escurece) le essa
+        luminancia — a prob do modelo de tinta nao distingue
+        impressao de escrita quando as duas sao escuras."""
+        gray = (
+            p.warped
+            if p.warped.ndim == 2
+            else cv2.cvtColor(p.warped, cv2.COLOR_BGR2GRAY)
+        )
+        if p.anchor is None or p.registration_corners is None:
+            return gray
+        matrix = registration._registration_matrix(
+            p.anchor, p.registration_corners, p.prob.shape
+        )
+        if registration._registration_is_identity(matrix):
+            return gray
+        # Papel (255) na borda: o padding nunca pode parecer tinta
+        # mais escura que a pauta no teste de aparencia.
+        return cv2.warpPerspective(
+            gray,
+            matrix,
+            (p.prob.shape[1], p.prob.shape[0]),
+            flags=cv2.INTER_LINEAR,
+            borderValue=255,
+        )
 
     def _register_into(
         self, anchor, reg_corners, prob, visible, visible_cam, pass_corners=None
@@ -1344,6 +1823,41 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._confirm_masked_skips = 0
         self._awaiting_clear_post_exit = bool(value)
 
+    def rezero_baseline(self):
+        """Agenda o re-zero da referencia (InkConfig.page_model, #130).
+
+        A proxima passada que vota fora da recuperacao de identidade
+        zera o canvas e o PageModel: o conteudo a vista passa a ser a
+        referencia, semeada de novo. Devolve False sem page_model.
+        """
+        if not self._config.page_model:
+            return False
+        with self._condition:
+            if self._stopped:
+                return False
+            self._pm_rezero_requested = True
+            self._quiet_passes = 0
+            self._still_passes = 0
+            self._condition.notify_all()
+            return True
+
+    def baseline_state(self):
+        """Prontidao da referencia inicial para a interface (#130)."""
+        if not self._config.page_model:
+            return InkBaselineState(False, False, 0.0, 0, "disabled")
+        with self._condition:
+            if self._pm_rezero_requested:
+                return InkBaselineState(True, False, 0.0, 0, "recapturing")
+            status = self._pm_status
+            if status is None or status[0] != (self._canvas_epoch, self._pm_reset_seq):
+                return InkBaselineState(True, False, 0.0, 0, "seeding")
+            _, fraction, pending_px = status
+            ready = fraction > 0.0
+            phase = (
+                "seeding" if not ready else "ready_partial" if pending_px else "ready"
+            )
+            return InkBaselineState(True, ready, fraction, pending_px, phase)
+
     def set_hand_presence(self, present, moved=False):
         """Alimenta a porta de ociosidade: True, False ou None.
 
@@ -1410,6 +1924,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         ):
             return False
         if self._identity_recovery_requested and self._identity_reference is not None:
+            return False
+        if self._pm_rezero_requested or self._pm_rezero_seeding:
             return False
         if (
             self._generation_passes < _REST_MIN_GENERATION_PASSES
@@ -2308,6 +2824,9 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     self._cached_border_guard(p.prob.shape, p.identity_corners_snap),
                     p.identity_hold_seen_snap,
                     self._accumulator.threshold,
+                    self._identity_gray(p),
+                    self._page_model,
+                    self._identity_gray_ref,
                 ),
             )
 
@@ -2360,11 +2879,23 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         with self._condition:
             if self._stopped:
                 return False
-            if p.generation != self._generation or p.pm_epoch != (
-                self._canvas_epoch,
-                self._pm_reset_seq,
+            step = 1 if p.pm_rezero_applied else 0
+            if (
+                p.generation != self._generation
+                or p.pm_epoch != (self._canvas_epoch + step, self._pm_reset_seq + step)
+                or (p.pm_rezero_applied and not self._pm_rezero_requested)
             ):
                 return True
+            if p.pm_rezero_applied:
+                # Commit do re-zero (#130): canvas e modelo novos juntos,
+                # canvas vazio publicado nesta passada.
+                self._pm_rezero_requested = False
+                self._pm_rezero_seeding = True
+                self._accumulator.reset()
+                self._canvas_epoch += 1
+                self._pm_reset_seq += 1
+                self._pm_baseline_ink = None
+                p.force_publish = True
             delta_job = self._pass_vote_and_publish(p)
             self._condition.notify_all()
         if delta_job is not None:
@@ -2419,6 +2950,9 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         self._cached_border_guard(p.prob.shape, identity_corners),
                         self._identity_hold_seen,
                         self._accumulator.threshold,
+                        self._identity_gray(p),
+                        self._page_model,
+                        self._identity_gray_ref,
                     )
                 (
                     p.keep_page,
@@ -2497,6 +3031,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     # Perda de lock, nao voto de pagina nova.
                     # A proxima passada estabelece outra ancora.
                     self._accumulator.reset()
+                    self._pm_rezero_requested = False
+                    self._pm_rezero_seeding = False
                     self._canvas_epoch += 1
                     self._page_model = None
                     self._pm_epoch = None
@@ -2519,6 +3055,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     self._still_passes = 0
                 elif not p.keep_page:
                     self._accumulator.reset()
+                    self._pm_rezero_requested = False
+                    self._pm_rezero_seeding = False
                     self._canvas_epoch += 1
                     self._page_model = None
                     self._pm_epoch = None
@@ -2541,6 +3079,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 self._identity_hold_seen = False
                 self._identity_reference = None
                 self._identity_reference_corners = None
+                self._identity_gray_ref = None
                 self._identity_baseline = None
                 self._identity_recovery_requested = False
                 self._identity_defer_count = 0
@@ -2730,6 +3269,16 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # None para o avaliador nao projetar GT por uma
             # geometria que nunca chegou ao canvas.
             p.last_reg = None
+        # Re-zero (#130): so candidata aqui. A troca de modelo e o clear
+        # do canvas dependem de a passada ter papel utilizavel, o que so
+        # se sabe depois da mascara de papel (fora do lock) — ver
+        # _pass_paper_and_page_model e o commit em _pass_commit.
+        p.pm_rezero = bool(
+            self._pm_rezero_requested
+            and self._config.page_model
+            and p.pass_voted
+            and not p.identity_owned
+        )
         p.pm_epoch = (self._canvas_epoch, self._pm_reset_seq)
         if self._config.page_model and p.pass_voted:
             confirmed = self._accumulator._confirmed
@@ -2903,6 +3452,51 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 if p.visible is None
                 else (p.visible if pm_coverage is None else (p.visible & pm_coverage))
             )
+            pm_sampled = p.sampled
+            if pm_sampled is None and p.used_registered_prob:
+                # A pegada nao depende da guarda de borda: sem ela
+                # _pass_sampled devolve None e o padding do registro
+                # semearia a referencia de pagina limpa em regiao que
+                # a passada nunca observou. Quando ha correcao afim
+                # aplicada a evidencia, a pegada calculada aqui segue
+                # o mesmo warp_back (com a guarda ligada isso ja foi
+                # feito em _pass_register_motion_coverage). So na
+                # passada REGISTRADA: quando o voto sai na geometria
+                # propria (primeira passada ou folha nova apos troca)
+                # nao ha registro nem padding — recomputar a pegada
+                # com a ancora velha podaria pixels validos da folha
+                # nova na primeira observacao de baseline dela.
+                pm_sampled = registration._observed_footprint(
+                    p.anchor, p.registration_corners, p.corners, p.prob.shape
+                )
+                if p.motion_decision == "correct" and p.used_registered_prob:
+                    pm_sampled = (
+                        p.motion_fix.warp_back(
+                            np.ones(p.prob.shape, np.uint8)
+                            if pm_sampled is None
+                            else pm_sampled.astype(np.uint8),
+                            nearest=True,
+                        )
+                        > 0
+                    )
+            if pm_sampled is not None:
+                # O PageModel aprende so onde a passada amostrou de
+                # verdade: o padding do registro nao pode semear a
+                # referencia de pagina limpa em regioes que o
+                # acumulador rejeita pela pegada.
+                obs_visible = (
+                    pm_sampled if obs_visible is None else (obs_visible & pm_sampled)
+                )
+            # Papel coberto agora pela mao (mascara fisica), ainda sem
+            # referencia: conta para a prontidao. Pixel visivel que a
+            # guarda recusa como papel (logo escuro, impressao densa)
+            # nunca semeia e fica de fora — esperar por ele seria
+            # esperar para sempre (o "fantasma" de inicializacao).
+            hand_covered = None
+            if p.visible is not None:
+                hand_covered = (
+                    ~p.visible if pm_coverage is None else pm_coverage & ~p.visible
+                )
             if self._config.paper_guard and p.warped.dtype == np.uint8:
                 exposed_mask = pm.exposed(
                     gray,
@@ -2930,6 +3524,18 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 obs_visible = (
                     p.paper_ok if obs_visible is None else (obs_visible & p.paper_ok)
                 )
+            if p.pm_rezero and (obs_visible is None or bool(np.any(obs_visible))):
+                # Papel utilizavel nesta passada: o modelo recomeca aqui e
+                # o canvas e zerado no commit. Sem papel (sombra, mao,
+                # guarda rejeitando tudo) o pedido segue pendente e o
+                # canvas atual fica intacto.
+                pm = page_model.PageModel(p.prob.shape)
+                self._page_model = pm
+                p.pm_epoch = (p.pm_epoch[0] + 1, p.pm_epoch[1] + 1)
+                self._pm_epoch = p.pm_epoch
+                p.next_baseline_ink = np.zeros(p.prob.shape, dtype=bool)
+                p.pm_confirm_obs = pm.confirm_obs
+                p.pm_rezero_applied = True
             pm.observe(
                 gray,
                 visible=obs_visible,
@@ -2948,7 +3554,13 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             p.visible = pm.admissible(p.visible)
             obs_admissible = pm.admissible(obs_visible)
             confirmed_ink = p.confirmed_ink
-            novel_mask = pm.novel(gray)
+            # `returned` so interessa onde ha traco confirmado sobre
+            # impressao semeada (raro): sem candidato, o custo e o de sempre.
+            erase_candidates = confirmed_ink & p.next_baseline_ink & pm.seeded
+            if np.any(erase_candidates):
+                novel_mask, returned_mask = pm.appearance(gray)
+            else:
+                novel_mask, returned_mask = pm.novel(gray), None
             suppress = pm.seeded & ~novel_mask & ~confirmed_ink
             voting_px = p.visible & (p.prob > self._accumulator.threshold)
             p.reg_info["pm_seeded_frac"] = pm.seeded_fraction
@@ -2957,6 +3569,13 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             )
             p.reg_info["pm_suppressed_px"] = int(np.count_nonzero(suppress & voting_px))
             p.reg_info["pm_pending_px"] = int(np.count_nonzero(pm.pending(obs_visible)))
+            # Sem referencia e semeavel: o que a mao cobre agora mais o
+            # visivel ainda em semeadura. E o que a interface precisa para
+            # nao dizer "pronto" antes de a mao liberar uma regiao.
+            unseeded_px = int(np.count_nonzero(pm.seeding_pending(obs_visible)))
+            if hand_covered is not None:
+                unseeded_px += int(np.count_nonzero(hand_covered & ~pm.seeded))
+            p.reg_info["pm_unseeded_px"] = unseeded_px
             baseline_seen = (
                 suppress & obs_admissible & (p.prob > self._accumulator.threshold)
             )
@@ -2967,8 +3586,19 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             )
             if np.any(baseline_erased):
                 p.next_baseline_ink[baseline_erased] = False
-            if np.any(suppress):
-                p.prob = np.where(suppress, 0.0, p.prob).astype(np.float32)
+            # Traco confirmado sobre impresso que voltou a aparencia
+            # semeada (apagado): a impressao ainda pontua como tinta e o
+            # removedor nunca veria ausencia. Zera a evidencia ali para
+            # que a remocao conte. Usa a tolerancia APERTADA de
+            # PageModel.returned, nao ~novel: traco que so perdeu
+            # contraste (reflexo) segue visto como tinta. As salvaguardas
+            # do acumulador (visibilidade, testemunha, passadas
+            # consecutivas) seguem.
+            zero = suppress
+            if returned_mask is not None:
+                zero = zero | (erase_candidates & returned_mask & obs_admissible)
+            if np.any(zero):
+                p.prob = np.where(zero, 0.0, p.prob).astype(np.float32)
 
     def _pass_vote_and_publish(self, p):
         """Voto, acumulador e publicacao sob _condition: comita estado,
@@ -2987,6 +3617,18 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._pm_confirm_obs = p.pm_confirm_obs
         if p.next_baseline_ink is not None:
             self._pm_baseline_ink = p.next_baseline_ink
+        if self._config.page_model and "pm_seeded_frac" in p.reg_info:
+            self._pm_status = (
+                p.pm_epoch,
+                float(p.reg_info["pm_seeded_frac"]),
+                int(p.reg_info.get("pm_unseeded_px", 0)),
+            )
+            if (
+                self._pm_rezero_seeding
+                and p.pm_seeding_remaining == 0
+                and p.reg_info["pm_seeded_frac"] > 0.0
+            ):
+                self._pm_rezero_seeding = False
         guard_corners = (
             self._anchor_corners if self._anchor_corners is not None else p.corners
         )
