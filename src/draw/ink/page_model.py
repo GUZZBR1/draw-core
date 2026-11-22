@@ -80,6 +80,12 @@ _UPDATE_RATE = 0.125
 # decisao delta vs razao vs entrada `division_normalize` e medicao,
 # nao chute: pendente de clipes reais.
 _NOVEL_DELTA = 24.0
+# Tolerancia de "voltou a referencia", em luminancia normalizada. Bem
+# mais apertada que _NOVEL_DELTA de proposito: histerese de limiar duplo
+# (Rosin, BMVC 1995) — acima de NOVEL e conteudo novo, abaixo de RETURN
+# e o fundo de volta, e entre os dois e incerto e nao decide nada. Sem
+# isso um traco que perdeu contraste (reflexo) pareceria apagado.
+_RETURN_TOL = 8.0
 
 
 def _block_fraction(mask, block, raw=False):
@@ -488,6 +494,16 @@ class PageModel:
             return self._seeded.copy()
         return self._seeded & np.asarray(visible, dtype=bool)
 
+    def _normalized(self, gray, visible=None):
+        gray = np.asarray(gray, dtype=np.float32)
+        if gray.shape != self.shape:
+            raise ValueError(f"gray na grade {gray.shape}, modelo na {self.shape}")
+        vis = self._last_visible if visible is None else visible
+        gain = (
+            self._estimate_gain(gray, visible=vis)[0] if self._last_chroma_ok else 1.0
+        )
+        return gray if abs(gain - 1.0) <= 1e-4 else (gray / np.float32(gain))
+
     def novel(self, gray, visible=None):
         """Pixels mais escuros que a referencia alem de `novel_delta`.
 
@@ -495,17 +511,56 @@ class PageModel:
         iluminacao do papel exposto: escurecimento global da folha nao
         transforma marca impressa ja semeada em tinta nova.
         """
-        gray = np.asarray(gray, dtype=np.float32)
-        if gray.shape != self.shape:
-            raise ValueError(f"gray na grade {gray.shape}, modelo na {self.shape}")
+        norm_gray = self._normalized(gray, visible)
         if not self._has_seeded:
             return np.zeros(self.shape, dtype=bool)
-        vis = self._last_visible if visible is None else visible
-        gain = (
-            self._estimate_gain(gray, visible=vis)[0] if self._last_chroma_ok else 1.0
-        )
-        norm_gray = gray if abs(gain - 1.0) <= 1e-4 else (gray / np.float32(gain))
         return self._seeded & (self._norm_ref - norm_gray > self.novel_delta)
+
+    def appearance(self, gray, visible=None):
+        """(novel, returned) numa unica normalizacao de iluminacao.
+
+        A estimativa de ganho e o custo dominante de ambos; o caminho
+        quente da trabalhadora precisa dos dois por passada.
+        """
+        norm_gray = self._normalized(gray, visible)
+        if not self._has_seeded:
+            none = np.zeros(self.shape, dtype=bool)
+            return none, none.copy()
+        diff = self._norm_ref - norm_gray
+        return (
+            self._seeded & (diff > self.novel_delta),
+            self._seeded & (np.abs(diff) <= _RETURN_TOL),
+        )
+
+    def returned(self, gray, visible=None):
+        """Pixels de volta a aparencia semeada, dentro de `_RETURN_TOL`.
+
+        E o outro lado da histerese de `novel`: so quem casa com a
+        referencia de perto e evidencia de ausencia. Pixel entre as duas
+        tolerancias (traco com contraste reduzido) nao e nem novo nem
+        de volta.
+        """
+        norm_gray = self._normalized(gray, visible)
+        if not self._has_seeded:
+            return np.zeros(self.shape, dtype=bool)
+        return self._seeded & (np.abs(self._norm_ref - norm_gray) <= _RETURN_TOL)
+
+    def seeding_pending(self, visible=None):
+        """Visivel sem referencia em bloco com semeadura em curso.
+
+        So blocos que ja contam observacoes (0 < streak < confirm_obs):
+        bloco com menos de `_SEEN_FRACTION` de papel visivel nunca conta
+        e nunca semeia — esperar por ele seria esperar para sempre. E o
+        que a prontidao precisa: "falta pouco", nao "falta tudo".
+        """
+        if visible is None:
+            visible = np.ones(self.shape, dtype=bool)
+        active = _expand(
+            (self._streak > 0) & (self._streak < self.confirm_obs),
+            self.shape,
+            self.block,
+        )
+        return ~self._seeded & np.asarray(visible, dtype=bool) & active
 
     def pending(self, visible=None):
         """Pixels visiveis ainda sem referencia (diagnostico/telemetria)."""

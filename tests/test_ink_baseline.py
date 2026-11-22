@@ -212,32 +212,178 @@ def test_new_generation_cancels_a_pending_rezero(monkeypatch):
         worker.stop()
 
 
+def _scribble(image, value=INK, rows=range(40, 80, 8), cols=(10, 110)):
+    """Rabisco de tracos finos (2 px, passo 8): o guarda de papel trata mancha
+    escura densa na janela de 32 px como mao/sombra (passo 4 ou bloco solido
+    nunca confirma), entao a testemunha de producao vem de tracos esparsos.
+    5 x 2 x 100 = 1000 px."""
+    for row in rows:
+        image[row : row + 2, cols[0] : cols[1]] = value
+    return image
+
+
+SCRIBBLE_PX = 1000
+
+
+def _print_guide():
+    printed = _paper()
+    printed[20:30, 20:60] = 90.0  # guia impressa que ainda pontua como tinta
+    return printed
+
+
+def _stroke_over_print_with_witness():
+    """Guia impressa + traco escuro cruzando + desenho grande separado.
+
+    O rabisco separado (1000 px) e a testemunha de producao da remocao:
+    retido >= 65% do canvas, sem baixar o piso de testemunha.
+    """
+    drawn = _print_guide()
+    drawn[24:26, 20:60] = 20.0
+    return _scribble(drawn, 20.0)
+
+
 def test_erased_stroke_over_print_is_removed_from_canvas(monkeypatch):
     monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
-    monkeypatch.setattr(worker_mod.registration, "_REMOVAL_WITNESS_FLOOR_PX", 0)
     worker = _worker_pm()
     try:
         generation = worker.new_generation()
-        printed = _paper()
-        printed[20:30, 20:60] = 90.0  # guia impressa que ainda pontua como tinta
         for _ in range(4):
-            _drive(worker, generation, printed)
+            _drive(worker, generation, _print_guide())
         assert np.count_nonzero(_confirmed(worker, generation)) == 0
-
-        drawn = printed.copy()
-        drawn[24:26, 20:60] = 20.0  # traco escuro cruzando a guia
-        drawn[50:60, 50:60] = 20.0  # desenho separado, em papel limpo
+        drawn = _stroke_over_print_with_witness()
         for _ in range(5):
             _drive(worker, generation, drawn)
         canvas = _confirmed(worker, generation)
-        assert np.all(canvas[24:26, 20:60]) and np.all(canvas[50:60, 50:60])
+        assert np.all(canvas[24:26, 20:60])
+        assert np.count_nonzero(canvas[40:80]) == SCRIBBLE_PX
 
-        for _ in range(14):  # apaga so o traco: a guia volta a aparencia semeada
-            frame = printed.copy()
-            frame[50:60, 50:60] = 20.0
-            _drive(worker, generation, frame)
+        # Apaga so o traco: a guia volta a aparencia semeada.
+        erased = _scribble(_print_guide(), 20.0)
+        for _ in range(14):
+            _drive(worker, generation, erased)
         canvas = _confirmed(worker, generation)
         assert not np.any(canvas[24:26, 20:60])
-        assert np.all(canvas[50:60, 50:60])
+        assert np.count_nonzero(canvas[40:80]) == SCRIBBLE_PX
+    finally:
+        worker.stop()
+
+
+def test_erasure_needs_the_production_removal_witness(monkeypatch):
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker_pm()
+    try:
+        generation = worker.new_generation()
+        printed = _scribble(_paper(), 90.0, rows=range(10, 50, 8))  # impresso
+        for _ in range(4):
+            _drive(worker, generation, printed)
+        drawn = _scribble(printed.copy(), 20.0, rows=range(10, 50, 8))
+        drawn[60:70, 60:70] = 20.0  # desenho minusculo, testemunha fraca
+        for _ in range(5):
+            _drive(worker, generation, drawn)
+        before = _confirmed(worker, generation).copy()
+        assert np.count_nonzero(before[10:50]) == SCRIBBLE_PX
+        assert np.count_nonzero(before[60:70]) == 100
+
+        erased = printed.copy()
+        erased[60:70, 60:70] = 20.0
+        for _ in range(14):
+            _drive(worker, generation, erased)
+        # Retido 100 px << 65% do canvas e << 4000 px: sem testemunha a
+        # remocao nao age, e o zeramento da evidencia nao pode apagar.
+        assert np.array_equal(_confirmed(worker, generation), before)
+    finally:
+        worker.stop()
+
+
+def test_stroke_that_only_lost_contrast_is_not_erased(monkeypatch):
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker_pm()
+    try:
+        generation = worker.new_generation()
+        for _ in range(4):
+            _drive(worker, generation, _print_guide())
+        drawn = _stroke_over_print_with_witness()
+        drawn[24:26, 20:60] = 50.0
+        for _ in range(5):
+            _drive(worker, generation, drawn)
+        assert np.all(_confirmed(worker, generation)[24:26, 20:60])
+
+        # Reflexo: o traco clareia para 70, ainda 20 abaixo da guia (90) —
+        # nao e "novo" (limiar 24) nem "de volta" (tolerancia 8), e o
+        # detector ainda o ve. Com testemunha de producao presente.
+        glare = drawn.copy()
+        glare[24:26, 20:60] = 70.0
+        for _ in range(14):
+            _drive(worker, generation, glare)
+        assert np.all(_confirmed(worker, generation)[24:26, 20:60])
+    finally:
+        worker.stop()
+
+
+def test_dark_print_that_never_seeds_does_not_block_ready(monkeypatch):
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker_pm()
+    try:
+        generation = worker.new_generation()
+        image = _paper()
+        image[8:72, 8:72] = 10.0  # logo preto maior que a janela da guarda
+        for _ in range(8):
+            _drive(worker, generation, image)
+        state = worker.baseline_state()
+        assert state.ready and state.phase == "ready", state
+        assert state.pending_px == 0
+    finally:
+        worker.stop()
+
+
+def test_rezero_survives_identity_recovery_of_the_same_page(monkeypatch):
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker_pm()
+    try:
+        generation = worker.new_generation()
+        image = _paper()
+        for _ in range(3):
+            _drive(worker, generation, image)
+        _scribble(image)
+        for _ in range(4):
+            _drive(worker, generation, image)
+        assert np.count_nonzero(_confirmed(worker, generation)) == SCRIBBLE_PX
+
+        assert worker.rezero_baseline()
+        recovered = worker.new_generation(preserve_identity=True)
+        # Queda de tracking com identidade preservada: o pedido fica.
+        assert worker._pm_rezero_requested
+        for _ in range(8):
+            _drive(worker, recovered, image)
+        decision = worker.telemetry_snapshot()["page_identity_events"][-1]["decision"]
+        assert decision == "same_page"
+        # Mesma folha: o re-zero aceito antes da queda roda depois dela.
+        assert not worker._pm_rezero_requested
+        assert np.count_nonzero(_confirmed(worker, recovered)) == 0
+    finally:
+        worker.stop()
+
+
+def test_rezero_is_cancelled_when_the_returning_page_is_another(monkeypatch):
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker_pm()
+    try:
+        generation = worker.new_generation()
+        image = _paper()
+        for _ in range(3):
+            _drive(worker, generation, image)
+        _scribble(image)
+        for _ in range(4):
+            _drive(worker, generation, image)
+        assert worker.rezero_baseline()
+        recovered = worker.new_generation(preserve_identity=True)
+        other = _paper()
+        other[10:30, 10:30] = INK  # outra folha, sem o desenho antigo
+        for _ in range(10):
+            _drive(worker, recovered, other)
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] == "new_page"
+        assert not worker._pm_rezero_requested
+        assert worker.baseline_state().phase != "recapturing"
     finally:
         worker.stop()

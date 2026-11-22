@@ -1050,10 +1050,14 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._identity_defer_count = 0
             self._identity_switch_votes = 0
             self._identity_hold_seen = False
-            # Uma folha/fonte nova cancela o re-zero pendente: o pedido
-            # era sobre a folha anterior.
-            self._pm_rezero_requested = False
-            self._pm_rezero_seeding = False
+            # Fonte/folha nova (sem identidade preservada) cancela o
+            # re-zero pendente: o pedido era sobre a folha anterior. Com
+            # identidade preservada o pedido sobrevive: fica bloqueado
+            # (p.identity_owned) ate a identidade decidir, e so cancela
+            # se a folha for outra.
+            if not preserve_identity:
+                self._pm_rezero_requested = False
+                self._pm_rezero_seeding = False
             self._guard_memo.clear()
             self._previous_corners = None
             self._paper_ref = None
@@ -2560,6 +2564,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     # Perda de lock, nao voto de pagina nova.
                     # A proxima passada estabelece outra ancora.
                     self._accumulator.reset()
+                    self._pm_rezero_requested = False
+                    self._pm_rezero_seeding = False
                     self._canvas_epoch += 1
                     self._page_model = None
                     self._pm_epoch = None
@@ -2582,6 +2588,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     self._still_passes = 0
                 elif not p.keep_page:
                     self._accumulator.reset()
+                    self._pm_rezero_requested = False
+                    self._pm_rezero_seeding = False
                     self._canvas_epoch += 1
                     self._page_model = None
                     self._pm_epoch = None
@@ -2976,6 +2984,16 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 if p.visible is None
                 else (p.visible if pm_coverage is None else (p.visible & pm_coverage))
             )
+            # Papel coberto agora pela mao (mascara fisica), ainda sem
+            # referencia: conta para a prontidao. Pixel visivel que a
+            # guarda recusa como papel (logo escuro, impressao densa)
+            # nunca semeia e fica de fora — esperar por ele seria
+            # esperar para sempre (o "fantasma" de inicializacao).
+            hand_covered = None
+            if p.visible is not None:
+                hand_covered = (
+                    ~p.visible if pm_coverage is None else pm_coverage & ~p.visible
+                )
             if self._config.paper_guard and p.warped.dtype == np.uint8:
                 exposed_mask = pm.exposed(
                     gray,
@@ -3033,7 +3051,13 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             p.visible = pm.admissible(p.visible)
             obs_admissible = pm.admissible(obs_visible)
             confirmed_ink = p.confirmed_ink
-            novel_mask = pm.novel(gray)
+            # `returned` so interessa onde ha traco confirmado sobre
+            # impressao semeada (raro): sem candidato, o custo e o de sempre.
+            erase_candidates = confirmed_ink & p.next_baseline_ink & pm.seeded
+            if np.any(erase_candidates):
+                novel_mask, returned_mask = pm.appearance(gray)
+            else:
+                novel_mask, returned_mask = pm.novel(gray), None
             suppress = pm.seeded & ~novel_mask & ~confirmed_ink
             voting_px = p.visible & (p.prob > self._accumulator.threshold)
             p.reg_info["pm_seeded_frac"] = pm.seeded_fraction
@@ -3042,14 +3066,13 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             )
             p.reg_info["pm_suppressed_px"] = int(np.count_nonzero(suppress & voting_px))
             p.reg_info["pm_pending_px"] = int(np.count_nonzero(pm.pending(obs_visible)))
-            # Papel rastreado sem referencia, inclusive o que esta coberto
-            # agora: e o que a interface precisa para nao dizer "pronto"
-            # antes de a mao liberar uma regiao ainda nao semeada.
-            p.reg_info["pm_unseeded_px"] = int(
-                np.count_nonzero(
-                    ~pm.seeded if pm_coverage is None else pm_coverage & ~pm.seeded
-                )
-            )
+            # Sem referencia e semeavel: o que a mao cobre agora mais o
+            # visivel ainda em semeadura. E o que a interface precisa para
+            # nao dizer "pronto" antes de a mao liberar uma regiao.
+            unseeded_px = int(np.count_nonzero(pm.seeding_pending(obs_visible)))
+            if hand_covered is not None:
+                unseeded_px += int(np.count_nonzero(hand_covered & ~pm.seeded))
+            p.reg_info["pm_unseeded_px"] = unseeded_px
             baseline_seen = (
                 suppress & obs_admissible & (p.prob > self._accumulator.threshold)
             )
@@ -3063,16 +3086,14 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # Traco confirmado sobre impresso que voltou a aparencia
             # semeada (apagado): a impressao ainda pontua como tinta e o
             # removedor nunca veria ausencia. Zera a evidencia ali para
-            # que a remocao conte; as salvaguardas do acumulador
-            # (visibilidade, testemunha, passadas consecutivas) seguem.
-            restored = (
-                pm.seeded
-                & ~novel_mask
-                & confirmed_ink
-                & p.next_baseline_ink
-                & obs_admissible
-            )
-            zero = suppress | restored
+            # que a remocao conte. Usa a tolerancia APERTADA de
+            # PageModel.returned, nao ~novel: traco que so perdeu
+            # contraste (reflexo) segue visto como tinta. As salvaguardas
+            # do acumulador (visibilidade, testemunha, passadas
+            # consecutivas) seguem.
+            zero = suppress
+            if returned_mask is not None:
+                zero = zero | (erase_candidates & returned_mask & obs_admissible)
             if np.any(zero):
                 p.prob = np.where(zero, 0.0, p.prob).astype(np.float32)
 
