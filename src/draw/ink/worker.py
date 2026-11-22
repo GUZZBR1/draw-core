@@ -234,23 +234,20 @@ def _align_identity_baseline(identity_baseline, seen, prior, radius, kernel):
     seen_indep = seen & ~prior_d
     if not np.any(seen_indep):
         return identity_baseline
-    base_ys, base_xs = np.nonzero(base_nonprior)
-    if base_ys.size > 4096:
-        step = (base_ys.size + 4095) // 4096
-        base_ys = base_ys[::step]
-        base_xs = base_xs[::step]
     h, w = seen_indep.shape
-    best_overlap = int(np.count_nonzero(seen_indep[base_ys, base_xs]))
+    seen_pad = np.pad(seen_indep, radius, mode="constant", constant_values=False)
+    best_overlap = int(np.count_nonzero(base_nonprior & seen_indep))
     best_dy, best_dx = 0, 0
     best_dist = 0
     for dy in range(-radius, radius + 1):
         for dx in range(-radius, radius + 1):
             if dy == 0 and dx == 0:
                 continue
-            ys = base_ys + dy
-            xs = base_xs + dx
-            valid = (ys >= 0) & (ys < h) & (xs >= 0) & (xs < w)
-            overlap = int(np.count_nonzero(seen_indep[ys[valid], xs[valid]]))
+            y0 = radius + dy
+            x0 = radius + dx
+            overlap = int(
+                np.count_nonzero(base_nonprior & seen_pad[y0 : y0 + h, x0 : x0 + w])
+            )
             dist = abs(dy) + abs(dx)
             if overlap > best_overlap or (overlap == best_overlap and dist < best_dist):
                 best_overlap = overlap

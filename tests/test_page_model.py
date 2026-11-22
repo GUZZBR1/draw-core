@@ -640,6 +640,66 @@ def test_identity_recovery_budget_on_a4_grid(monkeypatch):
         worker.stop()
 
 
+def test_page_model_reacquires_repeated_printed_rules_over_4096_px_with_local_residual(
+    monkeypatch,
+):
+    """R238-241: >4096 px de pautas impressas 100x2 com residuo local de 1 px nao escolhe shift errado."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    h_grid, w_grid = 240, 200
+    q_grid = np.array(
+        [(0, 0), (w_grid, 0), (w_grid, h_grid), (0, h_grid)], dtype=np.float32
+    )
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        gen1 = worker.new_generation()
+        vis_all = np.ones((h_grid, w_grid), dtype=bool)
+        form = np.full((h_grid, w_grid), PAPER, dtype=np.float32)
+        # 30 pautas horizontais de 2x100 px = 6000 px (> 4096 px)
+        for idx in range(30):
+            r0 = 10 + idx * 6
+            form[r0 : r0 + 2, 10:110] = INK
+        for _ in range(3):
+            _drive_page(
+                worker,
+                gen1,
+                WarpedPage(_bgr(form), gen1, q_grid, visible=vis_all),
+            )
+        assert np.count_nonzero(_confirmed(worker, gen1)) == 0
+
+        # Marca manuscrita separada de 30 px (6x5)
+        with_mark = form.copy()
+        with_mark[20:26, 150:155] = INK
+        for _ in range(4):
+            _drive_page(
+                worker,
+                gen1,
+                WarpedPage(_bgr(with_mark), gen1, q_grid, visible=vis_all),
+            )
+        assert np.count_nonzero(_confirmed(worker, gen1)) == 30
+
+        # Na reaquisicao, as ultimas 5 pautas (idx 25..29) tem residuo de 1 px para a direita,
+        # enquanto as outras 25 permanecem no lugar.
+        returning = np.full((h_grid, w_grid), PAPER, dtype=np.float32)
+        for idx in range(30):
+            r0 = 10 + idx * 6
+            c0 = 10 + (1 if idx >= 25 else 0)
+            returning[r0 : r0 + 2, c0 : c0 + 100] = INK
+        returning[20:26, 150:155] = INK
+
+        gen2 = worker.new_generation(preserve_identity=True)
+        for _ in range(identity_mod._PAGE_IDENTITY_SWITCH_CONSENSUS_FRAMES):
+            _drive_page(
+                worker,
+                gen2,
+                WarpedPage(_bgr(returning), gen2, q_grid, visible=vis_all),
+            )
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] == "same_page"
+        assert np.count_nonzero(_confirmed(worker, gen2)[20:26, 150:155]) == 30
+    finally:
+        worker.stop()
+
+
 def test_page_model_reference_stays_within_camera_range_after_large_brightness_jump():
     """page_model.py:170: salto grande de brilho rejeitado por _estimate_gain nao estoura 255."""
     model = pm_mod.PageModel((H, W), confirm_obs=1, rate=0.5)
