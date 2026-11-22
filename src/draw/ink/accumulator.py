@@ -286,34 +286,37 @@ class LayeredInkAccumulator:
                     retained >= registration._REMOVAL_RETAINED_FRACTION * canvas_before
                     or retained >= registration._REMOVAL_WITNESS_FLOOR_PX
                 )
-            if witnessed:
                 missing = (
                     confirmed_before
                     & inspected
                     & np.isfinite(prob)
                     & (prob <= registration._REMOVAL_LOW_PROB)
                 )
-                # Com testemunha: pixel inspecionado e não ausente
-                # vê o streak zerar (evidência positiva ou prova
-                # inconclusiva); pixel ausente conta. Ocluído não
-                # informa nada — o streak segura, não zera: a
-                # ausência do F-10 segue precisando ser persistente,
-                # mas não precisa ser em passadas consecutivas nem
-                # desobstruídas (a testemunha e a mão oscilam em cena
-                # real — medido: retained 1,5k~13,9k alternando no
-                # sim-hand, streak nunca completava). Sem máscara de
-                # oclusão, o que está fora de `missing` zera em vez
-                # de segurar: contagem velha sob a guarda ou fora da
-                # pegada não pode nem apagar o traço nem segurar a
-                # trabalhadora acordada.
+                # O reset NAO depende da testemunha: ela so governa o
+                # que conta como ausencia. Sem ela, pixel fora do
+                # dominio inspecionado (guarda que alargou por cima
+                # de uma contagem em curso, borda que a pegada
+                # deixou) nao pode nem apagar o traco nem segurar a
+                # trabalhadora acordada — a contagem velha zera. O
+                # incremento continua exigindo a testemunha: pixel
+                # inspecionado e não ausente vê o streak zerar
+                # (evidência positiva ou prova inconclusiva); pixel
+                # ausente conta. Ocluído não informa nada — o streak
+                # segura, não zera: a ausência do F-10 segue
+                # precisando ser persistente, mas não precisa ser em
+                # passadas consecutivas nem desobstruídas (a
+                # testemunha e a mão oscilam em cena real — medido:
+                # retained 1,5k~13,9k alternando no sim-hand, streak
+                # nunca completava).
                 resettable = ~missing
                 if visible is not None:
                     resettable &= visible
                 self._removal_streak[resettable] = 0
-                self._removal_streak[missing] = np.minimum(
-                    self._removal_streak[missing].astype(np.uint16) + 1,
-                    registration._REMOVAL_PASSES,
-                ).astype(np.uint8)
+                if witnessed:
+                    self._removal_streak[missing] = np.minimum(
+                        self._removal_streak[missing].astype(np.uint16) + 1,
+                        registration._REMOVAL_PASSES,
+                    ).astype(np.uint8)
             removed = self._removal_streak >= registration._REMOVAL_PASSES
             removed_px = int(np.count_nonzero(removed))
             if removed_px:

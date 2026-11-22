@@ -620,7 +620,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             )
         return self._guard_memo[key]
 
-    def _pass_sampled(self, anchor, corners, shape):
+    def _pass_sampled(self, anchor, corners, shape, live_corners=None):
         """Pegada amostrada do registro, so quando ha consumidor.
 
         Sem guarda ativa o dominio valido nao a consome — o warp
@@ -635,7 +635,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         """
         if self._config.border_guard_px == 0:
             return None
-        return registration._sampled_footprint(anchor, corners, shape)
+        return registration._observed_footprint(anchor, corners, live_corners, shape)
 
     def _register_into(
         self, anchor, reg_corners, prob, visible, visible_cam, pass_corners=None
@@ -648,7 +648,9 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         traco em ~tau px (review do PR #118) — os sitios de
         re-ancoragem o passam sempre.
         """
-        sampled = self._pass_sampled(anchor, reg_corners, prob.shape)
+        sampled = self._pass_sampled(
+            anchor, reg_corners, prob.shape, live_corners=pass_corners
+        )
         registered_prob, registered_visible = registration._register_ink_probability(
             prob,
             anchor,
@@ -1530,7 +1532,9 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # visibilidade — entra no dominio valido la no voto, e o
             # registro a reusa no clipe de visibilidade em vez de
             # rasterizar a dela de novo.
-            sampled = self._pass_sampled(anchor, registration_corners, prob.shape)
+            sampled = self._pass_sampled(
+                anchor, registration_corners, prob.shape, live_corners=corners
+            )
             registered_prob, registered_visible = (
                 registration._register_ink_probability(
                     prob,
@@ -1853,8 +1857,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         # ela, o caminho "guarda desligada e sem
                         # mascara" nunca via o que a pegada deixou
                         # de fora.
-                        identity_sampled = registration._sampled_footprint(
-                            anchor, registration_corners, prob.shape
+                        identity_sampled = registration._observed_footprint(
+                            anchor, registration_corners, corners, prob.shape
                         )
                     # Sobreposicao quase nula da pegada com a regiao
                     # usavel da ancora nao e evidencia — distinta de

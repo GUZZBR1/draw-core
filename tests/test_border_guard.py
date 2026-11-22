@@ -513,6 +513,84 @@ def test_unsampled_edge_strip_does_not_count_as_erasure():
     assert int(np.count_nonzero(snap_after.confirmed[300:700, 300:500])) > 0
 
 
+def test_deadband_frozen_registration_does_not_erase_unsampled_edge():
+    """Variante sob banda morta: o quad recua uma borda menos que
+    tau, entao o registro segue no quad CONGELADO — a matriz sai
+    identidade e a pegada do registro e a grade inteira. Sem a
+    pegada do quad vivo cruzada, os zeros/papel deslocado da faixa
+    nao amostrada apagariam o traco de borda como se tivessem sido
+    vistos. O controle interior apagado de verdade continua saindo.
+    """
+    anchor_quad = np.array(
+        [[200, 100], [560, 100], [560, 600], [200, 600]], dtype=np.float32
+    )
+    shifted_quad = np.array(
+        [[206, 100], [560, 100], [560, 600], [206, 600]], dtype=np.float32
+    )
+    img = np.full((1200, 850, 3), 215, np.uint8)
+    img[200:500, 10:14] = 25  # traco na faixa que fica sem amostra
+    img[200:500, 100:110] = 25  # traco interior, apagado de verdade
+    img[300:700, 300:500] = 25  # testemunha no miolo (permanece)
+
+    clock = _Clock()
+    cfg = InkConfig.strict_vote(
+        0.85, border_guard_px=None, paper_guard=False, reg_deadband=True
+    )
+    worker = PageCleanWorker(_DarkInkPageClean(), config=cfg, clock=clock)
+    for _ in range(5):
+        clock.now += 1.1
+        worker.submit(contracts.WarpedPage(img, 0, anchor_quad, captured_at=clock.now))
+        worker.pump()
+    snap = worker.poll_display(0, 0)
+    assert snap is not None
+    assert int(np.count_nonzero(snap.confirmed[200:500, 10:14])) > 0
+    assert int(np.count_nonzero(snap.confirmed[200:500, 100:110])) > 0
+
+    # O deslocamento de 6 px fica abaixo do tau da banda morta: o
+    # registro segue congelado na ancora, entao a unica marca de
+    # "nao observei" e a pegada do quad vivo.
+    img_erased = np.full((1200, 850, 3), 215, np.uint8)
+    img_erased[300:700, 300:500] = 25
+    for _ in range(10):
+        clock.now += 1.1
+        worker.submit(
+            contracts.WarpedPage(img_erased, 0, shifted_quad, captured_at=clock.now)
+        )
+        worker.pump()
+    snap_after = worker.poll_display(0, 0)
+    assert snap_after is not None
+    assert int(np.count_nonzero(snap_after.confirmed[200:500, 10:14])) > 0
+    assert int(np.count_nonzero(snap_after.confirmed[200:500, 100:110])) == 0
+    assert int(np.count_nonzero(snap_after.confirmed[300:700, 300:500])) > 0
+
+
+def test_guard_widening_clears_pending_removal_streak():
+    """Guarda que alarga por cima de uma borracha em contagem nao pode
+    congelar o streak: o reset depende do dominio inspecionado, nao da
+    testemunha — contagem velha fora do dominio zera e a trabalhadora
+    volta a descansar em vez de rodar inferencia com a folha parada."""
+    acc = LayeredInkAccumulator(0.7)
+    shape = (1200, 850)
+    prob = np.zeros(shape, np.float32)
+    prob[200:500, 20:24] = 0.95  # traco A, "apagado" em contagem
+    prob[300:700, 300:500] = 0.95  # testemunha B
+    for _ in range(4):
+        acc.add(prob)
+    guard = np.ones(shape, bool)
+    partial = prob.copy()
+    partial[200:500, 20:24] = 0.0
+    for _ in range(3):
+        acc.add(partial, valid_mask=guard)
+    assert int(acc._removal_streak[200:500, 20:24].max()) > 0
+    # A guarda alarga por cima de A e a testemunha some junto: sem
+    # ela o incremento para, mas a contagem velha fora do dominio
+    # ainda precisa zerar.
+    guard2 = guard.copy()
+    guard2[:, :30] = False
+    acc.add(np.zeros(shape, np.float32), valid_mask=guard2)
+    assert int(acc._removal_streak[200:500, 20:24].max()) == 0
+
+
 def test_confirmed_ink_under_guard_does_not_trigger_page_turn():
     """Tinta confirmada quase toda sob a guarda alargada: a virada se
     abstem em vez de declarar pagina trocada na mesma folha."""

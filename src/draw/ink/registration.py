@@ -268,3 +268,32 @@ def _sampled_footprint(anchor, corners, shape):
     if _registration_is_identity(matrix):
         return None
     return _sampled_warp(matrix, shape)
+
+
+def _observed_footprint(anchor, reg_corners, live_corners, shape):
+    """Pegada observada de verdade: o que o warp leu E o que a
+    passada cobriu.
+
+    A pegada do registro (reg_corners) mede onde o warp ancora<-
+    registro encontrou amostra. Sob banda morta o registro usa o
+    quad CONGELADO — se o quad vivo recuou uma borda, a faixa que
+    ele deixou de ver continua marcada como amostrada e os zeros/
+    papel deslocado dela apagam o traco de borda como se tivessem
+    sido observados. Cruzar com a pegada do quad vivo separa o
+    "nao observei" do "observei vazio" nesse caso. O sentido
+    contrario tambem protege: pixel coberto pelo vivo mas lido
+    fora do mapa pelo registro recebe preenchimento zero, nao
+    observacao. None em uma das pegadas vale grade inteira; None
+    nas duas devolve None.
+    """
+    footprint = _sampled_footprint(anchor, reg_corners, shape)
+    live = (
+        None
+        if live_corners is None
+        else _sampled_footprint(anchor, live_corners, shape)
+    )
+    if footprint is None:
+        return live
+    if live is not None:
+        footprint = footprint & live
+    return footprint
