@@ -42,17 +42,14 @@ class InkConfig:
     """Comportamento do motor de tinta, injetado por construtor.
 
     O default e o preset de producao validado no legado: os
-    mecanismos do Tier A ligados (remocao de tinta, arbitragem e
-    follow de ancora, evento geometrico de follow_move) e os do
-    Tier B desligados (banda morta e ancora-mediana do registro).
+    mecanismos do Tier B desligados (banda morta e ancora-mediana
+    do registro). Remocao de tinta, arbitragem e follow de ancora
+    e o evento geometrico de follow_move eram Tier A — sempre
+    ligados, viraram comportamento fixo e perderam o campo.
     Os recursos dos Tiers C/D nao viram campos: foram removidos do
     codigo junto com as flags que os ligavam.
     """
 
-    removal: bool = True
-    anchor_arbitration: bool = True
-    anchor_follow: bool = True
-    follow_move: bool = True
     reg_deadband: bool = False
     reg_anchor_median: bool = False
     # Limiar de "visto como tinta" do motor ao vivo: camada

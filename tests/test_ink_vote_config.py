@@ -80,7 +80,7 @@ def test_strict_vote_shifts_the_vote_fields_and_keeps_seen_threshold():
     # O limiar de "visto como tinta" governa identidade, remoção e
     # âncora da fronteira: o voto estrito não o toca (review #53).
     assert cfg.seen_threshold == InkConfig().seen_threshold == 0.7
-    assert InkConfig.strict_vote(0.92, removal=False).removal is False
+    assert InkConfig.strict_vote(0.92, hysteresis=True).hysteresis is True
 
 
 def test_strict_vote_keeps_the_page_identity_threshold():

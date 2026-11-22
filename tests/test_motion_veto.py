@@ -228,9 +228,6 @@ def _run(sequence, config, *, hand=None, coverage=None, spy=None):
         worker.stop()
 
 
-_PLAIN = dict(anchor_arbitration=False, anchor_follow=False)
-
-
 def _stray(confirmed, truth):
     halo = cv2.dilate(truth.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
     return int(np.count_nonzero(confirmed & ~halo))
@@ -253,8 +250,8 @@ def test_slide_and_stay_neither_duplicates_nor_freezes(fast):
     slid = _shift(page, 2.5, 0.0)
     written = np.maximum(slid, _shift(stroke, 2.5, 0.0))
     sequence = [page] * 4 + [slid] * 4 + [written] * 6
-    stats_on, records, conf_on = _run(sequence, InkConfig(motion_veto=True, **_PLAIN))
-    _s, _r, conf_off = _run(sequence, InkConfig(**_PLAIN))
+    stats_on, records, conf_on = _run(sequence, InkConfig(motion_veto=True))
+    _s, _r, conf_off = _run(sequence, InkConfig())
 
     decisions = [r.get("motion_decision") for r in records]
     assert decisions[:4] == ["accept"] * 4  # a 1a vira a referencia
@@ -283,7 +280,7 @@ def test_slide_and_stay_with_page_model_preserves_thin_stroke(fast):
     sequence = [page] * 4 + [slid] * 4 + [written] * 6
     stats_on, records, conf_on = _run(
         sequence,
-        InkConfig(motion_veto=True, page_model=True, **_PLAIN),
+        InkConfig(motion_veto=True, page_model=True),
     )
     decisions = [r.get("motion_decision") for r in records]
     assert decisions[:4] == ["accept"] * 4
@@ -302,7 +299,7 @@ def test_rotated_and_stuck_page_is_corrected_not_vetoed(fast):
     rot = cv2.getRotationMatrix2D((600, 425), 0.3, 1.0)
     turned = _affine(page, rot)
     sequence = [page] * 4 + [turned] * 6
-    stats, records, conf = _run(sequence, InkConfig(motion_veto=True, **_PLAIN))
+    stats, records, conf = _run(sequence, InkConfig(motion_veto=True))
     assert {r.get("motion_decision") for r in records[4:]} == {"correct"}
     assert _stray(conf, page > 0.5) < 0.02 * np.count_nonzero(page > 0.5)
 
@@ -315,7 +312,7 @@ def test_large_stuck_offset_fails_open_instead_of_freezing(fast):
     page = _page(seed=8)
     far = _shift(page, 7.0, 0.0)
     sequence = [page] * 4 + [far] * (motion.MOTION_FAIL_OPEN_PASSES + 4)
-    stats, records, _conf = _run(sequence, InkConfig(motion_veto=True, **_PLAIN))
+    stats, records, _conf = _run(sequence, InkConfig(motion_veto=True))
     decisions = [r.get("motion_decision") for r in records][4:]
     vetoes = motion.MOTION_FAIL_OPEN_PASSES
     assert decisions[:vetoes] == ["veto"] * vetoes
@@ -337,9 +334,7 @@ def test_vetoed_passes_do_not_put_the_ink_to_rest(fast):
     n_far = motion.MOTION_FAIL_OPEN_PASSES + 3
     sequence = [page] * 4 + [far] * n_far
     hands = [True] * 5 + [False] * (n_far - 1)
-    stats, records, conf = _run(
-        sequence, InkConfig(motion_veto=True, **_PLAIN), hand=hands
-    )
+    stats, records, conf = _run(sequence, InkConfig(motion_veto=True), hand=hands)
     assert stats["motion_fail_open_total"] >= 1
     line = stroke > 0.5
     assert np.count_nonzero(conf & line) > 0.8 * np.count_nonzero(line)
@@ -358,9 +353,7 @@ def test_correction_carries_the_coverage_mask_along(fast):
     cv2.line(stroke, (602, 300), (602, 500), 1.0, thickness=5)
     slid = np.maximum(_shift(page, 3.0, 0.0), stroke)
     sequence = [page] * 4 + [slid] * 6
-    _s, records, conf = _run(
-        sequence, InkConfig(motion_veto=True, **_PLAIN), coverage=coverage
-    )
+    _s, records, conf = _run(sequence, InkConfig(motion_veto=True), coverage=coverage)
     assert {r.get("motion_decision") for r in records[4:]} == {"correct"}
     assert conf[320:480, 597:600].mean() > 0.8
 
@@ -382,7 +375,7 @@ def test_anchor_arbitration_scores_the_camera_map_not_the_corrected_one(fast):
     sequence = [page] * 4 + [_shift(page, 2.5, 0.0)] * 3
     _s, records, _c = _run(
         sequence,
-        InkConfig(motion_veto=True, anchor_follow=False),
+        InkConfig(motion_veto=True),
         spy=spy,
     )
     corrected = [
@@ -425,7 +418,7 @@ def test_gate_off_arbitration_sees_the_same_covered_map_as_the_vote(fast):
     page = _page(seed=3)
     _run(
         [page] * 6,
-        InkConfig(anchor_follow=False),
+        InkConfig(),
         coverage=coverage,
         spy=spy,
     )
@@ -449,7 +442,7 @@ def test_camera_coverage_stays_in_camera_geometry_when_vote_changes(
     now = [1000.0]
     worker = worker_mod.PageCleanWorker(
         _InkFromWarp(),
-        config=InkConfig(motion_veto=True, anchor_follow=False),
+        config=InkConfig(motion_veto=True),
         clock=lambda: now[0],
     )
     worker.set_hand_presence(True)
@@ -529,8 +522,8 @@ def test_default_path_never_builds_the_gate(fast, monkeypatch):
 def test_motion_veto_off_is_byte_identical(fast):
     page = _page(seed=5)
     sequence = [page] * 4 + [_shift(page, 2.5, 0.0)] * 4
-    stats_a, records_a, conf_a = _run(sequence, InkConfig(**_PLAIN))
-    _stats_b, _records_b, conf_b = _run(sequence, InkConfig(**_PLAIN))
+    stats_a, records_a, conf_a = _run(sequence, InkConfig())
+    _stats_b, _records_b, conf_b = _run(sequence, InkConfig())
     assert np.array_equal(conf_a, conf_b)
     assert stats_a["motion_vetoes_total"] == 0
     assert all("motion_decision" not in r for r in records_a)

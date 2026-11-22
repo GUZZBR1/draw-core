@@ -1308,7 +1308,7 @@ def test_page_model_missed_hand_over_seeded_paper_is_blocked(monkeypatch):
 def test_page_model_missed_hand_preserves_existing_confirmed_ink(monkeypatch):
     """Issue 7: mao nao mascarada sobre traco confirmado nao o apaga nem corrompe ref."""
     monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
-    worker = _worker(InkConfig(page_model=True, removal=True))
+    worker = _worker(InkConfig(page_model=True))
     try:
         generation = worker.new_generation()
         image = np.full((H, W), PAPER, dtype=np.float32)
@@ -1710,7 +1710,7 @@ def test_page_model_counters_exclude_zero_and_hidden_pixels(monkeypatch):
 def test_page_model_counters_under_non_identity_warp_border(monkeypatch):
     """Issue 9: borda borderValue=0 fora do warp registrado nao infla pm_novel_px."""
     monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
-    worker = _worker(InkConfig(page_model=True, anchor_follow=False))
+    worker = _worker(InkConfig(page_model=True))
     try:
         generation = worker.new_generation()
         image = np.full((H, W), PAPER, dtype=np.float32)
