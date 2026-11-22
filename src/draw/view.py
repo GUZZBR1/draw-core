@@ -48,15 +48,6 @@ COLOR_PAPER_BORDER = COLOR_BORDER_SUBTLE
 _BLANK_SHEET = None
 
 
-def fit(image, max_h=700):
-    """Ajusta a altura de um quadro sem copiar quando ele ja cabe."""
-    h, w = image.shape[:2]
-    if h <= max_h:
-        return image
-    scale = max_h / h
-    return cv2.resize(image, (int(w * scale), max_h))
-
-
 def blank_sheet():
     global _BLANK_SHEET
     shape = (config.PAPER_H, config.PAPER_W)
@@ -511,11 +502,6 @@ def point_in_gear(layout, pos):
     cx, cy, r = layout["gear"]
     reach = r + max(1, int(round(4 * layout["scale"])))
     return (pos[0] - cx) ** 2 + (pos[1] - cy) ** 2 <= reach**2
-
-
-def point_in_card(layout, pos):
-    x, y, w, h = layout["card"]
-    return x <= pos[0] < x + w and y <= pos[1] < y + h
 
 
 def scroll_hit(layout, pos):
