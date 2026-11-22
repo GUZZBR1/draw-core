@@ -566,6 +566,8 @@ def test_stroke_seen_once_before_hand_exit_finishes_confirming(ink):
     got = _confirmed(worker, generation) > 0
     assert _frac(got, want) >= 0.95
     assert _beyond(got, want, 2) <= 0.02 * np.count_nonzero(want)
+
+
 # Contrato 9: objeto escuro sem mascara sobre traco confirmado nao o
 # apaga — a guarda fotometrica congela a regiao para o voto de
 # remocao, com ou sem deteccao de mao. (O contrato 8, traco visto
