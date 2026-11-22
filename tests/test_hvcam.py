@@ -409,7 +409,7 @@ class _FakeLib:
 
 def test_camera_tcp_passes_host_and_port(monkeypatch):
     lib = _FakeLib()
-    monkeypatch.setattr(hvcam_module, "_LIB", lib)
+    monkeypatch.setattr(hvcam_module._lib, "_LIB", lib)
     cam = hvcam_module.Camera(host="::1", port=9999)
     # IPv6 chega intacto ao conector nativo — sem repartir ":"
     assert lib.calls == [(b"::1", 9999)]
@@ -419,7 +419,7 @@ def test_camera_tcp_passes_host_and_port(monkeypatch):
 
 def test_camera_vsock_connect_without_host(monkeypatch):
     lib = _FakeLib()
-    monkeypatch.setattr(hvcam_module, "_LIB", lib)
+    monkeypatch.setattr(hvcam_module._lib, "_LIB", lib)
     cam = hvcam_module.Camera(port=9100)
     assert lib.calls == [("vsock", 9100)]
     cam.close()
@@ -430,7 +430,7 @@ def test_camera_vsock_listen_handoff_to_grab_and_close(monkeypatch):
     hvcam_grab_next e e fechado por hvcam_close sem exigir hvcam_listen na
     libhvcam.so (review #75)."""
     lib = _FakeLib()
-    monkeypatch.setattr(hvcam_module, "_LIB", lib)
+    monkeypatch.setattr(hvcam_module._lib, "_LIB", lib)
     seen = []
 
     def fake_listener(port, timeout_ms):
@@ -448,14 +448,14 @@ def test_camera_vsock_listen_handoff_to_grab_and_close(monkeypatch):
 
 def test_camera_connect_failure_raises_oserror(monkeypatch):
     lib = _FakeLib(fd=-1)
-    monkeypatch.setattr(hvcam_module, "_LIB", lib)
+    monkeypatch.setattr(hvcam_module._lib, "_LIB", lib)
     with pytest.raises(OSError, match="connect failed"):
         hvcam_module.Camera(port=8765)
 
 
 def test_camera_timeout_suggests_reverse_mode(monkeypatch):
     lib = _FakeLib(fd=-errno.ETIMEDOUT)
-    monkeypatch.setattr(hvcam_module, "_LIB", lib)
+    monkeypatch.setattr(hvcam_module._lib, "_LIB", lib)
     with pytest.raises(OSError, match=r"hvcam\+reverse://:9100") as error:
         hvcam_module.Camera(port=9100)
     assert "--register-vsock --port 9100" in str(error.value)
@@ -539,9 +539,9 @@ def test_listen_vsock_bounded_times_out_and_filters_non_host_cid(monkeypatch):
     listener_ok = _FakeListener([(rogue, (1, 50000)), (host_conn, (2, 50001))])
     lib = _FakeLib()
     real_listen = hvcam_module._listen_vsock_bounded
-    monkeypatch.setattr(hvcam_module, "_LIB", lib)
+    monkeypatch.setattr(hvcam_module._lib, "_LIB", lib)
     monkeypatch.setattr(
-        hvcam_module,
+        hvcam_module._capture,
         "_listen_vsock_bounded",
         lambda port, timeout_ms=hvcam_module._LISTEN_TIMEOUT_MS: real_listen(
             port,
@@ -606,9 +606,9 @@ def test_pure_python_hvcam_lib_pulls_frame_over_socketpair(monkeypatch):
     import socket
     import struct
 
-    monkeypatch.setattr(hvcam_module, "_LIB", None)
+    monkeypatch.setattr(hvcam_module._lib, "_LIB", None)
     monkeypatch.setattr(
-        hvcam_module,
+        hvcam_module._lib,
         "_load",
         lambda: (_ for _ in ()).throw(OSError("sem libhvcam.so")),
     )
@@ -697,9 +697,9 @@ def test_pure_python_hvcam_lib_tcp_loopback_end_to_end(monkeypatch):
     import struct
     import threading
 
-    monkeypatch.setattr(hvcam_module, "_LIB", None)
+    monkeypatch.setattr(hvcam_module._lib, "_LIB", None)
     monkeypatch.setattr(
-        hvcam_module,
+        hvcam_module._lib,
         "_load",
         lambda: (_ for _ in ()).throw(OSError("sem libhvcam.so")),
     )
@@ -841,6 +841,28 @@ def test_ensure_hvcam_host_rejects_bad_sha256(tmp_path):
             local_candidates=(),
         )
     assert not (tmp_path / "hvcam-host.exe").exists()
+
+
+def test_ensure_hvcam_host_uses_sibling_checkout_offline(monkeypatch, tmp_path):
+    """Com cache vazio e checkout irmao ../hvcam, copia o exe local sem baixar."""
+    work = tmp_path / "work"
+    sibling = work / "hvcam" / "dist"
+    sibling.mkdir(parents=True)
+    host = sibling / "hvcam-host.exe"
+    host.write_bytes(b"MZ-local-build")
+
+    prov = hvcam_module._provision
+    fake_file = work / "draw-core" / "src" / "draw" / "hvcam" / "_provision.py"
+    monkeypatch.setattr(prov, "__file__", str(fake_file))
+
+    def _no_download(*_a, **_k):
+        pytest.fail("downloader chamado com checkout irmao presente")
+
+    exe = hvcam_module.ensure_hvcam_host(
+        cache_dir=tmp_path,
+        urlopen=_no_download,
+    )
+    assert exe.read_bytes() == b"MZ-local-build"
 
 
 def test_list_hvcam_devices_parses_cp1252_stderr(monkeypatch, tmp_path):
