@@ -28,6 +28,7 @@ e reancoragem + portão a cada passada.
 
 import dataclasses
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 import cv2
 import numpy as np
@@ -692,11 +693,64 @@ def _gather_side(tracks, thick, matches, idx, line_ids, edge_col, direction):
     return part
 
 
+# --- Vocabulário das transições -------------------------------------------
+# O que cada função devolve e a próxima consome. NamedTuple mantém o wire
+# posicional (desempacota como tupla), mas a construção é por nome — um
+# campo não pode trocar de significado sem mudar a interface.
+
+
+class _Run(NamedTuple):
+    """Nó da floresta de tinta: intervalo conectado numa coluna."""
+
+    x: int
+    top: int
+    bot: int
+    pred: int = -1  # índice do nó pai em `nodes`; -1 na raiz
+
+    def visit(self):
+        return _Visit(self.x, self.top, self.bot)
+
+
+class _Visit(NamedTuple):
+    """Coluna visitada por caminho qualificado — o que vira marca no joined."""
+
+    x: int
+    top: int
+    bot: int
+
+
+class _Continuation(NamedTuple):
+    """Prova terminal de um caminho de continuação.
+
+    `x`, `top`, `bot` localizam o ÚLTIMO intervalo grosso do caminho — a
+    cauda fina onde o traço parou não decide pousio nem veto de ombro.
+    """
+
+    thick_cols: int  # colunas grossas dentro da janela de voto
+    x: int
+    top: int
+    bot: int
+
+
+class _SideStats(NamedTuple):
+    """Evidência de um lado da faixa, medida num conjunto de linhas.
+
+    Vale só para vereditos sobre as linhas medidas: `bulk` deste
+    conjunto não decide por linhas de outro conjunto.
+    """
+
+    cols: np.ndarray  # (K, W) bool — tinta grossa por coluna
+    vote: np.ndarray | None  # (K,) bool — passou no voto de espessura
+    ext: np.ndarray | None  # (K,) int — extensão grossa por linha
+    has_bulk: bool  # linhas bastantes p/ medir o ombro do conjunto
+    bulk: int  # ombro típico DO conjunto medido
+
+
 def _trace_ink_run(ink, yc0, seam_col, limit, direction, stop_col, clip_r=2 * _R):
     """Traça floresta de runs de tinta conectados a partir de `seam_col`.
 
-    Devolve `(nodes, exit_tips)` onde `nodes` é lista de `(x, top, bot, pred)`
-    até `stop_col` (crescimento vertical limitado a `±clip_r` do centro
+    Devolve `(nodes, exit_tips)` onde `nodes` é lista de `_Run` até
+    `stop_col` (crescimento vertical limitado a `±clip_r` do centro
     anterior) e `exit_tips` são os índices na última coluna da faixa.
     """
     h = ink.shape[0]
@@ -711,7 +765,7 @@ def _trace_ink_run(ink, yc0, seam_col, limit, direction, stop_col, clip_r=2 * _R
     while b0 + 1 < h and ink[b0 + 1, seam_col] and (b0 + 1) - mid <= clip_r:
         b0 += 1
 
-    nodes = [(seam_col, t0, b0, -1)]
+    nodes = [_Run(seam_col, t0, b0)]
     active = [0]
     for x in range(seam_col + direction, limit, direction):
         inside_band = (x < stop_col) if direction > 0 else (x > stop_col)
@@ -721,9 +775,9 @@ def _trace_ink_run(ink, yc0, seam_col, limit, direction, stop_col, clip_r=2 * _R
         nxt = []
         seen_top = {}
         for nid in active:
-            _, pt, pb, _ = nodes[nid]
-            pc = (pt + pb) // 2
-            lo, hi = max(0, pt), min(h, pb + 1)
+            nd = nodes[nid]
+            pc = (nd.top + nd.bot) // 2
+            lo, hi = max(0, nd.top), min(h, nd.bot + 1)
             if not col[lo:hi].any():
                 continue
             for hit in np.flatnonzero(col[lo:hi]) + lo:
@@ -735,7 +789,7 @@ def _trace_ink_run(ink, yc0, seam_col, limit, direction, stop_col, clip_r=2 * _R
                 if top in seen_top:
                     continue
                 idx = len(nodes)
-                nodes.append((x, top, bot, nid))
+                nodes.append(_Run(x, top, bot, nid))
                 seen_top[top] = idx
                 nxt.append(idx)
         if not nxt:
@@ -745,7 +799,7 @@ def _trace_ink_run(ink, yc0, seam_col, limit, direction, stop_col, clip_r=2 * _R
 
 
 def _trace_branch_out(ink, x_start, top0, bot0, limit, direction, h_run, need, stop):
-    """[(ext, x_end, top, bot)] por caminho conectado que completou a janela.
+    """Lista de `_Continuation` por caminho conectado que completou a janela.
 
     Cada intervalo vivo carrega a própria sequência de espessura e nunca a
     mistura com a de outro ramo: quando dois caminhos ocupam as mesmas
@@ -804,7 +858,7 @@ def _trace_branch_out(ink, x_start, top0, bot0, limit, direction, h_run, need, s
         arr = np.array(hist, bool)[None, :]
         if arr[:, :need].mean() < _VOTE_FRAC:
             continue
-        out.append((int(_extent(arr, need)[0]), *lt))
+        out.append(_Continuation(int(_extent(arr, need)[0]), *lt))
     return out
 
 
@@ -855,7 +909,7 @@ def _project_forest(
     bulk_dst=0,
     require_src_out=False,
 ):
-    """(visited_src, visited_dst): traça floresta na costura e filtra ramos terminais.
+    """(visited_src, visited_dst): listas de `_Visit`, floresta + ramos filtrados.
 
     O veto de ombro é por caminho conectado: só vale quando a continuação
     do próprio caminho acaba numa pauta do destino sem passar do ombro
@@ -874,20 +928,20 @@ def _project_forest(
     qual_dst = set()
     qual_tips = []
     for tid in tips:
-        x_e, top_e, bot_e, _ = nodes[tid]
+        tip = nodes[tid]
         paths = _trace_branch_out(
-            ink, x_e, top_e, bot_e, limit_dst, direction, h_run, need, stop_dst
+            ink, tip.x, tip.top, tip.bot, limit_dst, direction, h_run, need, stop_dst
         )
         # o veto de ombro decide por caminho: só descarta quando TODA
         # continuação qualificada acaba curta sobre pauta do destino — um
         # irmão de sombra não veta o ramo que termina em espaço em branco
         clean = False
-        for ext, x_end, top_e, bot_e in paths:
+        for cont in paths:
             shadow = (
                 has_dst
                 and t_dst is not None
-                and ext <= bulk_dst + _GUTTER_EDGE_RUN
-                and _lands_on_track(t_dst, valid_dst, x_end, top_e, bot_e)
+                and cont.thick_cols <= bulk_dst + _GUTTER_EDGE_RUN
+                and _lands_on_track(t_dst, valid_dst, cont.x, cont.top, cont.bot)
             )
             if not shadow:
                 clean = True
@@ -898,10 +952,10 @@ def _project_forest(
         cur = tid
         while cur != -1:
             qual_dst.add(cur)
-            cur = nodes[cur][3]
+            cur = nodes[cur].pred
     if not qual_dst:
         return [], []
-    visited_dst = [(nodes[i][0], nodes[i][1], nodes[i][2]) for i in sorted(qual_dst)]
+    visited_dst = [nodes[i].visit() for i in sorted(qual_dst)]
     # traça de volta na origem: preserva só colunas conectadas ao traço na costura
     limit_src = -1 if direction > 0 else w
     stop_src = band_out_edge - 1 if direction > 0 else band_out_edge + 1
@@ -915,30 +969,38 @@ def _project_forest(
         # caminho da linha
         qual_s = set()
         for tid in qual_tips:
-            x_e, top_e, bot_e, _ = nodes[tid]
+            tip = nodes[tid]
             nodes_b, tips_b = _trace_ink_run(
-                ink, (top_e + bot_e) // 2, x_e, limit_src, -direction, stop_src
+                ink, (tip.top + tip.bot) // 2, tip.x, limit_src, -direction, stop_src
             )
             for tb in tips_b:
-                x_b, t_b, b_b, _ = nodes_b[tb]
+                tip_b = nodes_b[tb]
                 if not _trace_branch_out(
-                    ink, x_b, t_b, b_b, limit_src, -direction, h_run, need, need + 1
+                    ink,
+                    tip_b.x,
+                    tip_b.top,
+                    tip_b.bot,
+                    limit_src,
+                    -direction,
+                    h_run,
+                    need,
+                    need + 1,
                 ):
                     continue
                 cur = tb
                 while cur != -1:
-                    qual_s.add(nodes_b[cur][:3])
-                    cur = nodes_b[cur][3]
+                    qual_s.add(nodes_b[cur].visit())
+                    cur = nodes_b[cur].pred
         if not qual_s:
             return [], []
         visited_src = sorted(qual_s)
     else:
-        visited_src = [(n[0], n[1], n[2]) for n in nodes_s]
+        visited_src = [n.visit() for n in nodes_s]
     return visited_src, visited_dst
 
 
 def _side_bulks(tracks, thick, matches, idx, a, b, need):
-    """(left_info, right_info) por lado: `(cols, vote, ext, has_bulk, bulk)`."""
+    """(left_info, right_info) por lado: `_SideStats` do conjunto da trilha."""
     t = tracks[idx]
     all_k = np.arange(t.paths.shape[0], dtype=np.int64)
     min_b = _min_bulk(t.paths.shape[0])
@@ -951,7 +1013,7 @@ def _side_bulks(tracks, thick, matches, idx, a, b, need):
         has_b = vote is not None and vote.sum() > min_b
         ext = _extent(cols, need) if vote is not None else None
         bulk = _bulk_ext(ext[vote]) if has_b else 0
-        out.append((cols, vote, ext, has_b, bulk))
+        out.append(_SideStats(cols, vote, ext, has_b, bulk))
     return out[0], out[1]
 
 
@@ -1051,12 +1113,10 @@ def _joined_through_bands(tracks, thick, valid_list, gutter_full, matches, ink, 
         else:
             continue
 
-        (cols_l, vote_l, ext_l, has_l, bulk_l), _ = _side_bulks(
-            tracks, thick, matches, i_l, a, b, need
-        )
-        _, (cols_r, vote_r, ext_r, has_r, bulk_r) = _side_bulks(
-            tracks, thick, matches, i_r, a, b, need
-        )
+        side_l, _ = _side_bulks(tracks, thick, matches, i_l, a, b, need)
+        _, side_r = _side_bulks(tracks, thick, matches, i_r, a, b, need)
+        cols_l, vote_l, ext_l, has_l, bulk_l = side_l
+        cols_r, vote_r, ext_r, has_r, bulk_r = side_r
         # Evidência por lado: janela de voto (>= need colunas), cauda curta
         # (espaço observável — trilha ou fora dela — sem janela: a continuação
         # tem de sair do traço, nunca de voto unilateral) ou borda da imagem
