@@ -250,6 +250,59 @@ def test_crossing_the_ceiling_keeps_a_consistent_highlight_limit():
         assert out[0, 40, 0] > 70  # papel escuro subiu (~84), não cru a 66
 
 
+def test_ceiling_gain_reopens_after_a_brief_highlight_flash():
+    """Devin Review PR #140: dentro da banda do teto a proposta era o
+    ganho retido — catraca: um clarão breve na faixa baixava o ganho e
+    ele nunca mais subia. Agora a proposta converge para o teto
+    nominal e a guarda limita pela observação da passada."""
+    visible = np.ones((120, 120), dtype=bool)
+    page = np.full((120, 120, 3), 66, np.uint8)
+    page[:, 112:] = 84  # faixa ~7%: limite seguro 255/84 = 3,04 > teto
+
+    smoother = exposure.PaperGainSmoother()
+    target = exposure.paper_gain(page, visible)  # p90 = 66 -> 3,0
+    gains = [
+        smoother.update(target, index * 0.15, image=page, mask=visible)
+        for index in range(8)
+    ]
+    assert gains[-1] == pytest.approx(3.0, rel=0.02)
+
+    # Clarão de uma passada só na faixa: 84 -> 87 (p90 inalterado)
+    flash = page.copy()
+    flash[:, 112:] = 87
+    gain = smoother.update(target, 8 * 0.15, image=flash, mask=visible)
+    assert gain == pytest.approx(255 / 87, rel=0.02)  # ~2,93
+
+    # Faixa de volta a 84: o ganho reabre para o teto seguro
+    for index in range(9, 16):
+        gain = smoother.update(target, index * 0.15, image=page, mask=visible)
+    out = exposure.apply_gain(page, gain)
+    assert out[0, 40, 0] > 190  # ~198 de saída, não preso em ~193
+
+
+def test_ceiling_gain_stays_limited_while_the_flash_persists():
+    """Controle: com a faixa MANTIDA no nível claro o ganho segue
+    limitado — reabre só quando a cena permite, não por timer."""
+    visible = np.ones((120, 120), dtype=bool)
+    page = np.full((120, 120, 3), 66, np.uint8)
+    page[:, 112:] = 84
+
+    smoother = exposure.PaperGainSmoother()
+    target = exposure.paper_gain(page, visible)
+    for index in range(6):
+        smoother.update(target, index * 0.15, image=page, mask=visible)
+
+    flash = page.copy()
+    flash[:, 112:] = 87
+    gains = [
+        smoother.update(target, (6 + index) * 0.15, image=flash, mask=visible)
+        for index in range(8)
+    ]
+    out = exposure.apply_gain(flash, gains[-1])
+    assert gains[-1] == pytest.approx(255 / 87, rel=0.02)
+    assert out[0, 112, 0] < 255  # realce preservado o tempo todo
+
+
 def test_first_frame_at_the_ceiling_applies_the_highlight_limit():
     """Devin Review PR #140: o primeiro update aceitava o alvo sem
     verificar clip — com alvo no teto e faixa clara visível, o ganho

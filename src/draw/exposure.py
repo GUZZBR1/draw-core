@@ -199,17 +199,14 @@ class PaperGainSmoother:
             # ganho retido). Valer dos dois lados do teto impede o
             # flicker quando a máscara cruza o corte (Devin Review
             # PR #140): a mesma cena produz a mesma saída.
-            if abs(error) <= _GAIN_DEADBAND_LOG:
-                # A banda morta segue valendo no teto: sem ela o ruído
-                # de um nível de p90 (~1,5%) moveria o ganho a cada
-                # passada (Devin Review PR #140). A proposta é o
-                # próprio retido — o ganho segura e só desce se a
-                # guarda de clip exigir.
-                self._gain = self._ceiling_safe_gain(
-                    self._gain, clip_sample, clip_is_color
-                )
-                return self._gain
-            proposed = math.exp(current_log + alpha * error)
+            # Alvo nominal fixo dentro da banda: o teto não mede a
+            # cena, e sem alvo variável na banda não há ruído para
+            # perseguir — o ganho converge para o nominal e a guarda
+            # limita a PROPOSTA pela observação da passada: desce no
+            # clarão e reabre quando ele some, sem catraca no retido
+            # (Devin Review PR #140).
+            nominal_error = math.log(_MAX_GAIN) - current_log
+            proposed = math.exp(current_log + alpha * nominal_error)
             self._gain = self._ceiling_safe_gain(proposed, clip_sample, clip_is_color)
             return self._gain
 
