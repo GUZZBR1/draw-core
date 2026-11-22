@@ -1551,6 +1551,29 @@ def test_repeated_reunions_do_not_duplicate_paths(monkeypatch):
     assert calls <= 16  # sem dedup seriam ~2^22 fins de caminho
 
 
+def test_reunions_with_mixed_widths_stay_bounded(monkeypatch):
+    """Review: o teste de dedup usava larguras iguais (estados idênticos se
+    fundem). Com pauta fina + traço grosso as histórias diferem e o dedup
+    não funde — mede o trabalho que SOBREVIVE: linear, não 2^n."""
+    calls = 0
+    extent = ruling._extent
+
+    def counting(arr, need):
+        nonlocal calls
+        calls += 1
+        return extent(arr, need)
+
+    monkeypatch.setattr(ruling, "_extent", counting)
+    h, w = 90, 46
+    ink = np.zeros((h, w), np.uint8)
+    ink[40:42, :] = 1  # pauta fina (2 px)
+    ink[44:50, :] = 1  # traço grosso (6 px) 2 px abaixo
+    ink[42:44, ::2] = 1  # ponte vertical: reencontro a cada 2 col
+    paths = ruling._trace_branch_out(ink, 0, 40, 49, w - 1, 1, 3, 12, 33)
+    assert paths
+    assert calls <= 128  # ~2 por coluna observado; 2^22 estaria fora da mesa
+
+
 def test_thin_branch_after_reunion_does_not_borrow_thickness():
     """Review: so a ponta fina sai da pauta depois do reencontro. Com
     historias por camada ela nao herda as colunas grossas do traco: a
@@ -1565,3 +1588,51 @@ def test_thin_branch_after_reunion_does_not_borrow_thickness():
     prob[323:325, 643:662] = 0.95  # so o esporro fino sai da pauta
     out = ruling.RulingFilter().apply(prob.copy())
     assert (out[320:326, 600:630] > 0.5).sum() == 0
+
+
+def test_a_shadow_bridge_between_sparse_pairs_does_not_protect_the_fold():
+    """Review: metades defasadas 8 px + ombros de 13 col — só um par emenda na
+    costura via remendo escuro de 2 col. Com 1 par não há referência de ombro
+    comum medida (min_bulk(1)=2), então o voto cru não decide: o par é provado
+    pelo traço, que desemboca no ombro do destino e sai inteiro."""
+    prob = _fold_page(offset_r=8, left_sh=13, right_sh=13, split_x=600)
+    prob[80:90, 598:602] = 0.97  # remendo ligando o par (0, 0) na costura
+    out = ruling.RulingFilter().apply(prob.copy())
+    # a faixa sai; o próprio remendo na costura é tinta conectada e pode
+    # ficar (desvio de espessura = assinatura de traço na sombra)
+    assert (out[80:96, 562:596] > 0.5).sum() == 0
+    assert (out[80:96, 606:638] > 0.5).sum() == 0
+
+
+def test_a_real_crossing_between_sparse_pairs_is_kept():
+    """Mesmo layout esparso, mas com traço real cruzando a faixa em cima da
+    pauta esquerda k=2 e saindo para espaço em branco do outro lado — o
+    traço conectado qualifica e o trecho no vinco fica."""
+    prob = _fold_page(offset_r=8, left_sh=13, right_sh=13, split_x=600)
+    prob[80:90, 598:602] = 0.97  # o remendo de sombra continua saindo
+    y = 80 + 40 * 2  # 160
+    prob[y : y + 6, 540:660] = 0.95
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[y : y + 6, 560:640] > 0.5).all()
+    assert (out[80:96, 562:596] > 0.5).sum() == 0
+    assert (out[80:96, 606:638] > 0.5).sum() == 0
+
+
+def test_a_shoulder_ending_on_the_neighboring_track_does_not_protect_the_fold():
+    """Review: vinco [560, 593) dentro da trilha esquerda (divisa em 600).
+    O ombro comum de 13 col atravessa a divisa e termina na pauta da trilha
+    vizinha — o veto tem de resolver a trilha do terminal por coluna:
+    ombro é ombro mesmo fora da trilha da faixa."""
+    prob = _fold_page(fa=560, fb=593, split_x=600, left_sh=13, right_sh=13)
+    prob[160:166, 480:560] = 0.97  # traço grosso longo à esquerda da linha 2
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[:, 562:591] > 0.5).sum() == 0
+
+
+def test_a_shoulder_before_the_split_does_not_protect_the_right_fold():
+    """Espelho: vinco [607, 640) dentro da trilha direita. O ombro de 13 col
+    termina na pauta da trilha esquerda (594..606 cruzando a divisa)."""
+    prob = _fold_page(fa=607, fb=640, split_x=600, left_sh=13, right_sh=13)
+    prob[160:166, 640:720] = 0.97  # traço grosso longo à direita da linha 2
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[:, 609:638] > 0.5).sum() == 0

@@ -970,6 +970,19 @@ def _lands_on_track(track, valid, x, top, bot):
     )
 
 
+def _lands_on_ruling(tracks, valid_list, x, top, bot):
+    """O terminal em x cobre pauta válida da trilha que CONTÉM a coluna x?
+
+    O terminal pode sair da trilha da faixa quando ela termina antes da
+    divisa: um ombro que atravessa a costura continua sendo ombro — a
+    trilha certa é a da coluna x, não a da faixa.
+    """
+    for i, t in enumerate(tracks):
+        if t.x0 <= x < t.x1:
+            return _lands_on_track(t, valid_list[i], x, top, bot)
+    return False
+
+
 def _project_forest(
     ink,
     t_src,
@@ -981,8 +994,8 @@ def _project_forest(
     direction,
     h_run,
     need,
-    t_dst=None,
-    valid_dst=None,
+    tracks,
+    valid_list,
     has_dst=False,
     bulk_dst=0,
     require_src_out=False,
@@ -1017,9 +1030,8 @@ def _project_forest(
         for cont in paths:
             shadow = (
                 has_dst
-                and t_dst is not None
                 and cont.ext <= bulk_dst + _GUTTER_EDGE_RUN
-                and _lands_on_track(t_dst, valid_dst, cont.x, cont.top, cont.bot)
+                and _lands_on_ruling(tracks, valid_list, cont.x, cont.top, cont.bot)
             )
             if not shadow:
                 clean = True
@@ -1138,8 +1150,8 @@ def _project_line(
         direction,
         h_run,
         need,
-        t_d,
-        v_d,
+        tracks,
+        valid_list,
         has_d,
         bulk_d,
         require_src_out,
@@ -1182,11 +1194,18 @@ def _verdict_paired(side_l, side_r, kl, kr, l_vot, r_vot, l_edge, r_edge):
     ok_l = vl.copy() if vl is not None else None
     ok_r = vr.copy() if vr is not None else None
     if vl is not None and vr is not None:
-        # o veto de ombro só fecha o par quando os dois lados têm
-        # referência (um ombro unilateral não veta)
         if has_pl and has_pr:
+            # o veto de ombro só fecha o par quando os dois lados têm
+            # referência (um ombro unilateral não veta)
             ok_l &= cl
             ok_r &= cr
+        elif not (has_pl or has_pr):
+            # nenhum lado mede referência comum (pares esparsos): o voto
+            # cru não decide — um remendo de sombra emendando poucos
+            # pares votaria nos dois lados e salvaria a faixa inteira.
+            # A linha votada é provada pelo traço (resgate em _mark_paired)
+            ok_l = np.zeros(kl.size, bool)
+            ok_r = np.zeros(kl.size, bool)
     else:
         # lado único observável: borda de imagem aceita o voto com o veto do
         # próprio ombro; cauda curta decide linha a linha pelo traço conectado
