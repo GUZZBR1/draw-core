@@ -35,6 +35,13 @@ _PAGE_IDENTITY_MIN_CONTAINMENT = 0.5
 _PAGE_IDENTITY_MAX_DEFERRALS = 5
 # Troca de pagina exige esta janela de vereditos limpos consecutivos.
 _PAGE_IDENTITY_SWITCH_CONSENSUS_FRAMES = 3
+# Cobertura minima da referencia para um same_page restaurar o
+# desenho INTEIRO: o recall mede so a tinta avaliada nesta passada,
+# e um fragmento coincidente numa pegada parcial satisfaz recall e
+# containment sem ter comparado o resto do desenho. Abaixo desta
+# fracao da referencia total efetivamente avaliada, o veredito e
+# inconclusivo (adiado), nao match — a passada nao prova nem refuta.
+_PAGE_IDENTITY_MIN_REFERENCE_FRACTION = 0.5
 # O canvas confirmado inclui o halo da fronteira, que uma passada
 # sozinha nunca cobre no limiar do voto: a comparacao dilata os
 # dois lados pela mesma tolerancia do comparador da regua.

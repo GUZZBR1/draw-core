@@ -17,6 +17,26 @@ PRODUCTION_PASS_INTERVAL_S = 0.15
 TECHNICAL_VOTE_LEVEL = 0.92
 
 
+def resolve_border_guard_px(shape, configured, *, min_auto_side=0):
+    """Largura (px) da faixa de guarda na borda externa da grade da pagina.
+
+    Quando `configured` e None, deriva ~0,8% do lado menor (minimo 6 px)
+    para isolar jitter de 1-3 px do quad contra fundo escuro sem cortar
+    tracos da area util; `min_auto_side` desliga o automatico em grades
+    minusculas de testes unitarios.
+    """
+    h, w = shape[:2]
+    short = min(h, w)
+    limit = max(0, (short - 1) // 2)
+    if limit == 0:
+        return 0
+    if configured is not None:
+        return min(int(configured), limit)
+    if short < min_auto_side:
+        return 0
+    return min(max(6, int(round(0.008 * short))), limit)
+
+
 @dataclass(frozen=True, slots=True)
 class InkConfig:
     """Comportamento do motor de tinta, injetado por construtor.
@@ -113,6 +133,10 @@ class InkConfig:
     # como tinta nova e capturada apenas em regioes visiveis.
     baseline: bool = False
     baseline_margin_px: int = 1
+    # Faixa de guarda (px) na borda externa da grade da pagina antes do
+    # voto: 0 desliga (legado); None deriva do tamanho retificado em
+    # grades de pagina inteira (>= 200 px).
+    border_guard_px: int | None = 0
     # Guarda fotometrica de oclusao (draw.ink.paper_evidence, issue #129):
     # a regiao que nao parece papel exposto (mao, braco, caneta, sombra)
     # fica congelada — sem remocao de tinta confirmada e sem voto novo —,
@@ -143,6 +167,10 @@ class InkConfig:
             or not 0 <= self.baseline_margin_px <= 4
         ):
             raise ValueError("baseline_margin_px deve ser um inteiro entre 0 e 4")
+        if self.border_guard_px is not None and self.border_guard_px < 0:
+            raise ValueError(
+                f"border_guard_px deve ser >= 0 ou None: {self.border_guard_px!r}"
+            )
 
     @classmethod
     def strict_vote(cls, level, **overrides):
@@ -215,6 +243,7 @@ class InkConfig:
             motion_veto=True,
             pass_interval_s=pass_interval_s,
             baseline=baseline,
+            border_guard_px=None,
         )
 
     @classmethod
@@ -241,6 +270,7 @@ class InkConfig:
             motion_veto=True,
             pass_interval_s=pass_interval_s,
             post_exit_full_window=True,
+            border_guard_px=None,
         )
 
     @classmethod

@@ -231,7 +231,10 @@ def test_identity_decision_deferred_when_prior_mostly_occluded(
         assert record["page_identity_decision"] == "deferred_occlusion"
         still = worker.poll(generation, 0)
         assert still is not None
-        assert np.array_equal(still.confirmed, canvas_before)
+        # Adiada, a tinta velha mora so na referencia — o canvas
+        # publicavel nao a carrega (o novo laco visto pode votar).
+        assert not np.any(still.confirmed & (canvas_before > 0))
+        np.testing.assert_array_equal(worker._identity_reference, canvas_before)
 
         # A mao sai: a mesma pagina decide same_page com recall 1.
         ink.content = _prob()
