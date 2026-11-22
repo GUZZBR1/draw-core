@@ -859,12 +859,11 @@ class PageModel:
         x0 = max(int(cx.min()) - reach, 0)
         x1 = min(int(cx.max()) + reach + 1, width)
         moved = ref_inf[y0:y1, x0:x1].copy()
-        known = np.full(moved.shape, np.inf, dtype=np.float32)
-        occluded = moved.copy()
         ty0, ty1 = max(y0, -dy), min(y1, height - dy)
         tx0, tx1 = max(x0, -dx), min(x1, width - dx)
         if ty1 <= ty0 or tx1 <= tx0:
-            return moved, known, occluded, y0, x0
+            known = np.full(moved.shape, np.inf, dtype=np.float32)
+            return moved, known, moved.copy(), y0, x0
         full = (ty0, ty1, tx0, tx1) == (y0, y1, x0, x1)
         ref = ref_inf[ty0:ty1, tx0:tx1]
         here = norm_gray[ty0:ty1, tx0:tx1]
@@ -882,6 +881,8 @@ class PageModel:
             # Toda amostra visivel e na grade: nenhum veto depende de
             # oclusao — sem os recortes extras.
             return moved, None, None, y0, x0
+        known = np.full(moved.shape, np.inf, dtype=np.float32)
+        occluded = ref_inf[y0:y1, x0:x1].copy()
         known[win] = np.where(judged & ~stayed, ref, np.inf)
         hidden = ~judged
         if foot is not None:

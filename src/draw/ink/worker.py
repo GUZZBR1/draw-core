@@ -748,13 +748,20 @@ def _evaluate_page_identity(
         if occluded is None or not np.any(occluded)
         else int(np.count_nonzero(occluded & prior_domain))
     )
+    unsure_in_domain = unsure is not None and bool(np.any(unsure & prior_domain))
     # Incerteza geometrica (recorte) somada a tinta coberta direto pela
     # mao no dominio: descobrir essa tinta pode bastar para o piso, e
     # o prazo nao pode apagar o desenho antes de a mao sair.
     uncovered_px = (
         0
-        if unsure is None or hand_visible is None or not np.any(unsure & prior_domain)
+        if not unsure_in_domain or hand_visible is None
         else int(np.count_nonzero(prior_domain & ~hand_visible & ~unsure))
+    )
+    # Hold anterior so persiste abaixo do piso enquanto a mao ainda
+    # cobre tinta do dominio: veto so geometrico (recorte) com a mao
+    # fora nao e oclusao, e o prazo volta a correr nessa pose.
+    hand_hidden = hand_visible is not None and bool(
+        np.any(prior_domain & ~hand_visible)
     )
     prior_eval = (
         prior_domain if identity_visible is None else (prior_domain & identity_visible)
@@ -820,7 +827,7 @@ def _evaluate_page_identity(
                 prior_eval_px,
                 True,
                 "occlusion",
-                hold_seen
+                (hold_seen and (hand_hidden or not unsure_in_domain))
                 or ambiguous_px > 0
                 or occluded_domain_px > 0
                 or (uncovered_px > 0 and prior_eval_px + uncovered_px >= min_eval_px),
