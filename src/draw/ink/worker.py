@@ -190,6 +190,20 @@ def _identity_required_visible_px(prior_px):
     )
 
 
+def _identity_same_page_visible_px(prior_px):
+    """Caligrafia visivel minima para FECHAR same_page.
+
+    O piso de avaliacao habilita a decisao; consumir a referencia
+    exige metade do desenho a vista — um fragmento correspondente
+    numa folha substituta herdaria o rabisco inteiro assim que a
+    mao saisse, com a referencia ja descartada.
+    """
+    return max(
+        int(identity._IDENTITY_SAME_PAGE_VISIBLE_FRACTION * prior_px),
+        1,
+    )
+
+
 def _crop_all_visible(visible, corners):
     """Todo o recorte do quad visivel na mascara?
 
@@ -1855,13 +1869,25 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     seen_d = cv2.dilate(seen.astype(np.uint8), kernel) > 0
                     seen_px = int(np.count_nonzero(seen))
                     if prior_hw_px > 0 and np.any(prior_bl):
-                        # Evidencia de caligrafia: tinta que a
-                        # referencia de impressao salva nao explica.
-                        # Na copia limpa a impressao comum cobria o
-                        # rabisco via dilatacao e forjava o recall.
-                        seen_hw_d = (
-                            cv2.dilate((seen & ~prior_bl).astype(np.uint8), kernel) > 0
-                        )
+                        # Evidencia de caligrafia: fora da guarda
+                        # impressa vale qualquer tinta; dentro dela,
+                        # so o que supera o teste de mudanca da
+                        # baseline. Na copia limpa a impressao
+                        # inalterada nao forja o rabisco, e o traco
+                        # confirmado sobre a impressao — dentro da
+                        # guarda por definicao — continua contando.
+                        change_threshold = self._accumulator._baseline_change_threshold
+                        seen_hw = seen & ~prior_bl
+                        if (
+                            change_threshold is not None
+                            and change_threshold.shape == seen.shape
+                        ):
+                            np.logical_or(
+                                seen_hw,
+                                seen & (candidate > change_threshold),
+                                out=seen_hw,
+                            )
+                        seen_hw_d = cv2.dilate(seen_hw.astype(np.uint8), kernel) > 0
                     else:
                         seen_hw_d = seen_d
                     if identity_visible is not None:
@@ -1915,6 +1941,20 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                             and p.identity_containment
                             >= identity._PAGE_IDENTITY_MIN_CONTAINMENT
                         )
+                        if (
+                            p.keep_page
+                            and prior_hw_px > 0
+                            and hw_visible_px
+                            < _identity_same_page_visible_px(prior_hw_px)
+                        ):
+                            # Match sobre um fragmento: a substituta
+                            # que expoe so um pedaco do rabisco
+                            # herdaria o desenho inteiro. A referencia
+                            # fica pendente ate a mao sair ou o
+                            # timeout decidir.
+                            p.identity_deferred = True
+                            p.quarantine_reason = "occlusion"
+                            p.keep_page = False
             if p.identity_deferred:
                 self._identity_defer_count += 1
                 p.quarantine_frames = self._identity_defer_count

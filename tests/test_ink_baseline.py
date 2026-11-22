@@ -956,3 +956,177 @@ def test_crossing_stroke_over_dark_print_edge_confirms():
     # O nucleo segue suprimido: drift sobre a propria captura
     # escura continua insuficiente.
     assert not np.any(result["confirmed"][20:22, 5:43])
+
+
+def test_recovery_keeps_stroke_confirmed_inside_print_guard(monkeypatch):
+    """Traco confirmado dentro da guarda impressa: na volta da
+    mesma folha ele vale como evidencia de caligrafia — supera a
+    referencia salva, diferente da impressao inalterada."""
+    from draw.ink import worker as worker_module
+
+    monkeypatch.setattr(worker_module, "_PAGE_CLEAN_INTERVAL_SECONDS", 0)
+    config = InkConfig(
+        baseline=True,
+        removal=False,
+        anchor_arbitration=False,
+        anchor_follow=False,
+    )
+    printed = np.zeros((H, W), dtype=np.float32)
+    printed[20:24, 4:44] = 0.70
+    model = _MutablePageClean(printed.copy())
+    worker = PageCleanWorker(model, config=config).start()
+    generation = worker.new_generation()
+    _submit_and_wait(worker, generation)
+
+    # Traco sobre a impressao fraca: aumento forte dentro da
+    # guarda confirma como tinta do usuario.
+    drawing = printed.copy()
+    drawing[21:23, 20:28] = 0.98
+    model.prob = drawing
+    for _ in range(3):
+        _submit_and_wait(worker, generation)
+    saved_canvas = worker.poll(generation, 0).confirmed.copy()
+    assert np.any(saved_canvas[21:23, 20:28])
+
+    # A mesma folha volta: todo o traco esta dentro da guarda,
+    # mas ainda supera a referencia — nao pode apagar o desenho.
+    same_gen = worker.new_generation(preserve_identity=True)
+    _submit_and_wait(worker, same_gen)
+    assert np.array_equal(worker.poll(same_gen, 0).confirmed, saved_canvas)
+    assert (
+        worker.telemetry_snapshot()["page_identity_events"][-1]["decision"]
+        == "same_page"
+    )
+    worker.stop()
+
+
+def test_recovery_rejects_clean_copy_where_stroke_sat_in_guard(
+    monkeypatch,
+):
+    """Copia limpa na mesma geometria: a impressao fraca dentro da
+    guarda nao supera a referencia e nao vira evidencia de
+    caligrafia — a decisao e pagina nova."""
+    from draw.ink import worker as worker_module
+
+    monkeypatch.setattr(worker_module, "_PAGE_CLEAN_INTERVAL_SECONDS", 0)
+    config = InkConfig(
+        baseline=True,
+        removal=False,
+        anchor_arbitration=False,
+        anchor_follow=False,
+    )
+    printed = np.zeros((H, W), dtype=np.float32)
+    printed[20:24, 4:44] = 0.70
+    model = _MutablePageClean(printed.copy())
+    worker = PageCleanWorker(model, config=config).start()
+    generation = worker.new_generation()
+    _submit_and_wait(worker, generation)
+
+    drawing = printed.copy()
+    drawing[21:23, 20:28] = 0.98
+    model.prob = drawing
+    for _ in range(3):
+        _submit_and_wait(worker, generation)
+    assert np.any(worker.poll(generation, 0).confirmed[21:23, 20:28])
+
+    model.prob = printed.copy()
+    clean_gen = worker.new_generation(preserve_identity=True)
+    for _ in range(3):
+        _submit_and_wait(worker, clean_gen)
+    decisions = [
+        event["decision"]
+        for event in worker.telemetry_snapshot()["page_identity_events"]
+    ]
+    assert "same_page" not in decisions[-3:]
+    assert decisions[-1] == "new_page"
+    assert not np.any(worker.poll(clean_gen, 0).confirmed)
+    worker.stop()
+
+
+def test_recovery_defers_on_fragment_match_until_hand_lifts(
+    monkeypatch,
+):
+    """Substituta expondo so um quarto do rabisco com match
+    perfeito: nao fecha same_page — a referencia fica pendente
+    ate evidencia suficiente."""
+    from draw.ink import worker as worker_module
+
+    monkeypatch.setattr(worker_module, "_PAGE_CLEAN_INTERVAL_SECONDS", 0)
+    config = InkConfig(
+        baseline=True,
+        removal=False,
+        anchor_arbitration=False,
+        anchor_follow=False,
+    )
+    printed = np.zeros((H, W), dtype=np.float32)
+    printed[8:12, 4:44] = 0.95
+    model = _MutablePageClean(printed.copy())
+    worker = PageCleanWorker(model, config=config).start()
+    generation = worker.new_generation()
+    _submit_and_wait(worker, generation)
+
+    # Rabisco de 36 px em duas colunas a 8 px de distancia —
+    # fora do raio de dilatacao uma da outra.
+    drawing = printed.copy()
+    drawing[20:38, 22] = 0.95
+    drawing[20:38, 30] = 0.95
+    model.prob = drawing
+    for _ in range(3):
+        _submit_and_wait(worker, generation)
+    assert np.any(worker.poll(generation, 0).confirmed)
+
+    # Substituta com uma marca que cobre so uma das colunas; o
+    # dedo esconde o resto e expoe 9 px que casam — recall
+    # aparente de 100% sobre 25% do desenho.
+    replacement = printed.copy()
+    replacement[20:38, 22] = 0.95
+    model.prob = replacement
+    repl_gen = worker.new_generation(preserve_identity=True)
+    hidden = np.ones((H, W), dtype=bool)
+    hidden[20:38, 21:24] = False
+    hidden[20:38, 29:32] = False
+    hidden[20:29, 22] = True
+    _submit_and_wait(worker, repl_gen, visible=hidden)
+    events = worker.telemetry_snapshot()["page_identity_events"]
+    assert events[-1]["decision"] == "deferred_occlusion"
+    assert worker._identity_reference is not None
+
+    # A mao sai: so 18 dos 36 px casam — pagina nova, nao
+    # heranca do desenho.
+    for _ in range(3):
+        _submit_and_wait(worker, repl_gen)
+    events = worker.telemetry_snapshot()["page_identity_events"]
+    assert events[-1]["decision"] == "new_page"
+    assert not np.any(worker.poll(repl_gen, 0).confirmed)
+    worker.stop()
+
+
+def test_margin_drift_noise_does_not_confirm_ghost_ink():
+    """A margem da guarda exige vizinhanca + delta: um drift de
+    registro que relê a borda 0.82 sobre referencia 0.80 nao e
+    tinta nova."""
+    config = InkConfig(baseline=True, removal=False)
+    accumulator = LayeredInkAccumulator(config.seen_threshold, config)
+    visible = np.ones((H, W), dtype=bool)
+    coverage = np.ones((H, W), dtype=bool)
+    printed = np.zeros((H, W), dtype=np.float32)
+    printed[20:23, 5:43] = 0.80
+    accumulator.add(
+        printed,
+        visible,
+        baseline_capture=True,
+        baseline_coverage=coverage,
+    )
+
+    # A folha desloca 1 px: a margem passa a ler a borda da
+    # impressao — 0.82 supera a referencia mas nao o delta.
+    drifted = printed.copy()
+    drifted[19, 5:43] = 0.82
+    for _ in range(4):
+        result = accumulator.add(
+            drifted,
+            visible,
+            baseline_capture=True,
+            baseline_coverage=coverage,
+        )
+    assert not np.any(result["confirmed"])

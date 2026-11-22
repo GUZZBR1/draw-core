@@ -215,6 +215,14 @@ class LayeredInkAccumulator:
                     self._baseline_guard,
                     out=self._baseline_changed,
                 )
+                # Dois criterios. No pixel impresso o aumento vale
+                # contra a propria captura (exact + delta — um drift de
+                # centesimos nao reconfirma a impressao como tinta
+                # nova). Em paralelo todo pixel da guarda enfrenta a
+                # referencia da vizinhanca + delta — a margem contra
+                # drift de registro — com teto de 0.99 para nao vetar
+                # para sempre o traco que cruza a borda de uma
+                # impressao escura: 1.0 ainda passa.
                 np.copyto(self._baseline_change_threshold, np.inf)
                 np.add(
                     self._baseline_exact_max,
@@ -222,37 +230,23 @@ class LayeredInkAccumulator:
                     out=self._baseline_change_threshold,
                     where=self._baseline_changed,
                 )
-                # Dois criterios, sem margem dupla: no pixel impresso o
-                # aumento vale contra a propria captura (exact + delta —
-                # um drift de centesimos nao reconfirma a impressao como
-                # tinta nova), e qualquer pixel da guarda ainda precisa
-                # superar o maximo da vizinhanca, que e a protecao contra
-                # drift de registro. Um traco que cruza a borda de uma
-                # impressao escura passa: exigir vizinhanca + delta
-                # colocaria a exigencia acima de 1.0.
-                np.maximum(
-                    self._baseline_change_threshold,
+                np.add(
                     self._baseline_reference_max,
-                    out=self._baseline_change_threshold,
+                    _BASELINE_CHANGE_THRESHOLD,
+                    out=self._baseline_capture_scratch,
                     where=self._baseline_changed,
                 )
-                # Evita veto permanente em pixels vizinhos a impressao escura:
-                # o teto de 0.99 so vale para a margem dilatada.
-                np.less(
-                    self._baseline_exact_max,
-                    self._config.vote_hit,
-                    out=self._baseline_not_guard,
-                )
-                np.logical_and(
-                    self._baseline_not_guard,
-                    self._baseline_changed,
-                    out=self._baseline_not_guard,
-                )
                 np.minimum(
-                    self._baseline_change_threshold,
+                    self._baseline_capture_scratch,
                     np.float32(0.99),
+                    out=self._baseline_capture_scratch,
+                    where=self._baseline_changed,
+                )
+                np.maximum(
+                    self._baseline_change_threshold,
+                    self._baseline_capture_scratch,
                     out=self._baseline_change_threshold,
-                    where=self._baseline_not_guard,
+                    where=self._baseline_changed,
                 )
                 self._baseline_pending_px = max(
                     0, self._baseline_pending_px - captured_px
