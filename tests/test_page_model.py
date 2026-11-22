@@ -500,6 +500,99 @@ def test_page_model_reacquires_ink_traced_over_printed_guide_line(monkeypatch):
         worker.stop()
 
 
+def test_page_model_reacquires_visible_tick_beside_occluded_printed_mark(monkeypatch):
+    """R240-244: marca impressa oculta pela mao nao pode se alinhar sobre o tick visivel."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        gen1 = worker.new_generation()
+        vis_all = np.ones((H, W), dtype=bool)
+        form = np.full((H, W), PAPER, dtype=np.float32)
+        # Marca impressa de 2 colunas [20:25, 53:55]
+        form[20:25, 53:55] = INK
+        for _ in range(3):
+            _drive(worker, gen1, form, visible=vis_all)
+        assert np.count_nonzero(_confirmed(worker, gen1)) == 0
+
+        # Tick manuscrito de 2 colunas [20:25, 55:57] imediatamente a direita da marca impressa
+        with_tick = form.copy()
+        with_tick[20:25, 55:57] = INK
+        for _ in range(4):
+            _drive(worker, gen1, with_tick, visible=vis_all)
+        assert np.count_nonzero(_confirmed(worker, gen1)) == 10
+
+        # Na reaquisicao, a mao cobre a marca impressa [20:25, 53:55] mas deixa o tick visivel
+        vis_hand = np.ones((H, W), dtype=bool)
+        vis_hand[18:27, 45:55] = False
+        gen2 = worker.new_generation(preserve_identity=True)
+        _drive(worker, gen2, with_tick, visible=vis_hand)
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] == "same_page"
+        assert np.count_nonzero(_confirmed(worker, gen2)[20:25, 55:57]) == 10
+    finally:
+        worker.stop()
+
+
+def test_page_model_reacquires_partially_covered_stroke_crossing_printed_rule(
+    monkeypatch,
+):
+    """R1847-1858: traco de 60 px (10 sobre pauta, 50 fora) com 20 px cobertos pela mao (30 fora visiveis) nao defere."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        gen1 = worker.new_generation()
+        vis_all = np.ones((H, W), dtype=bool)
+        PRINTED_GUIDE = 95.0
+        form = np.full((H, W), PAPER, dtype=np.float32)
+        # Pauta impressa horizontal nas linhas 30..32
+        form[30:32, 10:100] = PRINTED_GUIDE
+        for _ in range(3):
+            _drive(worker, gen1, form, visible=vis_all)
+        assert np.count_nonzero(_confirmed(worker, gen1)) == 0
+
+        # Traco vertical de 60 px (12 linhas x 5 colunas: linhas 28..40, colunas 50..55)
+        # 10 px cruzam a pauta [30:32, 50:55] e 50 px ficam fora da pauta
+        with_stroke = form.copy()
+        with_stroke[28:40, 50:55] = INK
+        for _ in range(4):
+            _drive(worker, gen1, with_stroke, visible=vis_all)
+        assert np.count_nonzero(_confirmed(worker, gen1)) == 60
+
+        # Na reaquisicao, a mao cobre as ultimas 4 linhas do traco [36:40, 50:55] (20 px fora da pauta),
+        # restando 40 px visiveis do traco (10 sobre a pauta + 30 fora da pauta < 32).
+        vis_partial = np.ones((H, W), dtype=bool)
+        vis_partial[36:45, 45:60] = False
+        gen2 = worker.new_generation(preserve_identity=True)
+        _drive(worker, gen2, with_stroke, visible=vis_partial)
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] == "same_page"
+        assert events[-1]["deferred"] is False
+        assert np.count_nonzero(_confirmed(worker, gen2)[28:40, 50:55]) == 60
+    finally:
+        worker.stop()
+
+
+def test_identity_recovery_budget_on_a4_grid():
+    """worker.py:236: alinhamento e avaliacao de identidade em grade A4 rodam fora do lock e < 10 ms."""
+    shape = (1200, 850)
+    ref = np.zeros(shape, dtype=np.uint8)
+    ref[400:420, 300:350] = 255
+    baseline = np.zeros(shape, dtype=bool)
+    baseline[200:205, 100:700] = True
+    baseline[400:405, 250:300] = True
+    candidate = np.zeros(shape, dtype=np.float32)
+    candidate[201:206, 101:701] = 0.95
+    candidate[401:421, 301:351] = 0.95
+    visible = np.ones(shape, dtype=bool)
+    worker_mod._evaluate_page_identity(ref, baseline, candidate, visible, 0.7)
+    start = time.monotonic()
+    for _ in range(20):
+        res = worker_mod._evaluate_page_identity(ref, baseline, candidate, visible, 0.7)
+    per_pass_ms = (time.monotonic() - start) / 20 * 1000
+    assert res[0] is True
+    assert per_pass_ms < 10.0
+
+
 def test_page_model_reference_stays_within_camera_range_after_large_brightness_jump():
     """page_model.py:170: salto grande de brilho rejeitado por _estimate_gain nao estoura 255."""
     model = pm_mod.PageModel((H, W), confirm_obs=1, rate=0.5)

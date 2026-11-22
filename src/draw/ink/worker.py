@@ -226,25 +226,158 @@ def _shift_bool_mask(mask, dy, dx):
     return out
 
 
-def _align_identity_baseline(identity_baseline, seen, prior, radius):
+def _align_identity_baseline(identity_baseline, seen, prior, radius, kernel):
     base_nonprior = identity_baseline & ~prior
     if radius <= 0 or not np.any(base_nonprior) or not np.any(seen):
         return identity_baseline
-    best_overlap = int(np.count_nonzero(base_nonprior & seen))
+    prior_d = cv2.dilate(prior.astype(np.uint8), kernel) > 0
+    seen_indep = seen & ~prior_d
+    if not np.any(seen_indep):
+        return identity_baseline
+    ys_b, xs_b = np.nonzero(base_nonprior)
+    ys_s, xs_s = np.nonzero(seen_indep)
+    y0 = max(0, max(int(ys_b.min()) - radius, int(ys_s.min()) - radius))
+    y1 = min(
+        base_nonprior.shape[0],
+        min(int(ys_b.max()) + radius + 1, int(ys_s.max()) + radius + 1),
+    )
+    x0 = max(0, max(int(xs_b.min()) - radius, int(xs_s.min()) - radius))
+    x1 = min(
+        base_nonprior.shape[1],
+        min(int(xs_b.max()) + radius + 1, int(xs_s.max()) + radius + 1),
+    )
+    if y1 <= y0 or x1 <= x0:
+        return identity_baseline
+    base_crop = base_nonprior[y0:y1, x0:x1]
+    seen_crop = seen_indep[y0:y1, x0:x1]
+    best_overlap = int(np.count_nonzero(base_crop & seen_crop))
     best_dy, best_dx = 0, 0
     best_dist = 0
     for dy in range(-radius, radius + 1):
         for dx in range(-radius, radius + 1):
             if dy == 0 and dx == 0:
                 continue
-            shifted_nonprior = _shift_bool_mask(base_nonprior, dy, dx)
-            overlap = int(np.count_nonzero(shifted_nonprior & seen))
+            shifted_crop = _shift_bool_mask(base_crop, dy, dx)
+            overlap = int(np.count_nonzero(shifted_crop & seen_crop))
             dist = abs(dy) + abs(dx)
             if overlap > best_overlap or (overlap == best_overlap and dist < best_dist):
                 best_overlap = overlap
                 best_dy, best_dx = dy, dx
                 best_dist = dist
     return _shift_bool_mask(identity_baseline, best_dy, best_dx)
+
+
+def _evaluate_page_identity(
+    identity_reference,
+    identity_baseline,
+    candidate,
+    identity_visible,
+    threshold,
+):
+    prior = identity_reference > 0
+    has_baseline = (
+        identity_baseline is not None
+        and identity_baseline.shape == candidate.shape
+        and bool(np.any(identity_baseline))
+    )
+    prior_px = int(np.count_nonzero(prior))
+    if prior_px == 0:
+        seen_any = candidate > threshold
+        if has_baseline:
+            kernel = np.ones((identity._IDENTITY_DILATION_KERNEL,) * 2, np.uint8)
+            baseline_d = cv2.dilate(identity_baseline.astype(np.uint8), kernel) > 0
+            seen_any = seen_any & ~baseline_d
+        if identity_visible is not None:
+            seen_any = seen_any & identity_visible
+        keep_page = bool(not np.any(seen_any))
+        recall = 1.0 if keep_page else 0.0
+        return (
+            keep_page,
+            recall,
+            None,
+            prior_px,
+            None,
+            False,
+            None,
+        )
+
+    seen = candidate > threshold
+    kernel = np.ones((identity._IDENTITY_DILATION_KERNEL,) * 2, np.uint8)
+    if has_baseline:
+        prior_eval = prior & ~identity_baseline
+        if not np.any(prior_eval):
+            prior_eval = prior
+        else:
+            radius = identity._IDENTITY_DILATION_KERNEL // 2
+            aligned_baseline = _align_identity_baseline(
+                identity_baseline, seen, prior_eval, radius, kernel
+            )
+            seen = seen & ~aligned_baseline
+    else:
+        prior_eval = prior
+    prior_eval_px = int(np.count_nonzero(prior_eval))
+    seen_d = cv2.dilate(seen.astype(np.uint8), kernel) > 0
+    if identity_visible is not None:
+        prior_visible = prior_eval & identity_visible
+        prior_visible_px = int(np.count_nonzero(prior_visible))
+        ambig_visible_px = int(
+            np.count_nonzero((prior & ~prior_eval) & identity_visible)
+        )
+        base_min = max(
+            identity._IDENTITY_MIN_VISIBLE_PX,
+            int(identity._IDENTITY_MIN_VISIBLE_FRACTION * prior_px),
+        )
+        min_visible_px = min(
+            prior_eval_px,
+            max(1, base_min - ambig_visible_px),
+        )
+        if prior_visible_px < min_visible_px:
+            return (
+                False,
+                None,
+                None,
+                prior_px,
+                prior_visible_px,
+                True,
+                "occlusion",
+            )
+        prior_d = cv2.dilate(prior_visible.astype(np.uint8), kernel) > 0
+        recall = np.count_nonzero(prior_visible & seen_d) / prior_visible_px
+        seen_px = int(np.count_nonzero(seen))
+        containment = (
+            0.0 if seen_px == 0 else (np.count_nonzero(seen & prior_d) / seen_px)
+        )
+        keep_page = bool(
+            recall >= identity._PAGE_IDENTITY_MIN_RECALL
+            and containment >= identity._PAGE_IDENTITY_MIN_CONTAINMENT
+        )
+        return (
+            keep_page,
+            recall,
+            containment,
+            prior_px,
+            prior_visible_px,
+            False,
+            None,
+        )
+
+    prior_d = cv2.dilate(prior_eval.astype(np.uint8), kernel) > 0
+    recall = np.count_nonzero(prior_eval & seen_d) / prior_eval_px
+    seen_px = int(np.count_nonzero(seen))
+    containment = 0.0 if seen_px == 0 else (np.count_nonzero(seen & prior_d) / seen_px)
+    keep_page = bool(
+        recall >= identity._PAGE_IDENTITY_MIN_RECALL
+        and containment >= identity._PAGE_IDENTITY_MIN_CONTAINMENT
+    )
+    return (
+        keep_page,
+        recall,
+        containment,
+        prior_px,
+        None,
+        False,
+        None,
+    )
 
 
 @dataclass(slots=True)
@@ -292,6 +425,9 @@ class _Pass:
     motion_decision: object = None
     motion_fix: object = None
     # identidade (produzida em _pass_identity, lida no restante)
+    identity_reference_snap: object = None
+    identity_baseline_snap: object = None
+    identity_precomputed: object = None
     identity_decision: object = None
     identity_recall: object = None
     identity_containment: object = None
@@ -1427,6 +1563,9 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             p.recovering = self._identity_reference is not None and (
                 p.first_pass or self._identity_recovery_requested
             )
+            if p.recovering:
+                p.identity_reference_snap = self._identity_reference
+                p.identity_baseline_snap = self._identity_baseline
             p.anchor = (
                 self._identity_reference_corners
                 if p.recovering
@@ -1718,6 +1857,18 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             p.reg_info["registration_is_identity"] = (
                 registration._registration_is_identity(matrix)
             )
+        if p.identity_reference_snap is not None:
+            p.identity_precomputed = (
+                p.identity_reference_snap,
+                p.identity_baseline_snap,
+                _evaluate_page_identity(
+                    p.identity_reference_snap,
+                    p.identity_baseline_snap,
+                    p.registered_prob,
+                    p.registered_visible,
+                    self._accumulator.threshold,
+                ),
+            )
 
     def _pass_commit(self, p):
         """Decisao, PageModel (fora do lock), voto e publicacao da passada.
@@ -1798,112 +1949,31 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             identity_recovery_requested = self._identity_recovery_requested
             p.keep_page = False
             if identity_reference is not None:
-                candidate = p.registered_prob
-                identity_visible = p.registered_visible
                 if identity_corners is not None and p.corners is not None:
                     p.identity_geometry_registered = True
-                prior = identity_reference > 0
-                has_baseline = (
-                    identity_baseline is not None
-                    and identity_baseline.shape == p.prob.shape
-                    and bool(np.any(identity_baseline))
-                )
-                prior_px = int(np.count_nonzero(prior))
-                p.identity_reference_px = prior_px
-                if prior_px == 0:
-                    seen_any = candidate > self._accumulator.threshold
-                    if has_baseline:
-                        kernel = np.ones(
-                            (identity._IDENTITY_DILATION_KERNEL,) * 2, np.uint8
-                        )
-                        baseline_d = (
-                            cv2.dilate(identity_baseline.astype(np.uint8), kernel) > 0
-                        )
-                        seen_any = seen_any & ~baseline_d
-                    if identity_visible is not None:
-                        seen_any = seen_any & identity_visible
-                    p.keep_page = not np.any(seen_any)
-                    p.identity_recall = 1.0 if p.keep_page else 0.0
+                if (
+                    p.identity_precomputed is not None
+                    and p.identity_precomputed[0] is identity_reference
+                    and p.identity_precomputed[1] is identity_baseline
+                ):
+                    result = p.identity_precomputed[2]
                 else:
-                    seen = candidate > self._accumulator.threshold
-                    kernel = np.ones(
-                        (identity._IDENTITY_DILATION_KERNEL,) * 2, np.uint8
+                    result = _evaluate_page_identity(
+                        identity_reference,
+                        identity_baseline,
+                        p.registered_prob,
+                        p.registered_visible,
+                        self._accumulator.threshold,
                     )
-                    if has_baseline:
-                        prior_eval = prior & ~identity_baseline
-                        if not np.any(prior_eval):
-                            prior_eval = prior
-                        else:
-                            radius = identity._IDENTITY_DILATION_KERNEL // 2
-                            aligned_baseline = _align_identity_baseline(
-                                identity_baseline, seen, prior_eval, radius
-                            )
-                            seen = seen & ~aligned_baseline
-                    else:
-                        prior_eval = prior
-                    prior_eval_px = int(np.count_nonzero(prior_eval))
-                    seen_d = cv2.dilate(seen.astype(np.uint8), kernel) > 0
-                    if identity_visible is not None:
-                        prior_visible = prior_eval & identity_visible
-                        prior_visible_px = int(np.count_nonzero(prior_visible))
-                        p.identity_visible_reference_px = prior_visible_px
-                        min_visible_px = min(
-                            prior_eval_px,
-                            max(
-                                identity._IDENTITY_MIN_VISIBLE_PX,
-                                int(
-                                    identity._IDENTITY_MIN_VISIBLE_FRACTION
-                                    * prior_eval_px
-                                ),
-                            ),
-                        )
-                        if prior_visible_px < min_visible_px:
-                            # Tinta anterior quase toda
-                            # coberta: decidir agora seria
-                            # condenar a pagina pela mao.
-                            # Adia; a referencia fica para a
-                            # proxima passada.
-                            p.identity_deferred = True
-                            p.quarantine_reason = "occlusion"
-                        else:
-                            prior_d = (
-                                cv2.dilate(
-                                    prior_visible.astype(np.uint8),
-                                    kernel,
-                                )
-                                > 0
-                            )
-                            p.identity_recall = (
-                                np.count_nonzero(prior_visible & seen_d)
-                                / prior_visible_px
-                            )
-                            seen_px = int(np.count_nonzero(seen))
-                            p.identity_containment = (
-                                0.0
-                                if seen_px == 0
-                                else (np.count_nonzero(seen & prior_d) / seen_px)
-                            )
-                            p.keep_page = (
-                                p.identity_recall >= identity._PAGE_IDENTITY_MIN_RECALL
-                                and p.identity_containment
-                                >= identity._PAGE_IDENTITY_MIN_CONTAINMENT
-                            )
-                    else:
-                        prior_d = cv2.dilate(prior_eval.astype(np.uint8), kernel) > 0
-                        p.identity_recall = (
-                            np.count_nonzero(prior_eval & seen_d) / prior_eval_px
-                        )
-                        seen_px = int(np.count_nonzero(seen))
-                        p.identity_containment = (
-                            0.0
-                            if seen_px == 0
-                            else (np.count_nonzero(seen & prior_d) / seen_px)
-                        )
-                        p.keep_page = (
-                            p.identity_recall >= identity._PAGE_IDENTITY_MIN_RECALL
-                            and p.identity_containment
-                            >= identity._PAGE_IDENTITY_MIN_CONTAINMENT
-                        )
+                (
+                    p.keep_page,
+                    p.identity_recall,
+                    p.identity_containment,
+                    p.identity_reference_px,
+                    p.identity_visible_reference_px,
+                    p.identity_deferred,
+                    p.quarantine_reason,
+                ) = result
             if p.identity_deferred:
                 self._identity_defer_count += 1
                 p.quarantine_frames = self._identity_defer_count
