@@ -199,7 +199,7 @@ def _identity_same_page_visible_px(prior_px):
     mao saisse, com a referencia ja descartada.
     """
     return max(
-        int(identity._IDENTITY_SAME_PAGE_VISIBLE_FRACTION * prior_px),
+        int(np.ceil(identity._IDENTITY_SAME_PAGE_VISIBLE_FRACTION * prior_px)),
         1,
     )
 
@@ -272,6 +272,7 @@ class _Pass:
     identity_reference_px: object = None
     identity_visible_reference_px: object = None
     identity_deferred: bool = False
+    identity_fragment_match: bool = False
     identity_timed_out: bool = False
     identity_switch_pending: bool = False
     identity_geometry_registered: bool = False
@@ -1869,25 +1870,35 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     seen_d = cv2.dilate(seen.astype(np.uint8), kernel) > 0
                     seen_px = int(np.count_nonzero(seen))
                     if prior_hw_px > 0 and np.any(prior_bl):
-                        # Evidencia de caligrafia: fora da guarda
-                        # impressa vale qualquer tinta; dentro dela,
-                        # so o que supera o teste de mudanca da
-                        # baseline. Na copia limpa a impressao
-                        # inalterada nao forja o rabisco, e o traco
-                        # confirmado sobre a impressao — dentro da
-                        # guarda por definicao — continua contando.
+                        # Evidencia de caligrafia separada por regiao:
+                        # pixel de rabisco fora da guarda so casa com
+                        # tinta fora dela — impressao deslocada que
+                        # entra na margem acima do teto nao forja o
+                        # rabisco vizinho — e pixel dentro da guarda
+                        # so casa com tinta que supera a referencia
+                        # salva. Na copia limpa a impressao inalterada
+                        # nao forja o rabisco; o traco confirmado
+                        # sobre ela continua contando.
                         change_threshold = self._accumulator._baseline_change_threshold
-                        seen_hw = seen & ~prior_bl
+                        hw_out_d = (
+                            cv2.dilate((seen & ~prior_bl).astype(np.uint8), kernel) > 0
+                        )
                         if (
                             change_threshold is not None
                             and change_threshold.shape == seen.shape
                         ):
-                            np.logical_or(
-                                seen_hw,
-                                seen & (candidate > change_threshold),
-                                out=seen_hw,
+                            hw_in_d = (
+                                cv2.dilate(
+                                    (seen & (candidate > change_threshold)).astype(
+                                        np.uint8
+                                    ),
+                                    kernel,
+                                )
+                                > 0
                             )
-                        seen_hw_d = cv2.dilate(seen_hw.astype(np.uint8), kernel) > 0
+                        else:
+                            hw_in_d = np.zeros(seen.shape, dtype=bool)
+                        seen_hw_d = np.where(prior_bl, hw_in_d, hw_out_d)
                     else:
                         seen_hw_d = seen_d
                     if identity_visible is not None:
@@ -1950,13 +1961,20 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                             # Match sobre um fragmento: a substituta
                             # que expoe so um pedaco do rabisco
                             # herdaria o desenho inteiro. A referencia
-                            # fica pendente ate a mao sair ou o
-                            # timeout decidir.
+                            # fica pendente ate a mao sair — e como a
+                            # evidencia e POSITIVA, a espera nao conta
+                            # para o timeout que apagaria o canvas.
                             p.identity_deferred = True
-                            p.quarantine_reason = "occlusion"
+                            p.identity_fragment_match = True
+                            p.quarantine_reason = "fragment_match"
                             p.keep_page = False
             if p.identity_deferred:
-                self._identity_defer_count += 1
+                # Oclusao sem evidencia conta para o timeout;
+                # fragmento correspondente (evidencia positiva) espera
+                # a mao sair — zerar depois de 5 passadas apagava um
+                # desenho real sob a mao.
+                if not p.identity_fragment_match:
+                    self._identity_defer_count += 1
                 p.quarantine_frames = self._identity_defer_count
                 p.identity_timed_out = (
                     p.quarantine_frames > identity._PAGE_IDENTITY_MAX_DEFERRALS

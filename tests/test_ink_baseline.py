@@ -1130,3 +1130,185 @@ def test_margin_drift_noise_does_not_confirm_ghost_ink():
             baseline_coverage=coverage,
         )
     assert not np.any(result["confirmed"])
+
+
+def test_shifted_print_into_margin_does_not_restore_stale_sketch(
+    monkeypatch,
+):
+    """Copia limpa com a impressao escura deslocada para dentro da
+    margem: leitura acima do teto de 0.99 na guarda nao forja o
+    rabisco que ficava a 1 px dela — evidencia de fora da guarda
+    so casa com tinta de fora."""
+    from draw.ink import worker as worker_module
+
+    monkeypatch.setattr(worker_module, "_PAGE_CLEAN_INTERVAL_SECONDS", 0)
+    config = InkConfig(
+        baseline=True,
+        removal=False,
+        anchor_arbitration=False,
+        anchor_follow=False,
+    )
+    printed = np.zeros((H, W), dtype=np.float32)
+    printed[20:24, 4:44] = 0.999
+    model = _MutablePageClean(printed.copy())
+    worker = PageCleanWorker(model, config=config).start()
+    generation = worker.new_generation()
+    _submit_and_wait(worker, generation)
+
+    # Rabisco a 1 px da margem da guarda (guarda cobre ate 24).
+    drawing = printed.copy()
+    drawing[25:27, 22:26] = 0.95
+    model.prob = drawing
+    for _ in range(3):
+        _submit_and_wait(worker, generation)
+    assert np.any(worker.poll(generation, 0).confirmed)
+
+    # Copia limpa com a faixa registrada 1 px abaixo: a linha 24
+    # le 0.999 dentro da guarda — acima do teto, mas e impressao.
+    shifted = np.zeros((H, W), dtype=np.float32)
+    shifted[21:25, 4:44] = 0.999
+    model.prob = shifted
+    clean_gen = worker.new_generation(preserve_identity=True)
+    for _ in range(3):
+        _submit_and_wait(worker, clean_gen)
+    decisions = [
+        event["decision"]
+        for event in worker.telemetry_snapshot()["page_identity_events"]
+    ]
+    assert "same_page" not in decisions[-3:]
+    assert decisions[-1] == "new_page"
+    assert not np.any(worker.poll(clean_gen, 0).confirmed)
+    worker.stop()
+
+
+def test_fragment_match_deferral_does_not_time_out(monkeypatch):
+    """Mesma folha com mais da metade do desenho sob a mao: o
+    defer por fragmento correspondente e evidencia POSITIVA e
+    nao alimenta o timeout que apagaria o canvas."""
+    from draw.ink import worker as worker_module
+
+    monkeypatch.setattr(worker_module, "_PAGE_CLEAN_INTERVAL_SECONDS", 0)
+    config = InkConfig(
+        baseline=True,
+        removal=False,
+        anchor_arbitration=False,
+        anchor_follow=False,
+    )
+    printed = np.zeros((H, W), dtype=np.float32)
+    printed[8:12, 4:44] = 0.95
+    model = _MutablePageClean(printed.copy())
+    worker = PageCleanWorker(model, config=config).start()
+    generation = worker.new_generation()
+    _submit_and_wait(worker, generation)
+
+    drawing = printed.copy()
+    drawing[20:38, 22:24] = 0.95
+    model.prob = drawing
+    for _ in range(3):
+        _submit_and_wait(worker, generation)
+    saved_canvas = worker.poll(generation, 0).confirmed.copy()
+    assert np.any(saved_canvas)
+
+    # Volta com a mao sobre 22 dos 36 px: os 14 expostos casam —
+    # passa no piso de avaliacao mas nao na barra de same_page.
+    same_gen = worker.new_generation(preserve_identity=True)
+    hidden = np.ones((H, W), dtype=bool)
+    hidden[20:38, 22:24] = False
+    hidden[20:34, 22] = True
+    for _ in range(7):
+        _submit_and_wait(worker, same_gen, visible=hidden)
+    events = worker.telemetry_snapshot()["page_identity_events"]
+    assert events[-1]["decision"] == "deferred_occlusion"
+    assert worker._identity_reference is not None
+    assert np.any(worker._accumulator._confirmed)
+
+    # A mao sai: o desenho inteiro casa — same_page, sem perda.
+    _submit_and_wait(worker, same_gen)
+    events = worker.telemetry_snapshot()["page_identity_events"]
+    assert events[-1]["decision"] == "same_page"
+    assert np.array_equal(worker.poll(same_gen, 0).confirmed, saved_canvas)
+    worker.stop()
+
+
+def test_odd_fragment_below_ceil_bar_stays_pending(monkeypatch):
+    """37 px com 18 visiveis casando: a barra de metade arredonda
+    para cima (19) — o fragmento nao fecha same_page."""
+    from draw.ink import worker as worker_module
+
+    monkeypatch.setattr(worker_module, "_PAGE_CLEAN_INTERVAL_SECONDS", 0)
+    config = InkConfig(
+        baseline=True,
+        removal=False,
+        anchor_arbitration=False,
+        anchor_follow=False,
+    )
+    printed = np.zeros((H, W), dtype=np.float32)
+    printed[8:12, 4:44] = 0.95
+    model = _MutablePageClean(printed.copy())
+    worker = PageCleanWorker(model, config=config).start()
+    generation = worker.new_generation()
+    _submit_and_wait(worker, generation)
+
+    drawing = printed.copy()
+    drawing[20:39, 22] = 0.95
+    drawing[20:38, 30] = 0.95
+    model.prob = drawing
+    for _ in range(3):
+        _submit_and_wait(worker, generation)
+    assert np.any(worker.poll(generation, 0).confirmed)
+
+    # Substituta com a coluna identica; o dedo expoe 18 dos 19 px
+    # dela — recall aparente total com menos da metade a vista.
+    replacement = printed.copy()
+    replacement[20:39, 22] = 0.95
+    model.prob = replacement
+    repl_gen = worker.new_generation(preserve_identity=True)
+    hidden = np.ones((H, W), dtype=bool)
+    hidden[20:39, 21:24] = False
+    hidden[20:39, 29:32] = False
+    hidden[20:38, 22] = True
+    _submit_and_wait(worker, repl_gen, visible=hidden)
+    events = worker.telemetry_snapshot()["page_identity_events"]
+    assert events[-1]["decision"] == "deferred_occlusion"
+    assert worker._identity_reference is not None
+    worker.stop()
+
+
+def test_crossing_stroke_at_098_clears_faint_edge_but_not_dark():
+    """Fronteira do teto de 0.99: traco a 0.98 cruza a borda de
+    impressao fraca (exigencia 0.95), mas nao a borda ao lado de
+    impressao escura — la a guarda de registro segura em 0.99."""
+    config = InkConfig(baseline=True, removal=False)
+    visible = np.ones((H, W), dtype=bool)
+    coverage = np.ones((H, W), dtype=bool)
+
+    faint_acc = LayeredInkAccumulator(config.seen_threshold, config)
+    faint = np.zeros((H, W), dtype=np.float32)
+    faint[20:23, 5:43] = 0.80
+    faint_acc.add(faint, visible, baseline_capture=True, baseline_coverage=coverage)
+    crossing = faint.copy()
+    crossing[22, 5:43] = 0.98
+    for _ in range(3):
+        result = faint_acc.add(
+            crossing,
+            visible,
+            baseline_capture=True,
+            baseline_coverage=coverage,
+        )
+    assert np.all(result["confirmed"][22, 5:43])
+
+    dark_acc = LayeredInkAccumulator(config.seen_threshold, config)
+    dark = np.zeros((H, W), dtype=np.float32)
+    dark[20:22, 5:43] = 0.95
+    dark[22, 5:43] = 0.80
+    dark_acc.add(dark, visible, baseline_capture=True, baseline_coverage=coverage)
+    crossing = dark.copy()
+    crossing[22, 5:43] = 0.98
+    for _ in range(4):
+        result = dark_acc.add(
+            crossing,
+            visible,
+            baseline_capture=True,
+            baseline_coverage=coverage,
+        )
+    assert not np.any(result["confirmed"][22, 5:43])
