@@ -273,12 +273,19 @@ or by the migration). Parity runs must account for them.
 - Pipeline: the detector's hand mask feeds `seg_hand_occlusion` regardless
   of `coverage` (legacy tied both detection extras to the same flag).
 - Ink worker: photometric occlusion guard (`InkConfig.paper_guard`, issue
-  #129). Regions that do not look like exposed paper (dark/chromatic block
-  versus the p90 paper reference) are frozen like an occlusion: no removal of
-  confirmed ink, no new votes, provisional layer held, for
-  `occlusion_hold_passes` passes after the evidence disappears. Independent of
-  MediaPipe. Limitation: a solid dark fill wider than ~32 px reads as shadow
-  (thin and thick pen strokes do not).
+  #129). A stateful per-tile paper reference (luma + chroma + local
+  texture, only refreshed upward) marks regions that do not look like
+  exposed paper — a paper-colored occluder whose texture or new ink-like
+  marks differ from the learned tile also withholds removal evidence:
+  any anomalous tile withholds removal evidence, and a connected 3x3-tile
+  block also vetoes new votes — hand or shadow without a MediaPipe mask
+  can no longer erase confirmed ink or stamp phantom strokes. Global
+  illumination shifts are absorbed as reference scaling above an absolute
+  paper-luminance floor, so a covered lens or lights-out still fails
+  closed. A dark fill that the ink model reads as ink for several passes
+  is adopted (fill recovery), and tiles leaving anomaly hold a short
+  recovery window so the worker stays awake until the revealed ink votes.
+  Independent of MediaPipe.
 - Pipeline: with `canvas_persist` off, a tracker drop also clears the
   rendered canvas and the provisional layer (legacy cleared only the
   confirmed mask). Neither change alters the production preset.
