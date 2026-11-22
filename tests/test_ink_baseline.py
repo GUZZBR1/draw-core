@@ -307,18 +307,31 @@ class _MutablePageClean:
         return self.prob
 
 
-def _submit_and_wait(worker, generation, *, stable=True, image=None):
+def _submit_and_wait(
+    worker,
+    generation,
+    *,
+    stable=True,
+    image=None,
+    visible=None,
+    coverage=None,
+    corners=QUAD,
+):
     if image is None:
         image = np.full((H, W, 3), 220, dtype=np.uint8)
+    if visible is None:
+        visible = np.ones((H, W), dtype=bool)
+    if coverage is None:
+        coverage = np.ones((H, W), dtype=bool)
     with worker._condition:
         before = worker._passes_total
         worker.submit(
             WarpedPage(
                 image,
                 generation,
-                QUAD,
-                visible=np.ones((H, W), dtype=bool),
-                coverage=np.ones((H, W), dtype=bool),
+                corners,
+                visible=visible,
+                coverage=coverage,
                 baseline_stable=stable,
             )
         )
@@ -674,4 +687,138 @@ def test_worker_does_not_rest_while_baseline_has_zero_captured_pixels(monkeypatc
     # Garante que uma passada clara subsequente captura sem precisar acordar por mao.
     submit_pg(paper_frame, stable=True)
     assert worker.baseline_state().ready
+    worker.stop()
+
+
+def test_recovery_keeps_partially_occluded_small_sketch(monkeypatch):
+    """Rabisco < 32 px com a ponta sob o dedo: a quarentena nao
+    pode exigir todos os pixels visiveis — o trecho exposto
+    decide."""
+    from draw.ink import worker as worker_module
+
+    monkeypatch.setattr(worker_module, "_PAGE_CLEAN_INTERVAL_SECONDS", 0)
+    config = InkConfig(
+        baseline=True,
+        removal=False,
+        anchor_arbitration=False,
+        anchor_follow=False,
+    )
+    printed = np.zeros((H, W), dtype=np.float32)
+    printed[8:12, 4:44] = 0.95
+    printed[40:44, 4:44] = 0.95
+    model = _MutablePageClean(printed.copy())
+    worker = PageCleanWorker(model, config=config).start()
+    generation = worker.new_generation()
+    _submit_and_wait(worker, generation)
+
+    # Rabisco pequeno do usuario (24 px, ~10% da tinta total).
+    drawing = printed.copy()
+    drawing[20:28, 22:25] = 0.95
+    model.prob = drawing
+    for _ in range(3):
+        _submit_and_wait(worker, generation)
+    saved_canvas = worker.poll(generation, 0).confirmed.copy()
+    assert np.any(saved_canvas)
+
+    # A folha volta com um dedo sobre 4 px da ponta do rabisco:
+    # exigir os 24 px visiveis adiava a decisao ate o timeout
+    # apagar o desenho — o trecho exposto basta para decidir.
+    same_gen = worker.new_generation(preserve_identity=True)
+    occluded = np.ones((H, W), dtype=bool)
+    occluded[24:28, 24] = False
+    _submit_and_wait(worker, same_gen, visible=occluded)
+    assert np.array_equal(worker.poll(same_gen, 0).confirmed, saved_canvas)
+    assert (
+        worker.telemetry_snapshot()["page_identity_events"][-1]["decision"]
+        == "same_page"
+    )
+    worker.stop()
+
+
+def test_confidence_drift_on_dark_print_does_not_confirm_unchanged_mark():
+    config = InkConfig(baseline=True, removal=False)
+    accumulator = LayeredInkAccumulator(config.seen_threshold, config)
+    visible = np.ones((H, W), dtype=bool)
+    coverage = np.ones((H, W), dtype=bool)
+    printed = np.zeros((H, W), dtype=np.float32)
+    printed[20:22, 5:43] = 0.995
+    accumulator.add(
+        printed,
+        visible,
+        baseline_capture=True,
+        baseline_coverage=coverage,
+    )
+
+    # Drift de um centesimo na mesma linha impressa: nao e traco
+    # novo — no pixel impresso a exigencia e reference + delta,
+    # nao o proprio maximo capturado.
+    drifted = printed.copy()
+    drifted[20:22, 5:43] = 0.996
+    for _ in range(4):
+        result = accumulator.add(
+            drifted,
+            visible,
+            baseline_capture=True,
+            baseline_coverage=coverage,
+        )
+    assert not np.any(result["confirmed"])
+
+    # O traco novo adjacente a impressao escura segue elegivel: o
+    # teto de 0.99 vale para a margem dilatada, nao para o pixel
+    # que ja era impressao.
+    adjacent = drifted.copy()
+    adjacent[19, 5:43] = 1.0
+    for _ in range(3):
+        result = accumulator.add(
+            adjacent,
+            visible,
+            baseline_capture=True,
+            baseline_coverage=coverage,
+        )
+    assert np.all(result["confirmed"][19, 5:43])
+    assert not np.any(result["confirmed"][20:22, 5:43])
+
+
+def test_baseline_recapture_uses_new_anchor_grid_after_reanchor(monkeypatch):
+    """A recaptura roda na grade da ancora nova: a mascara de
+    cobertura com falha distingue a grade velha da nova quando o
+    follow re-registra a passada da troca."""
+    from draw.ink import worker as worker_module
+
+    monkeypatch.setattr(worker_module, "_PAGE_CLEAN_INTERVAL_SECONDS", 0)
+    config = InkConfig(
+        baseline=True,
+        removal=False,
+        anchor_arbitration=False,
+        anchor_follow=True,
+    )
+    model = _MutablePageClean(_probability())
+    worker = PageCleanWorker(model, config=config).start()
+    generation = worker.new_generation()
+
+    # Faixa fixa de fora-da-folha na camera: no quad deslocado a
+    # lacuna da grade da ancora anda ~12 colunas para a esquerda.
+    coverage = np.ones((H, W), dtype=bool)
+    coverage[:, 30:38] = False
+    for _ in range(4):
+        _submit_and_wait(worker, generation, coverage=coverage)
+
+    step_quad = QUAD + np.float32([12.0, 0.0])
+    assert worker.rezero_baseline()
+    reanchored = False
+    for _ in range(6):
+        _submit_and_wait(worker, generation, coverage=coverage, corners=step_quad)
+        if worker._anchor_corners is not None and np.allclose(
+            worker._anchor_corners, step_quad
+        ):
+            reanchored = True
+            break
+    assert reanchored
+
+    # Na passada da re-ancoragem a cobertura sai na grade nova
+    # (STEP): a lacuna fica em ~18:26 e o trecho 31:35 e coberto
+    # — a mascara da grade velha teria a falha em 30:38.
+    current = worker._accumulator._baseline_current_coverage
+    assert not np.any(current[8:56, 19:25])
+    assert np.all(current[8:56, 31:35])
     worker.stop()

@@ -223,13 +223,25 @@ class LayeredInkAccumulator:
                     where=self._baseline_changed,
                 )
                 # Evita veto permanente em pixels vizinhos a impressao escura:
-                # o teto cai para 0.99 exceto onde o proprio pixel ja bateu isso.
-                threshold_cap = np.maximum(self._baseline_exact_max, np.float32(0.99))
+                # o teto de 0.99 so vale para a margem dilatada. No proprio
+                # pixel impresso a exigencia segue reference_max + delta —
+                # um drift de centesimos nao reconfirma a impressao como
+                # tinta nova.
+                np.less(
+                    self._baseline_exact_max,
+                    self._config.vote_hit,
+                    out=self._baseline_not_guard,
+                )
+                np.logical_and(
+                    self._baseline_not_guard,
+                    self._baseline_changed,
+                    out=self._baseline_not_guard,
+                )
                 np.minimum(
                     self._baseline_change_threshold,
-                    threshold_cap,
+                    np.float32(0.99),
                     out=self._baseline_change_threshold,
-                    where=self._baseline_changed,
+                    where=self._baseline_not_guard,
                 )
                 self._baseline_pending_px = max(
                     0, self._baseline_pending_px - captured_px

@@ -174,6 +174,26 @@ def _provisional_for_display(provisional, min_px):
     return out
 
 
+def _identity_required_visible_px(prior_px):
+    """Piso de evidencia visivel para a decisao de identidade.
+
+    Referencias menores que o piso absoluto usam a fracao
+    proporcional: exigir todos os pixels de um rabisco pequeno
+    adiava a decisao ate o timeout apagar o canvas — um dedo
+    sobre a ponta do traco bastava para nunca sair da quarentena.
+    """
+    required = max(
+        identity._IDENTITY_MIN_VISIBLE_PX,
+        int(identity._IDENTITY_MIN_VISIBLE_FRACTION * prior_px),
+    )
+    if required > prior_px:
+        required = max(
+            int(identity._IDENTITY_MIN_VISIBLE_FRACTION * prior_px),
+            1,
+        )
+    return required
+
+
 def _crop_all_visible(visible, corners):
     """Todo o recorte do quad visivel na mascara?
 
@@ -1635,56 +1655,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # seco de sempre.
             p.coverage_page = p.coverage_page_static
 
-            def _covered(reg_corners):
-                size = (p.prob.shape[1], p.prob.shape[0])
-                if (
-                    p.coverage_cam is not None
-                    and p.anchor is not None
-                    and reg_corners is not None
-                ):
-                    reg_matrix = registration._registration_matrix(
-                        p.anchor, reg_corners, p.prob.shape
-                    )
-                    if not registration._registration_is_identity(reg_matrix):
-                        if p.coverage_anchor is None:
-                            # Resample único câmera→âncora (issue
-                            # #100): M @ page_matrix(passada) — o
-                            # mesmo caminho da tinta; na banda
-                            # morta o quad de registro != o ao
-                            # vivo e A sozinha desalinha ~tau px
-                            # (review do PR #118).
-                            p.coverage_anchor = (
-                                cv2.warpPerspective(
-                                    p.coverage_cam.astype(np.uint8),
-                                    reg_matrix
-                                    @ registration._corners_page_matrix(
-                                        p.corners, size[0], size[1]
-                                    ),
-                                    size,
-                                    flags=cv2.INTER_NEAREST,
-                                    borderValue=0,
-                                )
-                                > 0
-                            )
-                        return p.coverage_anchor
-                if p.coverage_page is None:
-                    # Sem registro (ou identidade): a grade da
-                    # própria passada — o mesmo `warped > 127`
-                    # que o laço produzia.
-                    p.coverage_page = (
-                        cv2.warpPerspective(
-                            p.coverage_cam.astype(np.uint8) * 255,
-                            registration._corners_page_matrix(
-                                p.corners, size[0], size[1]
-                            ),
-                            size,
-                            flags=cv2.INTER_LINEAR,
-                            borderValue=0,
-                        )
-                        > 127
-                    )
-                return p.coverage_page
-
             def _gate(evidence, reg_coverage):
                 if p.anchor_ink is None:
                     return evidence * reg_coverage
@@ -1704,7 +1674,9 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 p.camera_prob is p.registered_prob
                 and p.camera_corners is p.registration_corners
             )
-            reg_coverage = _covered(p.registration_corners)
+            reg_coverage = self._coverage_for_anchor(
+                p, p.anchor, p.registration_corners
+            )
             if p.motion_decision == "correct":
                 # A cobertura acompanha a correcao da evidencia: sem
                 # isso o traco novo deslocado para fora da mascara
@@ -1718,7 +1690,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             if camera_untouched:
                 p.camera_prob = p.registered_prob
             else:
-                p.camera_prob = _gate(p.camera_prob, _covered(p.camera_corners))
+                p.camera_prob = _gate(
+                    p.camera_prob,
+                    self._coverage_for_anchor(p, p.anchor, p.camera_corners),
+                )
         if p.anchor is not None and p.registration_corners is not None:
             matrix = registration._registration_matrix(
                 p.anchor, p.registration_corners, p.prob.shape
@@ -1729,6 +1704,57 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             p.reg_info["registration_is_identity"] = (
                 registration._registration_is_identity(matrix)
             )
+
+    def _coverage_for_anchor(self, p, anchor, reg_corners):
+        """Cobertura da folha na grade da ancora: resample unico
+        camera->ancora quando o registro nao e identidade; senao a
+        grade da propria passada (estatica ou retificada do quad)."""
+        size = (p.prob.shape[1], p.prob.shape[0])
+        if (
+            p.coverage_cam is not None
+            and anchor is not None
+            and reg_corners is not None
+        ):
+            reg_matrix = registration._registration_matrix(
+                anchor, reg_corners, p.prob.shape
+            )
+            if not registration._registration_is_identity(reg_matrix):
+                if p.coverage_anchor is None:
+                    # Resample único câmera→âncora (issue
+                    # #100): M @ page_matrix(passada) — o
+                    # mesmo caminho da tinta; na banda
+                    # morta o quad de registro != o ao
+                    # vivo e A sozinha desalinha ~tau px
+                    # (review do PR #118).
+                    p.coverage_anchor = (
+                        cv2.warpPerspective(
+                            p.coverage_cam.astype(np.uint8),
+                            reg_matrix
+                            @ registration._corners_page_matrix(
+                                p.corners, size[0], size[1]
+                            ),
+                            size,
+                            flags=cv2.INTER_NEAREST,
+                            borderValue=0,
+                        )
+                        > 0
+                    )
+                return p.coverage_anchor
+        if p.coverage_page is None:
+            # Sem registro (ou identidade): a grade da
+            # própria passada — o mesmo `warped > 127`
+            # que o laço produzia.
+            p.coverage_page = (
+                cv2.warpPerspective(
+                    p.coverage_cam.astype(np.uint8) * 255,
+                    registration._corners_page_matrix(p.corners, size[0], size[1]),
+                    size,
+                    flags=cv2.INTER_LINEAR,
+                    borderValue=0,
+                )
+                > 127
+            )
+        return p.coverage_page
 
     def _pass_commit(self, p):
         """Decisao, voto e publicacao da passada, sob o lock.
@@ -1835,25 +1861,14 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     if identity_visible is not None:
                         all_visible = prior_all & identity_visible
                         all_visible_px = int(np.count_nonzero(all_visible))
-                        all_occluded = all_visible_px < min(
-                            prior_px,
-                            max(
-                                identity._IDENTITY_MIN_VISIBLE_PX,
-                                int(identity._IDENTITY_MIN_VISIBLE_FRACTION * prior_px),
-                            ),
+                        all_occluded = all_visible_px < _identity_required_visible_px(
+                            prior_px
                         )
                         if prior_hw_px > 0:
                             hw_visible = prior_hw & identity_visible
                             hw_visible_px = int(np.count_nonzero(hw_visible))
-                            hw_occluded = hw_visible_px < min(
-                                prior_hw_px,
-                                max(
-                                    identity._IDENTITY_MIN_VISIBLE_PX,
-                                    int(
-                                        identity._IDENTITY_MIN_VISIBLE_FRACTION
-                                        * prior_hw_px
-                                    ),
-                                ),
+                            hw_occluded = hw_visible_px < _identity_required_visible_px(
+                                prior_hw_px
                             )
                         else:
                             hw_visible = prior_hw
@@ -2102,6 +2117,17 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             (None if registration_corners is None else registration_corners.copy()),
             None if p.corners is None else p.corners.copy(),
         )
+        if self._config.baseline and (
+            p.coverage_cam is not None or p.coverage_page_static is not None
+        ):
+            # A cobertura do baseline acompanha a ancora nova: a
+            # mascara resampleada contra a ancora velha nao
+            # descreve mais a grade do warp re-registrado — a
+            # recaptura marcaria a lacuna no lugar errado.
+            p.coverage_anchor = None
+            p.baseline_coverage = self._coverage_for_anchor(
+                p, self._anchor_corners, registration_corners
+            )
 
     def _pass_vote_and_publish(self, p):
         """Voto, acumulador e publicacao: caminho da evidencia,
