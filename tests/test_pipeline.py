@@ -726,7 +726,7 @@ def test_ink_auto_gain_holds_last_gain_while_hand_covers_the_sheet():
     class _Masker:
         full = False
 
-        def mask(self, image):
+        def mask(self, image, timestamp_ms=None):
             camera = np.zeros(image.shape[:2], np.uint8)
             if self.full:
                 camera[:] = 255
@@ -1273,7 +1273,7 @@ def test_reset_source_clears_the_hand_masker_retention():
     class _Masker:
         resets = 0
 
-        def mask(self, frame):
+        def mask(self, frame, timestamp_ms=None):
             return np.zeros(frame.shape[:2], np.uint8)
 
         def reset_retention(self):
