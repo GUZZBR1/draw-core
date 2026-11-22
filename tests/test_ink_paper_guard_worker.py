@@ -6,7 +6,7 @@ import time
 import numpy as np
 
 from draw.contracts import WarpedPage
-from draw.ink import occlusion
+from draw.ink import occlusion, votes
 from draw.ink import worker as worker_mod
 from draw.ink.config import InkConfig
 
@@ -303,6 +303,86 @@ def test_lingering_shadow_across_all_post_exit_passes_still_confirms_and_border_
         assert worker.stats()["resting"] is True
     finally:
         worker.stop()
+
+
+def test_stationary_hand_samples_do_not_cancel_the_adopted_fill_vote(
+    monkeypatch,
+):
+    """Regressao (Devin Review do PR #144): saida e volta da mao, que
+    fica parada segurando a folha. O laco entrega uma amostra de
+    presenca por quadro — nao so nas transicoes — e cada amostra True
+    repetida zerava o _confirm_passes rearmado pela adocao do
+    preenchimento: a trabalhadora descansava no meio do voto e o bloco
+    adotado nunca confirmava. So a transicao que encerra o episodio de
+    mao fora pode cancelar a janela."""
+    monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 3600.0)
+    monkeypatch.setattr(worker_mod, "_HAND_REST_STILL_SECONDS", 0.3)
+    now = [1000.0]
+    ink = _Scripted()
+    config = InkConfig.production(pass_interval_s=0.1)
+    worker = worker_mod.PageCleanWorker(ink, config=config, clock=lambda: now[0])
+    generation = worker.new_generation()
+    visible = np.ones((H, W), bool)
+
+    def _tick(image):
+        """Um quadro do laco: submit + pump na cadencia configurada."""
+        worker.submit(WarpedPage(image, generation, Q0, visible, captured_at=now[0]))
+        now[0] += 0.11
+        return worker.pump()
+
+    # Pagina madura sem sinal de mao: so a testemunha confirma — o
+    # COVERED nasce depois, sob o bloco escuro.
+    ink.content = _prob(covered_ink=False)
+    for _ in range(6):
+        assert _tick(_paper())
+    assert worker.poll(generation, 0).confirmed[WITNESS].all()
+
+    # A sequencia completa de saida: a mao entra, sai (armando a
+    # janela pos-saida) e volta ja parada — a transicao de volta
+    # cancela a janela pos-saida, como antes.
+    worker.set_hand_presence(True)
+    assert _tick(_paper())
+    worker.set_hand_presence(False)
+    assert _tick(_paper())
+    worker.set_hand_presence(True)
+
+    # Bloco escuro lido como tinta (a sombra que o MediaPipe perdeu):
+    # _FILL_RECOVERY_PASSES de suporte adotam o preenchimento e a
+    # borda de adocao rearma a janela de confirmacao — com a mao
+    # presente o tempo todo, repetida a cada tick como no laco.
+    ink.content = _prob()
+    for _ in range(occlusion._FILL_RECOVERY_PASSES):
+        worker.set_hand_presence(True)
+        assert _tick(_hand_image())
+        worker.set_hand_presence(True)
+    assert worker._paper_exposure._fill_adopted.any()
+    assert not worker.poll(generation, 0).confirmed[COVERED].all()
+
+    # A amostra repetida com a mao parada nao pode zerar o orcamento
+    # rearmado pela adocao.
+    worker.set_hand_presence(True)
+    assert worker._confirm_passes == votes._INK_VOTE_WINDOW
+
+    # As passadas seguintes votam o preenchimento adotado ate ele
+    # confirmar; o descanso com a mao quieta so pode entrar depois —
+    # pump() devolver False antes disso e o bug dormindo no voto.
+    confirmed = False
+    limit = occlusion._FILL_RECOVERY_PASSES + votes._INK_VOTE_WINDOW + 2
+    for _ in range(limit):
+        worker.set_hand_presence(True)
+        ran = _tick(_hand_image())
+        worker.set_hand_presence(True)
+        confirmed = worker.poll(generation, 0).confirmed[COVERED].all()
+        if confirmed:
+            break
+        assert ran, "descansou antes do preenchimento adotado confirmar"
+    assert confirmed, "o preenchimento adotado nao confirmou"
+
+    # Confirmado, o descanso com a mao parada segue valendo: a janela
+    # gasta nao segura a trabalhadora acordada para sempre.
+    for _ in range(worker_mod._REST_QUIET_PASSES + 2):
+        _tick(_hand_image())
+    assert worker.stats()["resting"]
 
 
 def test_mid_pass_generation_swap_writes_to_the_orphan_guard(monkeypatch):
