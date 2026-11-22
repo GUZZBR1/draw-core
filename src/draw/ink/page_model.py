@@ -763,20 +763,61 @@ class PageModel:
             # referencia mora na grade salva e cada quadro so alcanca
             # `near`: o do candidato (q volta para a posicao salva) e
             # o da folha medida (q - (dy, dx)) — o traco no lugar
-            # salvo nao prova que a pauta tambem nao andou.
+            # salvo nao prova que a pauta tambem nao andou. O quadro
+            # medido so vale onde a pauta local andou de fato: o
+            # deslocamento e global, e a pauta vizinha que ficou no
+            # lugar nao veta o traco que tambem ficou.
             near_i = int(near)
             clean_gap = _nearest_reference_gap(ref_inf, py, px, obs, near_i)
-            if (oy, ox) != (int(dy), int(dx)):
+            if (oy, ox) != (int(dy), int(dx)) and py.size:
+                moved_ref, my0, mx0 = self._moved_reference(
+                    ref_inf,
+                    norm_gray,
+                    vis,
+                    py - int(dy),
+                    px - int(dx),
+                    near_i,
+                    int(dy),
+                    int(dx),
+                )
                 np.minimum(
                     clean_gap,
                     _nearest_reference_gap(
-                        ref_inf, qy - int(dy), qx - int(dx), obs, near_i
+                        moved_ref, py - int(dy) - my0, px - int(dx) - mx0, obs, near_i
                     ),
                     out=clean_gap,
                 )
             hit = (saved_gap <= self.novel_delta) & (saved_gap < clean_gap)
             matched_obs[qy[hit], qx[hit]] = True
         return distinct, matched_obs
+
+    @staticmethod
+    def _moved_reference(ref_inf, norm_gray, vis, cy, cx, reach, dy, dx):
+        """Recorte de `ref_inf` cobrindo (cy, cx) +- reach, com inf onde a
+        aparencia limpa NAO andou (dy, dx): o pixel de referencia r so
+        fica se a observacao em r + (dy, dx) o reproduz melhor que a
+        observacao em r, ambas visiveis. Devolve (recorte, y0, x0).
+        """
+        height, width = ref_inf.shape
+        y0 = max(int(cy.min()) - reach, 0)
+        y1 = min(int(cy.max()) + reach + 1, height)
+        x0 = max(int(cx.min()) - reach, 0)
+        x1 = min(int(cx.max()) + reach + 1, width)
+        sub = np.full((max(y1 - y0, 0), max(x1 - x0, 0)), np.inf, dtype=np.float32)
+        ty0, ty1 = max(y0, -dy), min(y1, height - dy)
+        tx0, tx1 = max(x0, -dx), min(x1, width - dx)
+        if ty1 <= ty0 or tx1 <= tx0:
+            return sub, y0, x0
+        ref = ref_inf[ty0:ty1, tx0:tx1]
+        here = norm_gray[ty0:ty1, tx0:tx1]
+        there = norm_gray[ty0 + dy : ty1 + dy, tx0 + dx : tx1 + dx]
+        moved = np.isfinite(ref) & (np.abs(there - ref) < np.abs(here - ref))
+        if vis is not None:
+            moved &= (
+                vis[ty0:ty1, tx0:tx1] & vis[ty0 + dy : ty1 + dy, tx0 + dx : tx1 + dx]
+            )
+        sub[ty0 - y0 : ty1 - y0, tx0 - x0 : tx1 - x0] = np.where(moved, ref, np.inf)
+        return sub, y0, x0
 
     @property
     def observed_normalized_gray(self):

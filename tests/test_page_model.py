@@ -2375,6 +2375,104 @@ def test_saved_tone_evidence_unshifted_match_checks_aligned_print():
     assert not matched.any()
 
 
+def test_saved_tone_evidence_unshifted_match_ignores_stationary_rule():
+    """page_model.py:769: o deslocamento global (-1) projeta a regra
+    vizinha (95) para perto do traco clareado (65 -> 85), mas a regra
+    ficou no lugar: sem evidencia local de que a pauta andou, o quadro
+    medido nao veta o traco que tambem ficou."""
+    model = pm_mod.PageModel((H, W))
+    form = np.full((H, W), PAPER, dtype=np.float32)
+    form[34, 10:110] = 95.0
+    vis = np.ones((H, W), dtype=bool)
+    for _ in range(4):
+        model.observe(form, visible=vis, paper=vis)
+    levels = np.full((H, W), np.nan, dtype=np.float32)
+    levels[30, 25:105] = 65.0
+    at = np.zeros((H, W), dtype=bool)
+    at[30, 25:105] = True
+    gray = form.copy()
+    gray[30, 25:105] = 85.0
+    distinct, matched = model.saved_tone_evidence(
+        gray, levels, at, dy=-1, dx=0, near=3, visible=vis
+    )
+    assert distinct[30, 25:105].all()
+    assert matched[30, 25:105].all()
+
+
+def _ruled_form():
+    form = np.full((H, W), PAPER, dtype=np.float32)
+    form[34:36, 10:110] = 95.0
+    form[66:68, 10:110] = 95.0
+    form[82:84, 10:110] = 95.0
+    return form
+
+
+def test_page_model_stationary_rule_keeps_stroke_under_global_shift(monkeypatch):
+    """page_model.py:769: as regras distantes sobem 1 px e dirigem o
+    alinhamento; a regra vizinha e o traco clareado ficam no lugar —
+    a mesma folha restaura, nao vota new_page."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        form = _ruled_form()
+        written = form.copy()
+        written[29:31, 25:105] = 65.0
+        _, before = _saved_sheet(worker, form, written)
+        assert before >= 120
+
+        returned = np.full((H, W), PAPER, dtype=np.float32)
+        returned[34:36, 10:110] = 95.0
+        returned[65:67, 10:110] = 95.0
+        returned[81:83, 10:110] = 95.0
+        returned[29:31, 25:105] = 85.0
+        vis = np.ones((H, W), dtype=bool)
+        frames = identity_mod._PAGE_IDENTITY_SWITCH_CONSENSUS_FRAMES
+        gen2 = worker.new_generation(preserve_identity=True)
+        for _ in range(frames + 1):
+            _drive(worker, gen2, returned, visible=vis)
+        decisions = [
+            e["decision"] for e in worker.telemetry_snapshot()["page_identity_events"]
+        ]
+        assert "new_page" not in decisions
+        assert decisions[-1] == "same_page"
+        assert int(np.count_nonzero(_confirmed(worker, gen2)[29:31, 25:105])) == 160
+    finally:
+        worker.stop()
+
+
+def test_page_model_shifted_clean_copy_rule_over_stroke_rejects(monkeypatch):
+    """test_page_model.py:2371: copia limpa um pouco mais escura (85)
+    volta 4 px acima; o alinhamento mede o deslocamento sozinho e a
+    regra que cai sobre o traco salvo (65) nao herda o canvas."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        form = _ruled_form()
+        written = form.copy()
+        written[30:32, 25:105] = 65.0
+        _, before = _saved_sheet(worker, form, written)
+        assert before >= 120
+
+        copy = np.full((H, W), PAPER, dtype=np.float32)
+        copy[30:32, 10:110] = 85.0
+        copy[62:64, 10:110] = 85.0
+        copy[78:80, 10:110] = 85.0
+        vis = np.ones((H, W), dtype=bool)
+        frames = identity_mod._PAGE_IDENTITY_SWITCH_CONSENSUS_FRAMES
+        bound = identity_mod._PAGE_IDENTITY_MAX_DEFERRALS + frames + 1
+        gen2 = worker.new_generation(preserve_identity=True)
+        for _ in range(bound):
+            _drive(worker, gen2, copy, visible=vis)
+        decisions = [
+            e["decision"] for e in worker.telemetry_snapshot()["page_identity_events"]
+        ]
+        assert "same_page" not in decisions
+        assert decisions[-1] == "new_page"
+        assert int(np.count_nonzero(_confirmed(worker, gen2))) == 0
+    finally:
+        worker.stop()
+
+
 def test_align_identity_baseline_removes_prior_halo_across_band_edge():
     """worker.py:367: tinta salva logo FORA da banda de busca ainda projeta
     o halo dilatado dela para dentro — nao pode puxar o ajuste."""
