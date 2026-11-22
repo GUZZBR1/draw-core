@@ -175,8 +175,11 @@ worktree /tmp/draw-cleanup, −924 linhas em 34 arquivos): `view.fit`,
 _UVMAP e os 11 testes do contrato dormente), `hand_presence.present`. Órfãos:
 `lapis-amarelo.svg`, `site/public/images/papers/*.svg` (8),
 `docs/research/figures/generated/*.jpg` (8), `docs/research/v1/` (12).
-Pendentes no mesmo espírito: corrigir refs obsoletas em
-`bridge/README.md`/`PROTOCOL.md`; `geometry.fit_quad` e
+Refs obsoletas corrigidas na sequência: `bridge/README.md` (a captura
+DirectShow estava rotulada de stub; `VISION.md` e
+`scripts/setup_camera_wsl.sh` não existem) e `bridge/PROTOCOL.md`
+(`helper_receiver` e `step0_latency` marcados conforme o estado real —
+um migrado, outro não). `geometry.fit_quad` e
 `safe_io.read_image/iter_jsonl` ficaram (API pequena e testada).
 
 **P0 — higiene operacional** — ✅ EXECUTADO: 16 branches locais mergeadas
