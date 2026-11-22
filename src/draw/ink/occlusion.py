@@ -80,6 +80,11 @@ _FILL_INK_TILE_MEAN = 0.25
 # (Devin Review do PR #144).
 _FILL_SEED_MIN_DIM_PX = 4
 _FILL_SEED_MIN_FILL = 0.28
+# Fração da dimensão do bbox que uma corrida contínua precisa ter
+# para contar como banda. O que veta o L de canto não é o tamanho
+# da corrida — a faixa de 72 px cruza o bbox inteiro — é o número
+# de grupos disjuntos: 1 por eixo no L, 3 no zigzag multi-volta.
+_SEED_PARALLEL_RUN = 0.8
 # Caducidade do veto por posição: marcas novas persistentes em tile
 # que segue provando papel (luma e textura da referência) são edição
 # legítima — apagou e redesenhou — não capa de oclusor. Sem o prazo o
@@ -156,7 +161,10 @@ def _closed_or_solid_seed(blob, blob_area, hull):
     pixel. O L é côncavo e aberto — deixa mais da metade do próprio
     hull vazia; o traço ou o blob sólido preenche a maior parte do
     hull; e o contorno fino, que também deixa o hull vazio, fecha um
-    buraco. Qualquer um dos dois basta."""
+    buraco. Qualquer um dos dois basta — e quando nenhum dos dois se
+    aplica, o traço multi-volta ainda se distingue da borda de
+    sombra pelo número de bandas paralelas disjuntas (Devin Review
+    do PR #144)."""
     if blob_area >= 0.5 * cv2.contourArea(hull):
         return True
     # O bbox é justo, então o blob toca as quatro bordas: o rótulo 0
@@ -167,7 +175,38 @@ def _closed_or_solid_seed(blob, blob_area, hull):
     edge = np.unique(
         np.concatenate((labels[0], labels[-1], labels[:, 0], labels[:, -1]))
     )
-    return bool(np.any(~np.isin(labels, edge)))
+    if np.any(~np.isin(labels, edge)):
+        return True
+    return _parallel_band_seed(blob)
+
+
+def _parallel_band_seed(blob):
+    """Duas ou mais bandas longas disjuntas num mesmo eixo.
+
+    A banda única e o canto em L seguem ambíguos com a borda da
+    sombra — ficam vetados. Faixas paralelas separadas por papel
+    são a evidência de traço multi-volta (o zigzag do review, três
+    grupos na horizontal). O critério aceita um falso positivo
+    residual — um artefato em pente (vão entre dedos, persiana,
+    sombra de régua) também semeia — porque o custo é adiar o veto
+    de adição num bloco que o modelo insiste em ler como tinta,
+    enquanto o falso negativo congelava o traço real para sempre
+    (Devin Review do PR #144)."""
+    for axis in range(2):
+        grid = blob if axis == 0 else blob.T
+        limit = grid.shape[1] * _SEED_PARALLEL_RUN
+        long_run = np.zeros(grid.shape[0], dtype=bool)
+        for index, row in enumerate(grid):
+            padded = np.concatenate(([False], row, [False]))
+            diff = np.diff(padded.astype(np.int8))
+            starts = np.flatnonzero(diff == 1)
+            if starts.size:
+                ends = np.flatnonzero(diff == -1)
+                long_run[index] = (ends - starts).max() >= limit
+        edges = np.diff(np.concatenate(([False], long_run, [False])).astype(np.int8))
+        if np.count_nonzero(edges == 1) >= 2:
+            return True
+    return False
 
 
 class PaperExposureGuard:
@@ -739,10 +778,10 @@ class PaperExposureGuard:
         # fora do caminho ou quando a cena não tem máscara alguma.
         supported = np.zeros(current.shape, dtype=bool)
         pixel_support = None
-        if ink_prob is not None:
-            ink_prob = np.asarray(ink_prob, dtype=np.float32)
-            if ink_prob.shape == (height, width):
-                pixel_support = ink_prob >= support_level
+        # ink_prob já é float32 ndarray aqui (convertido acima, na
+        # amostra de textura); a checagem de grade decide o suporte.
+        if ink_prob is not None and ink_prob.shape == (height, width):
+            pixel_support = ink_prob >= support_level
         if pixel_support is not None and np.any(anomalous):
             support_fraction = cv2.resize(
                 pixel_support.astype(np.float32), size, interpolation=cv2.INTER_AREA
@@ -959,11 +998,7 @@ class PaperExposureGuard:
                 # continua vetando a remoção acima, porém não pode
                 # conectar o fill a uma sombra e liberar falsos pixels
                 # para adição (Devin Review do PR #144).
-                connectable = (
-                    np.zeros((height, width), dtype=bool)
-                    if pixel_support is None
-                    else pixel_support & (gray < expected_pixels - pixel_drop)
-                )
+                connectable = pixel_support & (gray < expected_pixels - pixel_drop)
                 if visible is not None:
                     connectable &= visible
                 _count, fill_labels = cv2.connectedComponents(

@@ -1837,3 +1837,31 @@ def test_stalled_removal_under_still_hand_uses_idle_probe():
 
     assert not worker._at_rest()
     assert worker._pass_interval() == worker_mod._IDLE_PROBE_SECONDS
+
+
+def test_open_zigzag_seeds_fill_recovery():
+    """Zigzag aberto de três bandas ligadas nas pontas alternadas:
+    passa em tamanho e densidade mas não é sólido nem fecha buraco
+    (~37–46% do hull). Três bandas paralelas disjuntas são a
+    evidência de traço multi-volta que a borda de sombra não
+    produz — a semente aceita pela terceira via sem reabrir o L
+    (Devin Review do PR #144)."""
+    guard = occlusion_mod.PaperExposureGuard()
+    shape = (120, 168)  # grade exata de 24px
+    paper = np.full((*shape, 3), 220, dtype=np.uint8)
+    visible = np.ones(shape, dtype=bool)
+    for _ in range(2):
+        guard.observe(paper, visible)
+
+    shadowed = paper.copy()
+    shadowed[24:96, 24:96] = 150  # sombra 3x3 tiles
+    bands = np.zeros(shape, np.float32)
+    bands[24:31, 24:96] = 0.95  # faixa 1, 7 px
+    bands[48:55, 24:96] = 0.95  # faixa 2
+    bands[72:79, 24:96] = 0.95  # faixa 3
+    bands[24:55, 89:96] = 0.95  # liga 1->2 pela direita
+    bands[48:79, 24:31] = 0.95  # liga 2->3 pela esquerda
+    for _ in range(6):
+        guard.observe(shadowed, visible, ink_prob=bands, ink_support_threshold=0.7)
+    assert guard._ink_streak.any()
+    assert guard._fill_adopted.any()

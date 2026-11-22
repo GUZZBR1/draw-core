@@ -26,6 +26,29 @@ def test_seed_rejects_hollow_l_shape():
     assert not occlusion._has_dense_pixel_seed(region)
 
 
+def test_seed_accepts_open_zigzag_parallel_bands():
+    """O traço aberto do review: três bandas de 7 px ligadas nas
+    pontas alternadas — nem sólido nem fechado, mas a sombra não
+    faz faixas paralelas disjuntas (Devin Review do PR #144)."""
+    region = np.zeros((72, 72), dtype=bool)
+    for row in (0, 24, 48):
+        region[row : row + 7, :] = True
+    region[0:31, 65:72] = True  # liga 1->2 pela direita
+    region[24:55, 0:7] = True  # liga 2->3 pela esquerda
+
+    assert occlusion._has_dense_pixel_seed(region)
+
+
+def test_seed_rejects_thin_open_arc():
+    """O arco fino aberto segue ambíguo com a borda curva de uma
+    sombra: não é sólido, não fecha buraco e não tem banda
+    paralela irmã — continua vetado."""
+    region = np.zeros((48, 48), dtype=np.uint8)
+    cv2.ellipse(region, (24, 24), (20, 20), 0, -90, 45, 1, thickness=3)
+
+    assert not occlusion._has_dense_pixel_seed(region.astype(bool))
+
+
 def test_seed_accepts_rotated_solid_stroke():
     region = np.zeros((32, 32), dtype=np.uint8)
     cv2.line(region, (4, 27), (27, 4), 1, thickness=5)
