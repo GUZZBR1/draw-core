@@ -204,6 +204,37 @@ def _identity_same_page_visible_px(prior_px):
     )
 
 
+def _shift_mask(mask, dy, dx):
+    """Desloca o mapa preenchendo com zeros — realinha a
+    evidencia da passada a grade da referencia salva."""
+    out = np.zeros_like(mask)
+    height, width = mask.shape
+    y0, y1 = max(0, dy), min(height, height + dy)
+    x0, x1 = max(0, dx), min(width, width + dx)
+    out[y0:y1, x0:x1] = mask[y0 - dy : y1 - dy, x0 - dx : x1 - dx]
+    return out
+
+
+def _identity_estimate_shift(seen, print_ref):
+    """Deslocamento residual (dy, dx) que alinha a tinta atual a
+    impressao salva.
+
+    O warp de registro ja resolve o grosso; o residuo de 1-3 px
+    e o que a margem da guarda absorve. Empates resolvem a favor
+    do zero — uma faixa longa so restringe o eixo perpendicular.
+    """
+    best = int(np.count_nonzero(seen & print_ref))
+    dy = dx = 0
+    radius = identity._IDENTITY_DILATION_KERNEL // 2
+    for sy in range(-radius, radius + 1):
+        for sx in range(-radius, radius + 1):
+            score = int(np.count_nonzero(_shift_mask(seen, sy, sx) & print_ref))
+            if score > best:
+                best = score
+                dy, dx = sy, sx
+    return dy, dx
+
+
 def _crop_all_visible(visible, corners):
     """Todo o recorte do quad visivel na mascara?
 
@@ -456,6 +487,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._canvas_epoch = 0
         self._identity_reference = None
         self._identity_baseline_reference = None
+        self._identity_print_reference = None
         self._identity_reference_corners = None
         self._identity_recovery_requested = False
         self._identity_defer_count = 0
@@ -558,6 +590,12 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     if baseline_reference is None or not self._config.baseline
                     else baseline_reference.copy()
                 )
+                print_reference = self._accumulator._baseline_exact_max
+                self._identity_print_reference = (
+                    None
+                    if print_reference is None or not self._config.baseline
+                    else print_reference >= self._config.vote_hit
+                )
                 self._identity_reference_corners = (
                     None
                     if self._anchor_corners is None
@@ -566,6 +604,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             else:
                 self._identity_reference = None
                 self._identity_baseline_reference = None
+                self._identity_print_reference = None
                 self._identity_reference_corners = None
             self._generation += 1
             self._baseline_session_active = self._config.baseline
@@ -629,6 +668,13 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._activity_quiet_passes = 0
             self._condition.notify_all()
             return True
+
+    def identity_pending(self):
+        """Identidade da folha reaberta ainda nao decidiu — o
+        canvas retido e evidencia de comparacao, nao tinta
+        confirmada da geracao atual."""
+        with self._condition:
+            return bool(self._identity_recovery_requested)
 
     def baseline_state(self):
         """Prontidao e cobertura observada da referencia atual."""
@@ -896,10 +942,20 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             and np.any(self._accumulator._removal_streak)
         ):
             return False
-        if self._identity_recovery_requested and (
-            self._identity_reference is not None
-            or self._identity_baseline_reference is not None
+        if (
+            self._identity_recovery_requested
+            and (
+                self._identity_reference is not None
+                or self._identity_baseline_reference is not None
+            )
+            and not (self._hand_state is True and self._hand_still())
         ):
+            # Identidade pendente pede sondagem — exceto com a mao
+            # parada: sem movimento nao ha evidencia nova e o defer
+            # por fragmento repetia a passada em cadencia cheia sem
+            # fim. O movimento da propria mao acorda a sondagem; sem
+            # sinal de mao (None) a sonda lenta e a unica fonte de
+            # evidencia e nao pode dormir.
             return False
         if (
             self._generation_passes < _REST_MIN_GENERATION_PASSES
@@ -1864,6 +1920,27 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     p.identity_recall = 1.0 if p.keep_page else 0.0
                 else:
                     seen = candidate > self._accumulator.threshold
+                    change_threshold = self._accumulator._baseline_change_threshold
+                    if np.any(prior_bl) and self._identity_print_reference is not None:
+                        # Realinha a candidata a grade salva pelo
+                        # residuo da impressao: um shift de 1 px
+                        # atravessando a fronteira da guarda nao pode
+                        # virar nem perder um rabisco real — primeiro
+                        # mede o shift do print, depois julga a regiao.
+                        # A evidencia do shift exclui o que supera a
+                        # referencia (rabisco novo), que enviesaria o
+                        # encaixe; so o conteudo inalterado mede.
+                        shift_evidence = seen
+                        if change_threshold is not None:
+                            shift_evidence = seen & (candidate <= change_threshold)
+                        dy, dx = _identity_estimate_shift(
+                            shift_evidence, self._identity_print_reference
+                        )
+                        if dy or dx:
+                            candidate = _shift_mask(candidate, dy, dx)
+                            seen = candidate > self._accumulator.threshold
+                            if identity_visible is not None:
+                                identity_visible = _shift_mask(identity_visible, dy, dx)
                     kernel = np.ones(
                         (identity._IDENTITY_DILATION_KERNEL,) * 2, np.uint8
                     )
@@ -1879,7 +1956,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         # salva. Na copia limpa a impressao inalterada
                         # nao forja o rabisco; o traco confirmado
                         # sobre ela continua contando.
-                        change_threshold = self._accumulator._baseline_change_threshold
                         hw_out_d = (
                             cv2.dilate((seen & ~prior_bl).astype(np.uint8), kernel) > 0
                         )
@@ -2062,6 +2138,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 # observations remain registered into the same canvas.
                 self._identity_reference = None
                 self._identity_baseline_reference = None
+                self._identity_print_reference = None
                 self._identity_reference_corners = None
                 self._identity_recovery_requested = False
                 self._identity_defer_count = 0

@@ -658,6 +658,7 @@ class Pipeline:
             captured_at=captured_at,
             anchor_corners=anchor,
             full=full,
+            identity_pending=self.ink_identity_pending(),
         )
 
     def reset_source(self, since):
@@ -1177,6 +1178,12 @@ class Pipeline:
                 True, False, False, False, 0, 0, 0, 0.0, "stabilizing"
             )
         )
+
+    def ink_identity_pending(self):
+        """Identidade da folha reaberta ainda nao decidiu — o
+        canvas retido nao e tinta confirmada da geracao atual."""
+        state_fn = getattr(self.ink_worker, "identity_pending", None)
+        return bool(state_fn is not None and state_fn())
 
     def collect_ink(self):
         """Colhe a tinta assincrona: painel e erro.

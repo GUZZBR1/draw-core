@@ -611,7 +611,14 @@ def run(
             so o canvas confirmado retido (canvas_persist) — a folha
             em branco e a provisoria nunca viram arquivo.
             """
-            if pipeline is not None and pipeline.clean_mask is not None:
+            if pipeline is not None and pipeline.ink_identity_pending():
+                # O canvas retido e evidencia da comparacao de
+                # identidade, ainda nao confirmado na geracao
+                # reaberta — salvar ele gravaria a folha errada.
+                print(
+                    "Identidade da folha em verificacao; o canvas retido nao foi salvo."
+                )
+            elif pipeline is not None and pipeline.clean_mask is not None:
                 # O snapshot e um consumidor de canvas: ele salva a
                 # camada confirmada, nunca o painel com a tinta
                 # provisoria.

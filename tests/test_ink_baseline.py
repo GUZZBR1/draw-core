@@ -1090,6 +1090,9 @@ def test_recovery_defers_on_fragment_match_until_hand_lifts(
     events = worker.telemetry_snapshot()["page_identity_events"]
     assert events[-1]["decision"] == "deferred_occlusion"
     assert worker._identity_reference is not None
+    # O desenho retido segue disponivel para a comparacao, mas a
+    # geracao reaberta o sinaliza como nao verificado.
+    assert worker.identity_pending()
 
     # A mao sai: so 18 dos 36 px casam — pagina nova, nao
     # heranca do desenho.
@@ -1098,6 +1101,59 @@ def test_recovery_defers_on_fragment_match_until_hand_lifts(
     events = worker.telemetry_snapshot()["page_identity_events"]
     assert events[-1]["decision"] == "new_page"
     assert not np.any(worker.poll(repl_gen, 0).confirmed)
+    worker.stop()
+
+
+def test_still_hand_fragment_deferral_can_rest(monkeypatch):
+    """Mao parada segurando o defer por fragmento: sem
+    evidencia nova o worker descansa — e o movimento da mao e
+    quem acorda a sondagem. Sem a excecao, a identidade
+    pendente segurava a inferencia em cadencia cheia para
+    sempre com o baseline desligado (review)."""
+    from draw.ink import worker as worker_module
+
+    monkeypatch.setattr(worker_module, "_PAGE_CLEAN_INTERVAL_SECONDS", 0)
+    config = InkConfig(
+        baseline=False,
+        removal=False,
+        anchor_arbitration=False,
+        anchor_follow=False,
+    )
+    model = _MutablePageClean(np.zeros((H, W), dtype=np.float32))
+    worker = PageCleanWorker(model, config=config).start()
+    generation = worker.new_generation()
+    _submit_and_wait(worker, generation)
+
+    drawing = np.zeros((H, W), dtype=np.float32)
+    drawing[20:38, 22] = 0.95
+    drawing[20:38, 30] = 0.95
+    model.prob = drawing
+    for _ in range(3):
+        _submit_and_wait(worker, generation)
+    assert np.any(worker.poll(generation, 0).confirmed)
+
+    # A mao chega e esconde o rabisco; a substituta expoe so um
+    # fragmento que casa — defer por fragmento, repetido.
+    worker.set_hand_presence(True, moved=True)
+    repl_gen = worker.new_generation(preserve_identity=True)
+    hidden = np.ones((H, W), dtype=bool)
+    hidden[20:38, 21:24] = False
+    hidden[20:38, 29:32] = False
+    hidden[20:29, 22] = True
+    for _ in range(3):
+        _submit_and_wait(worker, repl_gen, visible=hidden)
+    events = worker.telemetry_snapshot()["page_identity_events"]
+    assert events[-1]["decision"] == "deferred_occlusion"
+
+    # Mao parada alem da janela de quietude: o defer nao tem
+    # evidencia nova — o worker descansa ate ela se mexer.
+    worker._hand_motion_at = 0
+    assert worker._at_rest()
+
+    # A mao se move: acorda e a sondagem retoma a espera por
+    # evidencia para decidir a identidade.
+    worker.set_hand_presence(True, moved=True)
+    assert not worker._at_rest()
     worker.stop()
 
 
@@ -1312,3 +1368,138 @@ def test_crossing_stroke_at_098_clears_faint_edge_but_not_dark():
             baseline_coverage=coverage,
         )
     assert not np.any(result["confirmed"][22, 5:43])
+
+
+def test_stroke_shifted_across_guard_boundary_recovers(monkeypatch):
+    """Traco montado na fronteira da guarda dilatada (linhas
+    27-28, dentro e fora) desloca 1 px para dentro com a folha:
+    sem o realinhamento toda a evidencia cai na regiao mascarada
+    e o recall zera; com ele a tinta volta a grade salva."""
+    from draw.ink import worker as worker_module
+
+    monkeypatch.setattr(worker_module, "_PAGE_CLEAN_INTERVAL_SECONDS", 0)
+    config = InkConfig(
+        baseline=True,
+        removal=False,
+        anchor_arbitration=False,
+        anchor_follow=False,
+    )
+    # Impressao 20:24 -> guarda dilatada cobre 17:27; a linha 27
+    # e a ultima dentro da guarda, a 28 a primeira fora.
+    printed = np.zeros((H, W), dtype=np.float32)
+    printed[20:24, 4:44] = 0.80
+    model = _MutablePageClean(printed.copy())
+    worker = PageCleanWorker(model, config=config).start()
+    generation = worker.new_generation()
+    _submit_and_wait(worker, generation)
+
+    # Traco cruzando a fronteira: a linha 27 (dentro, 0.98 supera
+    # a referencia 0.95 da margem) e a 28 (fora) confirmam.
+    drawing = printed.copy()
+    drawing[27:29, 22:26] = 0.98
+    model.prob = drawing
+    for _ in range(3):
+        _submit_and_wait(worker, generation)
+    saved_canvas = worker.poll(generation, 0).confirmed.copy()
+    assert np.any(saved_canvas[27:29, 22:26])
+
+    # A mesma folha volta registrada 1 px acima: o traco le nas
+    # linhas 26-27 — todo dentro da guarda salva. Sem realinhar,
+    # o pixel de referencia fora da guarda (28) fica sem
+    # evidencia e a folha viraria pagina nova.
+    shifted = np.zeros((H, W), dtype=np.float32)
+    shifted[19:23, 4:44] = 0.80
+    shifted[26:28, 22:26] = 0.98
+    model.prob = shifted
+    same_gen = worker.new_generation(preserve_identity=True)
+    _submit_and_wait(worker, same_gen)
+    assert (
+        worker.telemetry_snapshot()["page_identity_events"][-1]["decision"]
+        == "same_page"
+    )
+    worker.stop()
+
+
+def test_stroke_shifted_into_guard_recovers(monkeypatch):
+    """Sentido inverso: traco salvo logo fora da guarda (linha
+    28) que desloca 1 px para dentro — a impressao deslocada nao
+    pode esconder o rabisco real nem ser confundida com ele."""
+    from draw.ink import worker as worker_module
+
+    monkeypatch.setattr(worker_module, "_PAGE_CLEAN_INTERVAL_SECONDS", 0)
+    config = InkConfig(
+        baseline=True,
+        removal=False,
+        anchor_arbitration=False,
+        anchor_follow=False,
+    )
+    printed = np.zeros((H, W), dtype=np.float32)
+    printed[20:24, 4:44] = 0.80
+    model = _MutablePageClean(printed.copy())
+    worker = PageCleanWorker(model, config=config).start()
+    generation = worker.new_generation()
+    _submit_and_wait(worker, generation)
+
+    # Traco fora da guarda salva (linha 28, a 4 px da impressao).
+    drawing = printed.copy()
+    drawing[28, 22:26] = 0.98
+    model.prob = drawing
+    for _ in range(3):
+        _submit_and_wait(worker, generation)
+    assert np.any(worker.poll(generation, 0).confirmed[28, 22:26])
+
+    # Volta 1 px acima: o traco le na linha 27 — dentro da
+    # guarda salva, onde `seen & ~prior_bl` o mascararia.
+    shifted = np.zeros((H, W), dtype=np.float32)
+    shifted[19:23, 4:44] = 0.80
+    shifted[27, 22:26] = 0.98
+    model.prob = shifted
+    same_gen = worker.new_generation(preserve_identity=True)
+    _submit_and_wait(worker, same_gen)
+    assert (
+        worker.telemetry_snapshot()["page_identity_events"][-1]["decision"]
+        == "same_page"
+    )
+    worker.stop()
+
+
+def test_clean_copy_shifted_does_not_forge_stroke(monkeypatch):
+    """Copia limpa re-registrada 1 px deslocada: o realinhamento
+    pela impressao nao pode fabricar evidencia do rabisco salvo
+    — a decisao segue pagina nova."""
+    from draw.ink import worker as worker_module
+
+    monkeypatch.setattr(worker_module, "_PAGE_CLEAN_INTERVAL_SECONDS", 0)
+    config = InkConfig(
+        baseline=True,
+        removal=False,
+        anchor_arbitration=False,
+        anchor_follow=False,
+    )
+    printed = np.zeros((H, W), dtype=np.float32)
+    printed[20:24, 4:44] = 0.80
+    model = _MutablePageClean(printed.copy())
+    worker = PageCleanWorker(model, config=config).start()
+    generation = worker.new_generation()
+    _submit_and_wait(worker, generation)
+
+    drawing = printed.copy()
+    drawing[28, 22:26] = 0.98
+    model.prob = drawing
+    for _ in range(3):
+        _submit_and_wait(worker, generation)
+    assert np.any(worker.poll(generation, 0).confirmed[28, 22:26])
+
+    # A substituta tem a mesma impressao 1 px acima e nenhum
+    # traco: nem com o realinhamento ha evidencia do rabisco.
+    shifted = np.zeros((H, W), dtype=np.float32)
+    shifted[19:23, 4:44] = 0.80
+    model.prob = shifted
+    repl_gen = worker.new_generation(preserve_identity=True)
+    for _ in range(3):
+        _submit_and_wait(worker, repl_gen)
+    assert (
+        worker.telemetry_snapshot()["page_identity_events"][-1]["decision"]
+        == "new_page"
+    )
+    worker.stop()
