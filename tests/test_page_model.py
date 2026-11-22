@@ -408,6 +408,48 @@ def test_page_model_reacquires_small_stroke_with_printed_baseline_and_visible_ma
         worker.stop()
 
 
+def test_page_model_clean_replacement_with_adjacent_print_rejects_old_tick(
+    monkeypatch,
+):
+    """R1805-1812: copia limpa com traco impresso colado ao tick manuscrito nao herda o tick."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        gen1 = worker.new_generation()
+        vis_all = np.ones((H, W), dtype=bool)
+        form = np.full((H, W), PAPER, dtype=np.float32)
+        # Traco impresso [20:25, 50:55] (25 px) + pauta impressa
+        form[20:25, 50:55] = INK
+        form[10:15, 10:40] = INK
+        for _ in range(3):
+            _drive(worker, gen1, form, visible=vis_all)
+        assert np.count_nonzero(_confirmed(worker, gen1)) == 0
+
+        # Tick manuscrito de 10 px [20:25, 55:57] colado ao traco impresso [20:25, 50:55]
+        with_tick = form.copy()
+        with_tick[20:25, 55:57] = INK
+        for _ in range(4):
+            _drive(worker, gen1, with_tick, visible=vis_all)
+        assert np.count_nonzero(_confirmed(worker, gen1)) == 10
+
+        # Caso 1: a mesma folha com o tick retorna -> same_page preserva os 10 px
+        gen2 = worker.new_generation(preserve_identity=True)
+        _drive(worker, gen2, with_tick, visible=vis_all)
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] == "same_page"
+        assert np.count_nonzero(_confirmed(worker, gen2)[20:25, 55:57]) == 10
+
+        # Caso 2: copia limpa do formulario (sem o tick manuscrito) entra -> new_page limpa o tick
+        gen3 = worker.new_generation(preserve_identity=True)
+        for _ in range(identity_mod._PAGE_IDENTITY_SWITCH_CONSENSUS_FRAMES):
+            _drive(worker, gen3, form, visible=vis_all)
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] == "new_page"
+        assert np.count_nonzero(_confirmed(worker, gen3)) == 0
+    finally:
+        worker.stop()
+
+
 def test_page_model_reference_stays_within_camera_range_after_large_brightness_jump():
     """page_model.py:170: salto grande de brilho rejeitado por _estimate_gain nao estoura 255."""
     model = pm_mod.PageModel((H, W), confirm_obs=1, rate=0.5)

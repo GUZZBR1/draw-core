@@ -1795,9 +1795,13 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         baseline_d = (
                             cv2.dilate(identity_baseline.astype(np.uint8), kernel) > 0
                         )
-                        prior_full_d = cv2.dilate(prior.astype(np.uint8), kernel) > 0
-                        seen = seen & ~(baseline_d & ~prior_full_d)
-                    seen_d = cv2.dilate(seen.astype(np.uint8), kernel) > 0
+                        seen = seen & ~identity_baseline & ~(baseline_d & ~prior)
+                        seen_d = (
+                            cv2.dilate((seen & ~baseline_d).astype(np.uint8), kernel)
+                            > 0
+                        ) | seen
+                    else:
+                        seen_d = cv2.dilate(seen.astype(np.uint8), kernel) > 0
                     if identity_visible is not None:
                         prior_visible = prior & identity_visible
                         prior_visible_px = int(np.count_nonzero(prior_visible))
