@@ -337,6 +337,52 @@ def test_in_band_target_jitter_holds_a_stable_gain():
     assert max(gains[-6:]) - min(gains[-6:]) < 0.01
 
 
+def test_confirmed_lighting_step_refreshes_the_ceiling_target():
+    """Devin Review PR #140: a trava do alvo do teto não acompanhava
+    mudança de luz confirmada — clareado o papel de 66 p/ 68 (alvo
+    3,0→2,94, ambos na banda) o ganho derivava de volta a 3,0 e
+    renderizava ~204 em vez de ~200. Mudança confiável agora atualiza
+    a trava; jitter de máscara segue suprimido."""
+    visible = np.ones((120, 120), dtype=bool)
+    dark = np.full((120, 120, 3), 66, np.uint8)
+    bright = np.full((120, 120, 3), 68, np.uint8)
+
+    smoother = exposure.PaperGainSmoother()
+    assert smoother.update(3.0, 0.0, image=dark, mask=visible) == 3.0
+
+    # a luz sobe de verdade e fica: novo alvo segue dentro da banda
+    target_bright = 200 / 68  # ~2,94
+    gains = [
+        smoother.update(target_bright, index * 0.25, image=bright, mask=visible)
+        for index in range(1, 8)
+    ]
+    out = exposure.apply_gain(bright, gains[-1])
+    assert gains[-1] < 2.97  # convergiu ao alvo novo, não voltou a 3,0
+    assert out[0, 40, 0] < 202  # ~200, não ~204
+
+
+def test_confirmed_dimming_lets_the_ceiling_target_rise():
+    """Direção inversa: papel 68 → 60 — a trava velha em 2,94 deixava
+    o ganho preso abaixo do teto seguro 3,0 (renderiza ~176 em vez
+    de ~180)."""
+    visible = np.ones((120, 120), dtype=bool)
+    bright = np.full((120, 120, 3), 68, np.uint8)
+    dark = np.full((120, 120, 3), 60, np.uint8)
+
+    smoother = exposure.PaperGainSmoother()
+    smoother.update(200 / 68, 0.0, image=bright, mask=visible)  # trava em ~2,94
+    for index in range(8):
+        smoother.update(200 / 68, (index + 1) * 0.25, image=bright, mask=visible)
+
+    gains = [
+        smoother.update(3.0, (9 + index) * 0.25, image=dark, mask=visible)
+        for index in range(8)
+    ]
+    out = exposure.apply_gain(dark, gains[-1])
+    assert gains[-1] > 2.97  # subiu ao teto seguro
+    assert out[0, 40, 0] > 178  # ~180, não ~176
+
+
 def test_ceiling_gain_stays_limited_while_the_flash_persists():
     """Controle: com a faixa MANTIDA no nível claro o ganho segue
     limitado — reabre só quando a cena permite, não por timer."""

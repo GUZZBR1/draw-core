@@ -189,6 +189,12 @@ class PaperGainSmoother:
             # o resíduo converge ao alvo pela suavização normal em vez
             # de ficar preso para sempre.
             self._gain = float(np.clip(min(corrected, target), 1.0, _MAX_GAIN))
+            if math.log(target) >= _CEILING_GUARD_LOG:
+                # Mudança de luz confirmada: a trava do teto também
+                # acompanha o alvo novo — sem isso o ganho derivava de
+                # volta ao valor velho com a luz nova (Devin Review
+                # PR #140). Jitter de máscara segue travado.
+                self._ceiling_target_log = math.log(target)
 
         current_log = math.log(self._gain)
         target_log = math.log(target)
