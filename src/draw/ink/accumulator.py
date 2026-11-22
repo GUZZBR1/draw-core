@@ -222,7 +222,20 @@ class LayeredInkAccumulator:
                 # 1,5k~13,9k alternando no sim-hand, streak nunca
                 # completava).
                 exposed = visible & paper_exposed
-                resettable = exposed & ~missing
+                # Leitura no nível do voto é evidência positiva por
+                # si mesma e zera o streak mesmo onde a guarda não
+                # provou papel exposto: o veto dark_ink — tinta
+                # forte sobre pixel escuro nunca prova papel —
+                # descreve todo pixel de traço real (prob >=
+                # vote_hit e luma escura), e segurar o streak dele
+                # deixava faltas espalhadas somarem até apagar a
+                # tinta (Devin Review do PR #144). O veto segue
+                # barrando o incremento via paper_exposed; este
+                # braço só restaura o reset. A barra é a mesma do
+                # observe (ink_support_threshold=vote_hit): tudo
+                # que o veto consegue derrubar volta a zerar.
+                seen_ink = evidence >= self._config.vote_hit
+                resettable = (exposed | seen_ink) & ~missing
                 self._removal_streak[resettable] = 0
                 self._removal_streak[missing] = np.minimum(
                     self._removal_streak[missing].astype(np.uint16) + 1,
