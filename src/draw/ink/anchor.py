@@ -34,8 +34,8 @@ _ANCHOR_MIGRATION_GRID = 16
 # POUSO troca a ancora SEM mover o estado; ESPURIO nao faz nada.
 # Enquanto o evento esta aberto, a passada NAO vota (visible=0): a
 # copia deslocada confirmava pelo voto antes de qualquer veredito
-# (mecanismo que reprovou a v2 sem abstencao). Ligado pelo
-# InkConfig.anchor_arbitration do preset de producao.
+# (mecanismo que reprovou a v2 sem abstencao). Mecanismo fixo do
+# preset de producao (a flag do Tier A foi removida).
 _ARB_SETTLE_PX = 6.0
 _ARB_DELTA = 0.05
 _ARB_MIN_CANVAS_PX = 200
@@ -65,8 +65,8 @@ _ARB_MIN_PASS_PX = 200
 # decisivo com acao pre-empta; spurious retem o FOLLOW pelo
 # episodio inteiro; indeterminate ou ausencia de veredito
 # (creep: a consistencia par-a-par nunca fecha) deixam a
-# geometria decidir. Ligado pelo InkConfig.anchor_follow do
-# preset de producao.
+# geometria decidir. Mecanismo fixo do preset de producao
+# (a flag do Tier A foi removida).
 _FOLLOW_DISPLACEMENT_PX = _ANCHOR_MIGRATION_DISPLACEMENT_PX
 _FOLLOW_PASSES = _ANCHOR_MIGRATION_PASSES
 _FOLLOW_SETTLE_PX = 6.0
@@ -111,7 +111,7 @@ class _AnchorSteps:
     ):
         """Avanca o evento de arbitragem; arbitra no fecho do streak.
 
-        Chamado sob a Condition, com a arbitragem ligada.
+        Chamado sob a Condition.
         Devolve (status, evento): "closed" (sem evento; a passada
         vota), "open" (evento aberto sem veredito; a passada NAO
         vota — a copia deslocada nao pode confirmar pelo voto
@@ -299,7 +299,7 @@ class _AnchorSteps:
         """Avanca o evento de divergencia assentada; re-ancora no
         fecho do streak.
 
-        Chamado sob a Condition, com o follow ligado, DEPOIS
+        Chamado sob a Condition, DEPOIS
         do passo da arbitragem (arb_event e o veredito dela nesta
         passada, ou None). Devolve (status, evento): "closed" (sem
         evento; a passada vota), "open" (divergencia assentada em

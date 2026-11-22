@@ -179,7 +179,6 @@ class PageModel:
         self._all_seeded = False
         self._last_chroma_ok = True
         self._last_visible = None
-        self._last_norm = None
         # Ultima aparencia normalizada VISTA por pixel (NaN = nunca
         # visto): o que a mao cobriu na ultima passada guarda o tom
         # da ultima observacao valida, nao o da mao.
@@ -295,7 +294,6 @@ class PageModel:
         self._last_chroma_ok = chroma_ok
         self._last_visible = visible
         norm_gray = gray if abs(gain - 1.0) <= 1e-4 else (gray / np.float32(gain))
-        self._last_norm = norm_gray
         if visible.all():
             # Sem copia: a passada inteira vista E o ultimo visto.
             self._observed_norm = norm_gray
@@ -905,16 +903,6 @@ class PageModel:
         valida, nao o tom do oclusor.
         """
         return self._observed_norm
-
-    @property
-    def last_normalized_gray(self):
-        """O gray normalizado pela iluminacao da ultima observacao.
-
-        None antes do primeiro observe — a referencia fotometrica
-        que a maquina de identidade guarda junto da mascara de
-        tinta salva.
-        """
-        return self._last_norm
 
     def seeding_pending(self, visible=None):
         """Visivel sem referencia em bloco com semeadura em curso.

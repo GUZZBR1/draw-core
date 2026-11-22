@@ -53,8 +53,8 @@ _INK_CORNER_HISTORY = 5
 INK_WORKER_FAILED = "ink_worker_failed"
 
 
-# Destrave da geometria de tinta congelada sem mao (config
-# follow_move): com clean_hand_present=False o historico de cantos
+# Destrave da geometria de tinta congelada sem mao: com
+# clean_hand_present=False o historico de cantos
 # nao recebe o rastreador — decisao correta para a pagina parada (a
 # mediana viva andaria com o jitter e arrastaria a tinta publicada),
 # mas cega para a folha que desliza sem mao na cena: o warp segue na
@@ -1050,7 +1050,7 @@ class Pipeline:
             # do detector, deslocando a tinta ja publicada.
             if self.clean_hand_present is not False or (not self.corner_history):
                 self.corner_history.append(self.tracker.corners.copy())
-            elif self._config.follow_move:
+            else:
                 # Congelado sem mao: so um deslocamento real da folha
                 # destrava — o quad do rastreador ja e posicao
                 # confirmada (mediana + banda morta + persistencia),

@@ -166,7 +166,7 @@ def test_late_reference_aligns_to_confirmed_ink_when_sheet_returns():
     now = [1000.0]
     worker = worker_mod.PageCleanWorker(
         _DarkIsInk(),
-        config=InkConfig(motion_veto=True, anchor_follow=False),
+        config=InkConfig(motion_veto=True),
         clock=lambda: now[0],
     )
     worker.set_hand_presence(True)

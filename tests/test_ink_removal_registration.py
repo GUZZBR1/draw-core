@@ -90,15 +90,6 @@ def test_negative_evidence_fails_closed(mode):
     np.testing.assert_array_equal(result["confirmed"], original)
 
 
-def test_removal_off_is_byte_identical_and_monotone():
-    acc = accumulator_mod.LayeredInkAccumulator(config=InkConfig(removal=False))
-    original = confirmed(acc, ink())
-    for _ in range(20):
-        result = acc.add(np.zeros_like(ink()), np.ones(ink().shape, bool))
-    np.testing.assert_array_equal(original, result["confirmed"])
-    assert "removed_confirmed_px" not in result
-
-
 def drive(sequence, config=None):
     clock = rr.SceneClock()
     worker = rr.make_ink_worker(_ProbIsWarp(), clock, config=config)
@@ -118,16 +109,13 @@ def drive(sequence, config=None):
     return worker
 
 
-def test_live_telemetry_records_arbitration_config(monkeypatch):
+def test_live_telemetry_records_pass_fields():
     prob = ink()
-    worker = drive(
-        [(prob, rr.base_quad(prob.shape))] * 8,
-        config=InkConfig(anchor_arbitration=False),
-    )
+    worker = drive([(prob, rr.base_quad(prob.shape))] * 8)
     record = worker.telemetry_snapshot()["records"][-1]
-    assert record["anchor_arbitration_enabled"] is False
     assert record["sequence"] == 8 and record["pass_gap_s"] == 1
     assert record["registration_is_identity"]
+    assert "arb_event_open" in record and "follow_streak" in record
     assert "new_confirmed_px" in record and "removed_confirmed_px" in record
 
 
@@ -1236,7 +1224,7 @@ def test_hand_mask_dropouts_cannot_erase_or_add_hand_edges_and_exit_confirms():
 
     clock = rr.SceneClock()
     page_clean = _MutablePageClean(old)
-    worker = rr.make_ink_worker(page_clean, clock, config=InkConfig(removal=True))
+    worker = rr.make_ink_worker(page_clean, clock, config=InkConfig())
     generation = worker.new_generation()
     corners = rr.base_quad(shape)
     camera_to_page = registration_mod._corners_page_matrix(corners, shape[1], shape[0])

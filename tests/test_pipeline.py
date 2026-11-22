@@ -190,7 +190,6 @@ def test_pipeline_config_defaults_are_the_production_preset():
     assert config.canvas_persist is True
     assert config.skip_stale is True
     assert config.seg_hand_occlusion is True
-    assert config.follow_move is True
     assert config.ink_auto_gain is True
     assert config.detect_wake is True
     assert config.ink == InkConfig.production()
@@ -989,9 +988,7 @@ def _drive_clock(loop, steps, clock_state, dt=0.05, frame=None):
         clock_state["t"] += dt
 
 
-def _move_scenario(
-    *, follow_move, frame=None, quad=None, move=(120.0, 0.0), move_steps=60
-):
+def _move_scenario(*, frame=None, quad=None, move=(120.0, 0.0), move_steps=60):
     """Folha desliza sem mão: sessão aberta em `quad`, mão sai
     (freeze) e o quad confirmado desliza `move` pixels. `frame`
     define a resolução da captura (padrão 720x1280, a mesa de
@@ -1006,7 +1003,7 @@ def _move_scenario(
     def script(_i):
         return (moved if state["move"] else quad).copy(), "paper", None
 
-    loop, _det, ink = _make_loop(script, config=PipelineConfig(follow_move=follow_move))
+    loop, _det, ink = _make_loop(script, config=PipelineConfig())
     loop._clock = lambda: clock_state["t"]
     _drive_clock(loop, 40, clock_state, frame=frame)
     assert loop.tracker.corners is not None
@@ -1018,24 +1015,12 @@ def _move_scenario(
 
 
 def test_frozen_geometry_tracks_real_move():
-    """Com follow_move, o quad congelado destrava num deslocamento
-    real e a tinta volta a ser retificada na pose nova."""
-    _loop, ink, moved = _move_scenario(follow_move=True)
+    """O quad congelado destrava num deslocamento real da folha e a
+    tinta volta a ser retificada na pose nova."""
+    _loop, ink, moved = _move_scenario()
     last_corners = ink.submitted[-1][1]
     assert last_corners is not None
     assert np.max(np.abs(last_corners - moved)) < 5.0
-
-
-def test_frozen_geometry_stays_without_follow_move():
-    """Sem follow_move, o congelamento de sempre segue: a mediana
-    fica na pose antiga mesmo com o rastreador já na posição nova."""
-    loop, ink, moved = _move_scenario(follow_move=False)
-    assert np.max(np.linalg.norm(loop.tracker.corners - moved, axis=1)) < 40.0, (
-        "o rastreador em si já acompanhou a folha"
-    )
-    last_corners = ink.submitted[-1][1]
-    assert last_corners is not None
-    assert np.max(np.abs(last_corners - QUAD)) < 5.0
 
 
 def test_frozen_geometry_unlock_scales_with_frame_resolution():
@@ -1048,9 +1033,7 @@ def test_frozen_geometry_unlock_scales_with_frame_resolution():
     congelado não reparte — a tinta segue retificada na pose velha.
     """
     # 720p (mesa de referência): 60 px > 25 px efetivo → destrava.
-    _loop, ink_720, moved_720 = _move_scenario(
-        follow_move=True, quad=QUAD, move=(60.0, 0.0)
-    )
+    _loop, ink_720, moved_720 = _move_scenario(quad=QUAD, move=(60.0, 0.0))
     last = ink_720.submitted[-1][1]
     assert np.max(np.abs(last - moved_720)) < 5.0
 
@@ -1059,7 +1042,6 @@ def test_frozen_geometry_unlock_scales_with_frame_resolution():
     quad_4k = QUAD * 3.0
     frame_4k = np.zeros((2160, 3840, 3), dtype=np.uint8)
     loop_4k, ink_4k, moved_4k = _move_scenario(
-        follow_move=True,
         frame=frame_4k,
         quad=quad_4k,
         move=(60.0, 0.0),
