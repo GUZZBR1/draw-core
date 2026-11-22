@@ -1176,33 +1176,37 @@ def _verdict_paired(side_l, side_r, kl, kr, l_vot, r_vot, l_edge, r_edge):
     """
     vl = side_l.vote[kl] if l_vot else None
     vr = side_r.vote[kr] if r_vot else None
-    # o ombro de referência mede-se no MESMO conjunto do veredito: para o
-    # par, só as linhas pareadas (a linha sem par decide pelo conjunto do
-    # próprio lado, na seção de sem-par)
+    # Referência de ombro comum por lado, em hierarquia: o conjunto pareado
+    # quando ele próprio a sustenta (has_p), senão o lado inteiro (ombro
+    # comum não precisa de par para ser medido), senão nada.
     has_pl = vl is not None and int(vl.sum()) > _min_bulk(kl.size)
     has_pr = vr is not None and int(vr.sum()) > _min_bulk(kl.size)
-    cl = (
-        side_l.ext[kl] > _bulk_ext(side_l.ext[kl][vl]) + _GUTTER_EDGE_RUN
+    ref_l = (
+        _bulk_ext(side_l.ext[kl][vl])
         if has_pl
-        else None
+        else (side_l.bulk if l_vot and side_l.has_bulk else None)
     )
-    cr = (
-        side_r.ext[kr] > _bulk_ext(side_r.ext[kr][vr]) + _GUTTER_EDGE_RUN
+    ref_r = (
+        _bulk_ext(side_r.ext[kr][vr])
         if has_pr
-        else None
+        else (side_r.bulk if r_vot and side_r.has_bulk else None)
     )
+    # c*: a linha continua ALÉM do ombro comum do lado? ext > ref subsum o
+    # voto — quem não votou tem ext < need <= ref e falha sozinho.
+    cl = side_l.ext[kl] > ref_l + _GUTTER_EDGE_RUN if ref_l is not None else None
+    cr = side_r.ext[kr] > ref_r + _GUTTER_EDGE_RUN if ref_r is not None else None
     ok_l = vl.copy() if vl is not None else None
     ok_r = vr.copy() if vr is not None else None
     if vl is not None and vr is not None:
-        if has_pl and has_pr:
+        if cl is not None and cr is not None:
             # o veto de ombro só fecha o par quando os dois lados têm
             # referência (um ombro unilateral não veta)
             ok_l &= cl
             ok_r &= cr
-        elif not (has_pl or has_pr):
-            # nenhum lado mede referência comum (pares esparsos): o voto
-            # cru não decide — um remendo de sombra emendando poucos
-            # pares votaria nos dois lados e salvaria a faixa inteira.
+        elif cl is None and cr is None:
+            # nenhum lado mede referência comum (pares esparsos sem
+            # padrão de ombro): o voto cru não decide — um remendo de
+            # sombra votaria nos dois lados e salvaria a faixa inteira.
             # A linha votada é provada pelo traço (resgate em _mark_paired)
             ok_l = np.zeros(kl.size, bool)
             ok_r = np.zeros(kl.size, bool)
