@@ -73,8 +73,9 @@ def _local_hvcam_host_candidates():
     """Locais onde um checkout/instalacao local do hvcam-host.exe pode morar."""
     here = Path(__file__).resolve().parent
     candidates = [
-        here.parents[2] / "hvcam" / "dist" / "hvcam-host.exe",
-        here.parents[2] / "hvcam" / "build" / "Release" / "hvcam-host.exe",
+        # parents[3] = irmao do checkout (o pacote desceu um nivel).
+        here.parents[3] / "hvcam" / "dist" / "hvcam-host.exe",
+        here.parents[3] / "hvcam" / "build" / "Release" / "hvcam-host.exe",
         Path.home() / "hvcam" / "dist" / "hvcam-host.exe",
         Path.home() / "hvcam" / "build" / "Release" / "hvcam-host.exe",
     ]
@@ -204,8 +205,3 @@ def list_hvcam_devices(host_exe):
         if match:
             devices.append((int(match.group(1)), match.group(2).strip()))
     return devices
-
-
-_MANAGED_WIDTH = 1280
-_MANAGED_HEIGHT = 720
-_MANAGED_FPS = 30

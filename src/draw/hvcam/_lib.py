@@ -40,7 +40,8 @@ class HvFrameHeader(ctypes.Structure):
 
 
 def _candidates():
-    here = os.path.dirname(os.path.abspath(__file__))
+    # A base e src/draw/ (o pacote desceu um nivel: hvcam/ virou diretorio).
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     paths = [
         os.path.join(here, "libhvcam.so"),
         os.path.join(here, "..", "..", "build", "libhvcam.so"),
