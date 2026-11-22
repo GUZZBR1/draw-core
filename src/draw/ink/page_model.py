@@ -763,10 +763,10 @@ class PageModel:
             # referencia mora na grade salva e cada quadro so alcanca
             # `near`: o do candidato (q volta para a posicao salva) e
             # o da folha medida (q - (dy, dx)) — o traco no lugar
-            # salvo nao prova que a pauta tambem nao andou. O quadro
-            # medido so vale onde a pauta local andou de fato: o
-            # deslocamento e global, e a pauta vizinha que ficou no
-            # lugar nao veta o traco que tambem ficou.
+            # salvo nao prova que a pauta tambem nao andou. O
+            # deslocamento e global: a pauta vizinha que provadamente
+            # ficou no lugar sai do quadro medido e nao veta o traco
+            # que tambem ficou.
             near_i = int(near)
             clean_gap = _nearest_reference_gap(ref_inf, py, px, obs, near_i)
             if (oy, ox) != (int(dy), int(dx)) and py.size:
@@ -793,17 +793,19 @@ class PageModel:
 
     @staticmethod
     def _moved_reference(ref_inf, norm_gray, vis, cy, cx, reach, dy, dx):
-        """Recorte de `ref_inf` cobrindo (cy, cx) +- reach, com inf onde a
-        aparencia limpa NAO andou (dy, dx): o pixel de referencia r so
-        fica se a observacao em r + (dy, dx) o reproduz melhor que a
-        observacao em r, ambas visiveis. Devolve (recorte, y0, x0).
+        """Recorte de `ref_inf` cobrindo (cy, cx) +- reach, com inf so onde
+        a aparencia limpa provadamente FICOU no lugar: a observacao em r
+        reproduz ref[r] mais de `_RETURN_TOL` melhor que a observacao em
+        r + (dy, dx), ambas visiveis. Amostra que nao distingue as duas
+        posicoes (faixa larga cobrindo ambas, oclusao, borda) mantem a
+        referencia. Devolve (recorte, y0, x0).
         """
         height, width = ref_inf.shape
         y0 = max(int(cy.min()) - reach, 0)
         y1 = min(int(cy.max()) + reach + 1, height)
         x0 = max(int(cx.min()) - reach, 0)
         x1 = min(int(cx.max()) + reach + 1, width)
-        sub = np.full((max(y1 - y0, 0), max(x1 - x0, 0)), np.inf, dtype=np.float32)
+        sub = ref_inf[y0:y1, x0:x1].copy()
         ty0, ty1 = max(y0, -dy), min(y1, height - dy)
         tx0, tx1 = max(x0, -dx), min(x1, width - dx)
         if ty1 <= ty0 or tx1 <= tx0:
@@ -811,12 +813,12 @@ class PageModel:
         ref = ref_inf[ty0:ty1, tx0:tx1]
         here = norm_gray[ty0:ty1, tx0:tx1]
         there = norm_gray[ty0 + dy : ty1 + dy, tx0 + dx : tx1 + dx]
-        moved = np.isfinite(ref) & (np.abs(there - ref) < np.abs(here - ref))
+        stayed = np.abs(here - ref) + _RETURN_TOL < np.abs(there - ref)
         if vis is not None:
-            moved &= (
+            stayed &= (
                 vis[ty0:ty1, tx0:tx1] & vis[ty0 + dy : ty1 + dy, tx0 + dx : tx1 + dx]
             )
-        sub[ty0 - y0 : ty1 - y0, tx0 - x0 : tx1 - x0] = np.where(moved, ref, np.inf)
+        sub[ty0 - y0 : ty1 - y0, tx0 - x0 : tx1 - x0][stayed] = np.inf
         return sub, y0, x0
 
     @property

@@ -2399,6 +2399,65 @@ def test_saved_tone_evidence_unshifted_match_ignores_stationary_rule():
     assert matched[30, 25:105].all()
 
 
+def test_saved_tone_evidence_wide_shifted_band_keeps_clean_veto():
+    """page_model.py:814: faixa impressa larga (95, linhas 34-47) de uma
+    copia limpa 4 linhas acima (85, 30-43) com alinhamento medindo -3: a
+    referencia vizinha ve 85 nas duas amostras — nao prova que ficou, a
+    explicacao limpa (85 ~ 95) segue vetando o traco salvo (65)."""
+    model = pm_mod.PageModel((H, W))
+    form = np.full((H, W), PAPER, dtype=np.float32)
+    form[34:48, 10:110] = 95.0
+    vis = np.ones((H, W), dtype=bool)
+    for _ in range(4):
+        model.observe(form, visible=vis, paper=vis)
+    levels = np.full((H, W), np.nan, dtype=np.float32)
+    levels[30, 25:105] = 65.0
+    at = np.zeros((H, W), dtype=bool)
+    at[30, 25:105] = True
+    gray = np.full((H, W), PAPER, dtype=np.float32)
+    gray[30:44, 10:110] = 85.0
+    distinct, matched = model.saved_tone_evidence(
+        gray, levels, at, dy=-3, dx=0, near=3, visible=vis
+    )
+    assert distinct[30, 25:105].all()
+    assert not matched.any()
+
+
+def test_page_model_wide_shifted_band_clean_copy_rejects(monkeypatch):
+    """page_model.py:814: copia limpa com faixa larga 4 linhas acima
+    cobrindo o traco salvo nao herda o canvas pela recuperacao."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        form = np.full((H, W), PAPER, dtype=np.float32)
+        form[34:48, 10:110] = 95.0
+        form[66:68, 10:110] = 95.0
+        form[82:84, 10:110] = 95.0
+        written = form.copy()
+        written[29:31, 25:105] = 65.0
+        _, before = _saved_sheet(worker, form, written)
+        assert before >= 120
+
+        copy = np.full((H, W), PAPER, dtype=np.float32)
+        copy[30:44, 10:110] = 85.0
+        copy[62:64, 10:110] = 85.0
+        copy[78:80, 10:110] = 85.0
+        vis = np.ones((H, W), dtype=bool)
+        frames = identity_mod._PAGE_IDENTITY_SWITCH_CONSENSUS_FRAMES
+        bound = identity_mod._PAGE_IDENTITY_MAX_DEFERRALS + frames + 1
+        gen2 = worker.new_generation(preserve_identity=True)
+        for _ in range(bound):
+            _drive(worker, gen2, copy, visible=vis)
+        decisions = [
+            e["decision"] for e in worker.telemetry_snapshot()["page_identity_events"]
+        ]
+        assert "same_page" not in decisions
+        assert decisions[-1] == "new_page"
+        assert int(np.count_nonzero(_confirmed(worker, gen2))) == 0
+    finally:
+        worker.stop()
+
+
 def _ruled_form():
     form = np.full((H, W), PAPER, dtype=np.float32)
     form[34:36, 10:110] = 95.0
