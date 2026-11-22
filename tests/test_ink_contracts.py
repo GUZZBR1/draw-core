@@ -175,20 +175,17 @@ def _passes(worker, clock, generation, scene, n, dt=_DT_ACTIVE):
 
 
 def _confirmed(worker, generation):
+    # Sem snapshot publicado a checagem seria vacua (um painel que
+    # nunca existiu le como mascara em branco): exige que a
+    # trabalhadora tenha publicado o canvas desta geracao.
     snap = worker.poll(generation, 0)
-    if snap is None:
-        return np.zeros((H, W), dtype=np.uint8)
+    assert snap is not None, "trabalhadora nunca publicou canvas"
     return np.asarray(snap.confirmed)
 
 
 def _display(worker, generation):
     snap = worker.poll_display(generation, 0)
-    if snap is None:
-        return (
-            np.zeros((H, W), dtype=np.uint8),
-            np.zeros((H, W), dtype=bool),
-            0,
-        )
+    assert snap is not None, "trabalhadora nunca publicou canvas"
     return np.asarray(snap.confirmed), np.asarray(snap.provisional), snap.version
 
 
@@ -295,8 +292,14 @@ def test_hand_over_confirmed_stroke_preserves_it(ink):
     got = _confirmed(worker, generation) > 0
     assert np.count_nonzero(got & want) >= 0.95 * np.count_nonzero(want)
 
-    # Mao sai de vez: o traco segue intacto e nada novo apareceu.
-    _passes(worker, clock, generation, scene, 3, dt=_DT_IDLE)
+    # Mao sai de vez: o sinal de saida precisa chegar a trabalhadora
+    # (sem ele a porta de ociosidade le a mao ainda presente e parada
+    # e a trabalhadora descansa — os quadros limpos nunca rodam).
+    worker.set_hand_presence(False)
+    ran = [
+        _drive(worker, clock, scene.page_frame(generation), _DT_IDLE) for _ in range(3)
+    ]
+    assert any(ran), "nenhuma passada rodou depois da saida da mao"
     got = _confirmed(worker, generation) > 0
     assert np.count_nonzero(got & want) >= 0.95 * np.count_nonzero(want)
     assert np.count_nonzero(got & ~_dilate(want, 3)) == 0
@@ -314,8 +317,15 @@ def test_preexisting_weak_content_does_not_leak(ink):
     worker, clock = ink
     generation = worker.new_generation()
     scene = _Scene()
-    for y in range(30, H - 20, 24):  # pauta impressa
-        scene.draw((y, y + 2, 10, W - 10), RULING_GRAY)
+    # A pauta entra FORTE (prob 0.95 como no v2 sobre impresso escuro):
+    # acima da barra do voto, ela so nao vaza se o mecanismo proprio de
+    # cada regime agir — remocao de pauta em production, referencia do
+    # PageModel em page_model_solo. Os cinzas fracos (vinco, lapis)
+    # ficam abaixo do piso comum do voto e medem so o resultado do
+    # produto, nao qual guarda agiu — a comparacao entre regimes para
+    # conteudo pre-existente e a da marca forte (linha "+" do PR).
+    for y in range(30, H - 20, 24):  # pauta impressa escura
+        scene.draw((y, y + 2, 10, W - 10), INK)
     scene.draw((0, H, 150, 162), CREASE_GRAY)  # vinco/lombada
     scene.draw((180, 184, 200, 280), PENCIL_GRAY)  # desenho a lapis antigo
     _passes(worker, clock, generation, scene, 8, dt=_DT_IDLE)
@@ -338,7 +348,10 @@ def test_new_stroke_after_settling_confirms_clean(ink):
         scene.draw((y, y + 2, 10, W - 10), RULING_GRAY)
     _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE)
 
-    stroke = (90, 96, 60, 260)  # cruza duas linhas de pauta
+    # Traco vertical: as pautas impressas correm em range(30, H-20, 24)
+    # — linhas 78-79 e 102-103 — e um traco horizontal entre elas nao
+    # cruzaria nenhuma. Este cruza as duas de verdade.
+    stroke = (76, 106, 157, 163)  # cruza as pautas 78-79 e 102-103
     _write_stroke(worker, clock, generation, scene, stroke)
     want = _rect_mask(stroke)
     got = _confirmed(worker, generation) > 0
@@ -413,7 +426,12 @@ def test_eraser_removes_stroke_without_false_ink(ink):
     want_a = _rect_mask(stroke_a)
     want_b = _rect_mask(stroke_b)
     want = want_a | want_b
-    assert np.count_nonzero(_confirmed(worker, generation) & want) > 0
+    # Cada traco precisa estar confirmado por si: se o alvo da
+    # borracha (A) nunca tivesse confirmado, as checagens finais
+    # passariam sem que tinta alguma tivesse sido removida.
+    got0 = _confirmed(worker, generation) > 0
+    assert np.count_nonzero(got0 & want_a) >= 0.9 * np.count_nonzero(want_a)
+    assert np.count_nonzero(got0 & want_b) >= 0.9 * np.count_nonzero(want_b)
 
     # A borracha apaga um terco do traco A sob a mao: a mao cobre a
     # regiao enquanto os pixels voltam ao nivel do papel; depois sai.
@@ -456,7 +474,12 @@ def test_light_sheet_slide_does_not_duplicate_ink(ink):
     assert original_px > 0
 
     # A folha desliza ~8 px e o quad acompanha com erro de rastreio:
-    # o conteudo do warp anda o residuo (-2, -1, 0 px).
+    # o conteudo do warp anda o residuo (-2, -1, 0 px). A mao que
+    # arrasta a folha mantem a trabalhadora acordada — sem o sinal,
+    # 8 px fica abaixo do gatilho geometrico de despertar, o descanso
+    # ignora todo quadro submetido e o teste leria o canvas de antes
+    # do deslize. Cada quadro de residuo precisa virar passada.
+    worker.set_hand_presence(True, moved=True)
     for dx, residual in ((8, -2), (8, -1), (8, 0)):
         scene.corners = Q0 + np.array([dx, 0], dtype=np.float32)
         img = np.full_like(scene.page, TABLE_GRAY)
@@ -477,12 +500,17 @@ def test_light_sheet_slide_does_not_duplicate_ink(ink):
             )
         )
         clock.advance(_DT_ACTIVE)
-        worker.pump()
+        assert worker.pump(), f"quadro do deslize (residuo {residual}) nao rodou"
+    worker.set_hand_presence(False)
     _passes(worker, clock, generation, scene, 3, dt=_DT_IDLE)
 
     got = _confirmed(worker, generation) > 0
     total = np.count_nonzero(got)
     assert total >= 0.75 * original_px
-    assert total <= 1.4 * original_px
-    # Uma copia deslocada apareceria como segundo componente ou como
-    # excesso de pixels: o total acima ja barra a duplicacao limpa.
+    assert total <= 1.15 * original_px
+    # Uma copia deslocada alem do residuo simulado sairia da
+    # vizinhanca imediata do traco original — segundo componente ou
+    # cauda fantasma. (Eco mais fino que o residuo merge no proprio
+    # traco e e indistinguivel de leve engrossamento: o total acima
+    # limita esse residuo a ~1%, nao a barra os 15%.)
+    assert np.count_nonzero(got & ~_dilate(before, 2)) == 0
