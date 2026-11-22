@@ -571,6 +571,41 @@ def test_fill_support_rejects_a_thin_strong_ink_band():
     assert not assessment.visible[40:44, 24:96].any()
 
 
+def test_fill_edge_partially_covering_a_tile_still_votes():
+    """Borda de preenchimento cobrindo ~1/4 do tile de borda: 6 das
+    24 linhas a 0,95 dão média ~0,2375 no tile — o piso de média
+    (que existe para barrar faixas finas de sombra) nunca deixa a
+    borda adotar, e as 6 linhas pintadas do topo ficavam vetadas
+    para sempre mesmo com o miolo confirmando. O miolo adotado
+    ancora a reabertura: os pixels escuros e fortes conectados a
+    ele votam, o papel descoberto do mesmo tile segue vetado, e a
+    faixa fina isolada dentro de outra sombra — sem âncora
+    adotada — continua bloqueada (Devin Review do PR #144)."""
+    guard = occlusion_mod.PaperExposureGuard()
+    paper = np.full((240, 240, 3), 220, dtype=np.uint8)
+    guard.observe(paper)
+
+    filled = paper.copy()
+    filled[42:120, 48:144] = 10  # topo cobre 6/24 px do tile de borda
+    filled[168:240, 24:120] = 60  # sombra isolada (bloco 3x4 tiles)
+    ink = np.zeros((240, 240), np.float32)
+    ink[42:120, 48:144] = 0.95
+    ink[180:184, 24:120] = 0.9  # faixa fina e forte dentro da sombra
+
+    first = guard.observe(filled, ink_prob=ink)
+    assert not first.visible[48, 96]  # antes da adoção o veto vale
+    for _ in range(occlusion_mod._FILL_RECOVERY_PASSES):
+        assessment = guard.observe(filled, ink_prob=ink)
+
+    assert assessment.visible is not None
+    assert assessment.visible[42:120, 48:144].all()  # borda vota junto
+    # O papel descoberto do mesmo tile de borda segue vetado.
+    assert not assessment.visible[24:42, 48:144].any()
+    assert not assessment.visible[180:184, 24:120].any()  # faixa sem âncora
+    assert not assessment.visible[200, 60]  # sombra pura segue vetada
+    assert not assessment.paper_exposed[42:120, 48:144].any()
+
+
 def test_uncertain_photometry_does_not_advance_removal_streak():
     acc = accumulator_mod.LayeredInkAccumulator()
     prob = _big_ink()

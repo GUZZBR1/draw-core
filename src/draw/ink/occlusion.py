@@ -466,6 +466,23 @@ class PaperExposureGuard:
                 > 0
             )
             recovered = adopted_pixels & pixel_support
+            # Borda de preenchimento parcial: a média de prob do tile
+            # de borda dilui com os pixels de papel e fica abaixo do
+            # piso — o miolo adota e a borda, que é o mesmo traço,
+            # ficava vetada para sempre. O piso continua valendo para
+            # SEMEAR a adoção; depois dela o veto cai para o
+            # componente conexo de tinta escura forte ancorado no
+            # adotado — que atravessa as tiles de borda vizinhas. A
+            # faixa fina isolada dentro de uma sombra não tem âncora
+            # adotada e segue bloqueada (Devin Review do PR #144).
+            if np.any(recovered) and np.any(dark_ink):
+                _count, fill_labels = cv2.connectedComponents(
+                    dark_ink.astype(np.uint8), connectivity=8
+                )
+                reached = np.unique(fill_labels[recovered])
+                reached = reached[reached != 0]
+                if reached.size:
+                    recovered = recovered | np.isin(fill_labels, reached)
             if np.any(recovered):
                 if unblocked is None:
                     unblocked = np.ones((height, width), dtype=bool)
