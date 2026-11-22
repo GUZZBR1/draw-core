@@ -19,8 +19,10 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Protocol
 
 import cv2
+import numpy as np
 
 from . import hvcam as hvcam_module
 from .contracts import FramePacket
@@ -46,6 +48,44 @@ _READ_RETRY_SECONDS = 0.005
 
 # Teto da espera pela drenagem da fila de PNG na saida do app.
 _PNG_DRAIN_SECONDS = 5.0
+
+
+class CaptureSource(Protocol):
+    """Fonte de quadros compativel com VideoCapture (contrato estrutural).
+
+    Toda fonte que sai de open_capture — cv2.VideoCapture local,
+    HelperCapture (draw.protocol), HvcamCapture (draw.hvcam) ou fake de
+    teste que entra por ele — satisfaz este contrato por forma, sem
+    herdar dele. O LatestFrameCapture chama so read()/release() —
+    fakes que o alimentam direto podem omitir isOpened(). read()
+    devolve (ok, quadro) como o VideoCapture: (False, None) na falha,
+    e quadro None com ok=True tambem conta como falha. isOpened() diz
+    se a fonte esta aberta. release() libera o recurso e precisa ser
+    seguro de chamar ate sobre fonte que nao abriu ou ja foi liberada —
+    open_capture chama release() em capturas com isOpened() falso, e o
+    LatestFrameCapture serializa o seu pelo _release_lock.
+
+    Alem dos metodos, a fonte pode expor a identidade do emissor —
+    last_frame_id, last_capture_ts_ms e source_dropped (inteiros) —
+    como o HelperCapture e o HvcamCapture fazem. O consumidor sonda
+    esses atributos com hasattr/getattr em vez de exigi-los
+    (LatestFrameCapture.__init__ e _pump_loop): fonte sem eles entrega
+    FramePacket sem identidade, e o stats() omite o
+    capture_source_dropped.
+
+    Fora do contrato de proposito: set() so corre na fonte local
+    (indice inteiro, via _configure_local_capture) e get() nao faz
+    parte do contrato — quem precisa dele (lab/desk_capture, para o
+    fps) sonda com getattr; open_error e detalhe de um adaptador so; e
+    nenhuma classe herda de CaptureSource — o contrato e estrutural,
+    nao nominal.
+    """
+
+    def read(self) -> tuple[bool, np.ndarray | None]: ...
+
+    def isOpened(self) -> bool: ...
+
+    def release(self) -> None: ...
 
 
 class LatestFrameCapture:
@@ -75,7 +115,7 @@ class LatestFrameCapture:
     mesma contagem, com o mesmo limite e o mesmo desfecho.
     """
 
-    def __init__(self, capture, rotation=0):
+    def __init__(self, capture: CaptureSource, rotation=0):
         if rotation not in INPUT_ROTATIONS:
             raise ValueError(
                 f"rotacao de entrada {rotation!r} invalida; aceitas: {INPUT_ROTATIONS}"
@@ -683,7 +723,7 @@ def _try_other_local_cameras(source, capture_factory):
     return None
 
 
-def open_capture(source, capture_factory=None, helper_token_file=None):
+def open_capture(source, capture_factory=None, helper_token_file=None) -> CaptureSource:
     global _LAST_OPEN_PROBE
     _LAST_OPEN_PROBE = None
     if is_hvcam_source(source):
