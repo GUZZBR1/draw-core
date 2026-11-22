@@ -747,9 +747,13 @@ def _trace_ink_run(ink, yc0, seam_col, limit, direction, stop_col, clip_r=2 * _R
 def _trace_branch_out(ink, x_start, top0, bot0, limit, direction, h_run, need, stop):
     """[(ext, x_end, top, bot)] por caminho conectado que completou a janela.
 
-    Cada intervalo vivo carrega a própria sequência de espessura: quando a
-    continuação bifurca, cada ramo passa a responder pelo próprio fim — uma
-    ponta seguindo pauta não classifica o irmão que vai para o branco.
+    Cada intervalo vivo carrega a própria sequência de espessura e nunca a
+    mistura com a de outro ramo: quando dois caminhos ocupam as mesmas
+    linhas na coluna (um reencontro), cada um reivindica a própria janela
+    — intervalos sobrepostos coexistem como camadas — e, ao se separarem,
+    seguem individualmente sem interferência. Um ramo grosso não empresta
+    evidência ao fino que passa pelos mesmos pixels, nem o fino enterra a
+    história grossa do outro.
     """
     h = ink.shape[0]
     # (top, bot, hist, last_thick): cada caminho vivo carrega a sequência de
@@ -764,32 +768,18 @@ def _trace_branch_out(ink, x_start, top0, bot0, limit, direction, h_run, need, s
         for pt, pb, hist, lt in active:
             pc = (pt + pb) // 2
             lo, hi = max(0, pt), min(h, pb + 1)
-            grew = merged = False
+            mine = -1  # último intervalo deste pai em nxt
             for hit in np.flatnonzero(col[lo:hi]) + lo:
-                if nxt and hit <= nxt[-1][1]:
-                    # o hit funde num intervalo já aceito: a tinta é uma só,
-                    # então as histórias se unem — um reencontro não pode
-                    # enterrar a evidência grossa do outro ramo
-                    t_n, b_n, h_n, lt_n = nxt[-1]
-                    nxt[-1] = (
-                        t_n,
-                        b_n,
-                        tuple(a or b for a, b in zip(h_n, hist, strict=True)),
-                        lt_n
-                        if lt is None
-                        or (lt_n and lt_n[0] * direction >= lt[0] * direction)
-                        else lt,
-                    )
-                    merged = True
-                    continue
+                if mine >= 0 and hit <= nxt[mine][1]:
+                    continue  # mesmo trecho contíguo deste pai
                 top = bot = int(hit)
                 while top > 0 and col[top - 1] and pc - (top - 1) <= 2 * _R:
                     top -= 1
                 while bot + 1 < h and col[bot + 1] and (bot + 1) - pc <= 2 * _R:
                     bot += 1
                 nxt.append((top, bot, hist, lt))
-                grew = True
-            if not (grew or merged):
+                mine = len(nxt) - 1
+            if mine < 0:
                 ends.append((hist, lt))
         if not nxt:
             active = []
