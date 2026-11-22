@@ -245,6 +245,23 @@ class WarpedPage:
 
 
 @dataclass(frozen=True, slots=True)
+class InkBaselineState:
+    """Prontidao da referencia inicial da folha (InkConfig.page_model).
+
+    phase: "disabled", "waiting_page", "seeding", "recapturing",
+    "ready_partial" (ha area visivel ainda sem referencia) ou "ready".
+    fraction e a fracao da grade ja semeada; pending_px os pixels
+    visiveis que ainda nao tem referencia.
+    """
+
+    enabled: bool
+    ready: bool
+    fraction: float
+    pending_px: int
+    phase: str
+
+
+@dataclass(frozen=True, slots=True)
 class InkSnapshot:
     """Uma publicação do canvas de tinta confirmada.
 

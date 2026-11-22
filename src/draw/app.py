@@ -32,6 +32,7 @@ ganho digital, voto 0,85, remocao de pauta, histerese, veto por
 movimento, passadas a 0,15 s e Detect-Wake. --no-ink-ruling tira so a
 pauta (pode apagar lapis fino sobre a linha); --legacy-ink volta ao
 comportamento anterior; --ink-vote e --ink-interval ajustam os numeros.
+--ink-baseline ignora o que ja estava na folha (PageModel); z recaptura.
 
 A fonte via rede (MJPEG/RTSP) e o caminho recomendado no WSL. O WSL nao
 enxerga webcams USB do Windows por padrao, mas enxerga streams de rede.
@@ -314,6 +315,26 @@ def _provision_official_models(neural_model, page_clean_model, hand_model):
             print(f"Aviso: download automatico de {official_name} falhou ({error}).")
 
 
+def _ink_baseline_status_text(baseline):
+    """Texto curto que não promete tinta segura enquanto há áreas pendentes."""
+    phase = baseline.phase
+    if phase == "waiting_page":
+        return "Aguardando folha", (0, 255, 255)
+    if phase == "recapturing":
+        return "Recapturando referencia", (0, 255, 255)
+    if phase == "seeding":
+        return "Capturando referencia inicial", (0, 255, 255)
+    if phase == "ready_partial":
+        fraction = 100 * baseline.fraction
+        return (
+            f"Referencia parcial ({fraction:.0f}%); aguarde antes de desenhar",
+            (0, 255, 255),
+        )
+    if baseline.ready:
+        return "Pronto para desenhar", (0, 255, 0)
+    return "Aguardando referencia", (0, 255, 255)
+
+
 def run(
     source=0,
     save_dir="captures",
@@ -530,6 +551,11 @@ def run(
             "Teclas: s = salvar canvas, f = capturar frame, "
             "g = captura automatica (desligada), q/Esc = sair."
         )
+        if pipeline_config is not None and pipeline_config.ink.page_model:
+            print(
+                "Referencia inicial da tinta ativa: aguarde a captura ficar "
+                "pronta; pressione z para usar o conteudo atual como referencia."
+            )
 
         frames_path = save_path / "frames"
         frames_saved = 0
@@ -565,6 +591,16 @@ def run(
                     )
                 else:
                     print("Captura automatica desligada.")
+
+        def handle_baseline_key(key):
+            if key == ord("z") and pipeline is not None:
+                if pipeline.rezero_ink_baseline():
+                    print(
+                        "Recaptura da referencia solicitada; o conteudo visivel "
+                        "sera ignorado como tinta nova."
+                    )
+                elif pipeline_config is not None and pipeline_config.ink.page_model:
+                    print("Nao ha uma folha ativa para recapturar a referencia.")
 
         format_suggester = paper_module.FormatSuggester()
 
@@ -760,6 +796,7 @@ def run(
                     # Marcadores nao tem mascara confirmada: o salvavel
                     # visivel na tela de espera e a folha retificada.
                     save_canvas_snapshot(last_marker_warped if markers_mode else None)
+                handle_baseline_key(key)
                 if frame is not None:
                     handle_capture_key(key, frame)
                 if key in (ord("q"), 27):
@@ -946,6 +983,7 @@ def run(
                 if key == ord("s"):
                     # Sem folha, so o canvas confirmado retido salva.
                     save_canvas_snapshot()
+                handle_baseline_key(key)
                 handle_capture_key(key, frame)
                 if key in (ord("q"), 27):
                     break
@@ -967,6 +1005,20 @@ def run(
                         status_color,
                         2,
                     )
+                    if pipeline_config is not None and pipeline_config.ink.page_model:
+                        baseline = pipeline.ink_baseline_state()
+                        baseline_text, baseline_color = _ink_baseline_status_text(
+                            baseline
+                        )
+                        cv2.putText(
+                            status,
+                            baseline_text,
+                            (20, 72),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.65,
+                            baseline_color,
+                            2,
+                        )
                 if markers_mode:
                     # A heuristica de tinta do legado nao migrou: no
                     # modo de marcadores o painel mostra a folha
@@ -988,6 +1040,7 @@ def run(
                 key = ui_module._next_key()
                 if key == ord("s"):
                     save_canvas_snapshot(canvas)
+                handle_baseline_key(key)
                 handle_capture_key(key, frame)
                 if key in (ord("q"), 27):
                     break
@@ -1199,6 +1252,14 @@ def main():
         ),
     )
     parser.add_argument(
+        "--ink-baseline",
+        action="store_true",
+        help=(
+            "liga o modelo persistente da pagina (PageModel): o que ja estava "
+            "na folha e ignorado como tinta nova; z recaptura a referencia"
+        ),
+    )
+    parser.add_argument(
         "--legacy-ink",
         action="store_true",
         help=(
@@ -1261,6 +1322,7 @@ def main():
         ("--no-ink-ruling", args.no_ink_ruling),
         ("--legacy-ink", args.legacy_ink),
         ("--preset", args.preset is not None),
+        ("--ink-baseline", args.ink_baseline),
     ):
         if args.markers and given:
             parser.error(
@@ -1306,6 +1368,8 @@ def main():
                     overrides["ruling_removal"] = False
                 if overrides:
                     ink_config = dataclasses.replace(ink_config, **overrides)
+        if args.ink_baseline:
+            ink_config = dataclasses.replace(ink_config, page_model=True)
     except ValueError as error:
         parser.error(str(error))
     # Marcadores nao tem detector neural nem tinta: preset legado, sem erro.

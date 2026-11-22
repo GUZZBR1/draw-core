@@ -10,7 +10,7 @@ import numpy as np
 
 from .. import config as paper_config
 from .. import photometry
-from ..contracts import InkDelta, InkDisplaySnapshot, InkSnapshot
+from ..contracts import InkBaselineState, InkDelta, InkDisplaySnapshot, InkSnapshot
 from . import (
     accumulator,
     identity,
@@ -874,6 +874,11 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._pm_confirm_obs = page_model._CONFIRM_OBS
         self._pm_baseline_ink = None
         self._identity_baseline = None
+        # Re-zero manual (tecla z, #130) pendente, e o ultimo estado
+        # publicado do PageModel: (epoca do modelo, fracao semeada,
+        # pixels visiveis pendentes).
+        self._pm_rezero_requested = False
+        self._pm_status = None
         # Relogio monotonico injetavel: o padrao e o do processo;
         # replays com pump() passam o relogio da cena.
         self._clock = clock
@@ -1344,6 +1349,41 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._confirm_masked_skips = 0
         self._awaiting_clear_post_exit = bool(value)
 
+    def rezero_baseline(self):
+        """Agenda o re-zero da referencia (InkConfig.page_model, #130).
+
+        A proxima passada que vota fora da recuperacao de identidade
+        zera o canvas e o PageModel: o conteudo a vista passa a ser a
+        referencia, semeada de novo. Devolve False sem page_model.
+        """
+        if not self._config.page_model:
+            return False
+        with self._condition:
+            if self._stopped:
+                return False
+            self._pm_rezero_requested = True
+            self._quiet_passes = 0
+            self._still_passes = 0
+            self._condition.notify_all()
+            return True
+
+    def baseline_state(self):
+        """Prontidao da referencia inicial para a interface (#130)."""
+        if not self._config.page_model:
+            return InkBaselineState(False, False, 0.0, 0, "disabled")
+        with self._condition:
+            if self._pm_rezero_requested:
+                return InkBaselineState(True, False, 0.0, 0, "recapturing")
+            status = self._pm_status
+            if status is None or status[0] != (self._canvas_epoch, self._pm_reset_seq):
+                return InkBaselineState(True, False, 0.0, 0, "seeding")
+            _, fraction, pending_px = status
+            ready = fraction > 0.0
+            phase = (
+                "seeding" if not ready else "ready_partial" if pending_px else "ready"
+            )
+            return InkBaselineState(True, ready, fraction, pending_px, phase)
+
     def set_hand_presence(self, present, moved=False):
         """Alimenta a porta de ociosidade: True, False ou None.
 
@@ -1410,6 +1450,8 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         ):
             return False
         if self._identity_recovery_requested and self._identity_reference is not None:
+            return False
+        if self._pm_rezero_requested:
             return False
         if (
             self._generation_passes < _REST_MIN_GENERATION_PASSES
@@ -2730,6 +2772,21 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # None para o avaliador nao projetar GT por uma
             # geometria que nunca chegou ao canvas.
             p.last_reg = None
+        if (
+            self._pm_rezero_requested
+            and self._config.page_model
+            and p.pass_voted
+            and not p.identity_owned
+        ):
+            # Re-zero (#130): canvas e PageModel recomecam nesta
+            # passada — a epoca nova descarta o modelo, que semeia de
+            # novo o que esta a vista, e o canvas vazio sai no publish.
+            self._pm_rezero_requested = False
+            self._accumulator.reset()
+            self._canvas_epoch += 1
+            self._pm_reset_seq += 1
+            self._pm_baseline_ink = None
+            p.force_publish = True
         p.pm_epoch = (self._canvas_epoch, self._pm_reset_seq)
         if self._config.page_model and p.pass_voted:
             confirmed = self._accumulator._confirmed
@@ -2987,6 +3044,12 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._pm_confirm_obs = p.pm_confirm_obs
         if p.next_baseline_ink is not None:
             self._pm_baseline_ink = p.next_baseline_ink
+        if self._config.page_model and "pm_seeded_frac" in p.reg_info:
+            self._pm_status = (
+                p.pm_epoch,
+                float(p.reg_info["pm_seeded_frac"]),
+                int(p.reg_info.get("pm_pending_px", 0)),
+            )
         guard_corners = (
             self._anchor_corners if self._anchor_corners is not None else p.corners
         )

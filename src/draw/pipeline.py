@@ -1110,6 +1110,29 @@ class Pipeline:
 
         return self.collect_ink()
 
+    def rezero_ink_baseline(self):
+        """Usa o conteudo a vista como referencia, se houver folha ativa."""
+        if (
+            not self._config.ink.page_model
+            or not self.sheet_present
+            or not self.ink_session_open
+        ):
+            return False
+        request = getattr(self.ink_worker, "rezero_baseline", None)
+        return bool(request is not None and request())
+
+    def ink_baseline_state(self):
+        """Prontidao da referencia inicial para a interface (#130)."""
+        if not self._config.ink.page_model:
+            return contracts.InkBaselineState(False, False, 0.0, 0, "disabled")
+        if not self.sheet_present or not self.ink_session_open:
+            return contracts.InkBaselineState(True, False, 0.0, 0, "waiting_page")
+        state_fn = getattr(self.ink_worker, "baseline_state", None)
+        state = None if state_fn is None else state_fn()
+        if state is None:
+            return contracts.InkBaselineState(True, False, 0.0, 0, "seeding")
+        return state
+
     def collect_ink(self):
         """Colhe a tinta assincrona: painel e erro.
 
