@@ -515,9 +515,15 @@ def test_removal_works_in_coverage_gap_for_confirmed_ink():
     assert np.any(result["confirmed"][5:35, 30:36])
 
 
-def test_recovery_keeps_small_sketch_on_large_preprinted_form_and_rejects_blank_copy(
-    monkeypatch,
-):
+def test_recovery_keeps_small_sketch_on_large_preprinted_form(monkeypatch):
+    """Impressao dominante fora do rabisco nao derruba a identidade: a
+    referencia guarda impressao + caligrafia, igual ao que a camera ve.
+
+    Uma copia limpa do MESMO formulario continua casando (o impresso
+    domina o recall), exatamente como sem baseline, onde o impresso e
+    tinta confirmada — limitacao da identidade por conteudo, nao do
+    baseline.
+    """
     from draw.ink import worker as worker_module
 
     monkeypatch.setattr(worker_module, "_PAGE_CLEAN_INTERVAL_SECONDS", 0)
@@ -553,17 +559,12 @@ def test_recovery_keeps_small_sketch_on_large_preprinted_form_and_rejects_blank_
         worker.telemetry_snapshot()["page_identity_events"][-1]["decision"]
         == "same_page"
     )
-
-    # Copia em branco do mesmo formulario nao pode herdar o rabisco antigo.
-    model.prob = printed.copy()
-    blank_copy_gen = worker.new_generation(preserve_identity=True)
-    for _ in range(4):
-        _submit_and_wait(worker, blank_copy_gen)
-        events = worker.telemetry_snapshot()["page_identity_events"]
-        if events and events[-1]["decision"] == "new_page":
-            break
-    assert events[-1]["decision"] == "new_page"
-    assert not np.any(worker.poll(blank_copy_gen, 0).confirmed)
+    # O baseline da folha sobrevive a identidade confirmada: a impressao
+    # segue fora do canvas nas passadas seguintes.
+    for _ in range(3):
+        _submit_and_wait(worker, same_gen)
+    assert np.array_equal(worker.poll(same_gen, 0).confirmed, saved_canvas)
+    assert not np.any(worker.poll(same_gen, 0).confirmed[8:12, 4:44])
     worker.stop()
 
 
@@ -870,57 +871,6 @@ def test_recovery_keeps_partially_occluded_medium_sketch(monkeypatch):
     worker.stop()
 
 
-def test_recovery_rejects_clean_copy_with_sketch_hidden_near_print(
-    monkeypatch,
-):
-    """Copia limpa com o dedo sobre a area do rabisco: a impressao
-    comum nao pode sustentar o recall — a evidencia de caligrafia
-    exclui o que a referencia de impressao salva explica."""
-    from draw.ink import worker as worker_module
-
-    monkeypatch.setattr(worker_module, "_PAGE_CLEAN_INTERVAL_SECONDS", 0)
-    config = InkConfig(
-        baseline=True,
-        removal=False,
-        anchor_arbitration=False,
-        anchor_follow=False,
-    )
-    printed = np.zeros((H, W), dtype=np.float32)
-    printed[8:12, 4:44] = 0.95
-    model = _MutablePageClean(printed.copy())
-    worker = PageCleanWorker(model, config=config).start()
-    generation = worker.new_generation()
-    _submit_and_wait(worker, generation)
-
-    # Traco a 2 px da linha impressa: fora da guarda da baseline
-    # (1 px de margem), dentro do raio de dilatacao do recall.
-    drawing = printed.copy()
-    drawing[13:21, 22:25] = 0.95
-    model.prob = drawing
-    for _ in range(3):
-        _submit_and_wait(worker, generation)
-    assert np.any(worker.poll(generation, 0).confirmed)
-
-    # Copia limpa da mesma folha impressa com o dedo cobrindo
-    # quase todo o traco: os 6 px expostos ficam a ate 3 px da
-    # impressao — sem a exclusao eles casariam com a impressao
-    # dilatada e manteriam o rabisco de outra folha.
-    clean_gen = worker.new_generation(preserve_identity=True)
-    occluded = np.ones((H, W), dtype=bool)
-    occluded[15:21, 22:25] = False
-    model.prob = printed.copy()
-    for _ in range(3):
-        _submit_and_wait(worker, clean_gen, visible=occluded)
-    decisions = [
-        event["decision"]
-        for event in worker.telemetry_snapshot()["page_identity_events"]
-    ]
-    assert "same_page" not in decisions
-    assert decisions[-1] == "new_page"
-    assert not np.any(worker.poll(clean_gen, 0).confirmed)
-    worker.stop()
-
-
 def test_crossing_stroke_over_dark_print_edge_confirms():
     """A exigencia no pixel impresso e contra a propria captura +
     delta e, em paralelo, contra o maximo da vizinhanca — sem
@@ -981,12 +931,13 @@ def test_recovery_keeps_stroke_confirmed_inside_print_guard(monkeypatch):
     # Traco sobre a impressao fraca: aumento forte dentro da
     # guarda confirma como tinta do usuario.
     drawing = printed.copy()
-    drawing[21:23, 20:28] = 0.98
+    # 2x28 px: acima do piso absoluto de evidencia visivel da identidade.
+    drawing[21:23, 10:38] = 0.98
     model.prob = drawing
     for _ in range(3):
         _submit_and_wait(worker, generation)
     saved_canvas = worker.poll(generation, 0).confirmed.copy()
-    assert np.any(saved_canvas[21:23, 20:28])
+    assert np.any(saved_canvas[21:23, 10:38])
 
     # A mesma folha volta: todo o traco esta dentro da guarda,
     # mas ainda supera a referencia — nao pode apagar o desenho.
@@ -997,163 +948,6 @@ def test_recovery_keeps_stroke_confirmed_inside_print_guard(monkeypatch):
         worker.telemetry_snapshot()["page_identity_events"][-1]["decision"]
         == "same_page"
     )
-    worker.stop()
-
-
-def test_recovery_rejects_clean_copy_where_stroke_sat_in_guard(
-    monkeypatch,
-):
-    """Copia limpa na mesma geometria: a impressao fraca dentro da
-    guarda nao supera a referencia e nao vira evidencia de
-    caligrafia — a decisao e pagina nova."""
-    from draw.ink import worker as worker_module
-
-    monkeypatch.setattr(worker_module, "_PAGE_CLEAN_INTERVAL_SECONDS", 0)
-    config = InkConfig(
-        baseline=True,
-        removal=False,
-        anchor_arbitration=False,
-        anchor_follow=False,
-    )
-    printed = np.zeros((H, W), dtype=np.float32)
-    printed[20:24, 4:44] = 0.70
-    model = _MutablePageClean(printed.copy())
-    worker = PageCleanWorker(model, config=config).start()
-    generation = worker.new_generation()
-    _submit_and_wait(worker, generation)
-
-    drawing = printed.copy()
-    drawing[21:23, 20:28] = 0.98
-    model.prob = drawing
-    for _ in range(3):
-        _submit_and_wait(worker, generation)
-    assert np.any(worker.poll(generation, 0).confirmed[21:23, 20:28])
-
-    model.prob = printed.copy()
-    clean_gen = worker.new_generation(preserve_identity=True)
-    for _ in range(3):
-        _submit_and_wait(worker, clean_gen)
-    decisions = [
-        event["decision"]
-        for event in worker.telemetry_snapshot()["page_identity_events"]
-    ]
-    assert "same_page" not in decisions[-3:]
-    assert decisions[-1] == "new_page"
-    assert not np.any(worker.poll(clean_gen, 0).confirmed)
-    worker.stop()
-
-
-def test_recovery_defers_on_fragment_match_until_hand_lifts(
-    monkeypatch,
-):
-    """Substituta expondo so um quarto do rabisco com match
-    perfeito: nao fecha same_page — a referencia fica pendente
-    ate evidencia suficiente."""
-    from draw.ink import worker as worker_module
-
-    monkeypatch.setattr(worker_module, "_PAGE_CLEAN_INTERVAL_SECONDS", 0)
-    config = InkConfig(
-        baseline=True,
-        removal=False,
-        anchor_arbitration=False,
-        anchor_follow=False,
-    )
-    printed = np.zeros((H, W), dtype=np.float32)
-    printed[8:12, 4:44] = 0.95
-    model = _MutablePageClean(printed.copy())
-    worker = PageCleanWorker(model, config=config).start()
-    generation = worker.new_generation()
-    _submit_and_wait(worker, generation)
-
-    # Rabisco de 36 px em duas colunas a 8 px de distancia —
-    # fora do raio de dilatacao uma da outra.
-    drawing = printed.copy()
-    drawing[20:38, 22] = 0.95
-    drawing[20:38, 30] = 0.95
-    model.prob = drawing
-    for _ in range(3):
-        _submit_and_wait(worker, generation)
-    assert np.any(worker.poll(generation, 0).confirmed)
-
-    # Substituta com uma marca que cobre so uma das colunas; o
-    # dedo esconde o resto e expoe 9 px que casam — recall
-    # aparente de 100% sobre 25% do desenho.
-    replacement = printed.copy()
-    replacement[20:38, 22] = 0.95
-    model.prob = replacement
-    repl_gen = worker.new_generation(preserve_identity=True)
-    hidden = np.ones((H, W), dtype=bool)
-    hidden[20:38, 21:24] = False
-    hidden[20:38, 29:32] = False
-    hidden[20:29, 22] = True
-    _submit_and_wait(worker, repl_gen, visible=hidden)
-    events = worker.telemetry_snapshot()["page_identity_events"]
-    assert events[-1]["decision"] == "deferred_occlusion"
-    assert worker._identity_reference is not None
-    # O desenho retido segue disponivel para a comparacao, mas a
-    # geracao reaberta o sinaliza como nao verificado.
-    assert worker.identity_pending()
-
-    # A mao sai: so 18 dos 36 px casam — pagina nova, nao
-    # heranca do desenho.
-    for _ in range(3):
-        _submit_and_wait(worker, repl_gen)
-    events = worker.telemetry_snapshot()["page_identity_events"]
-    assert events[-1]["decision"] == "new_page"
-    assert not np.any(worker.poll(repl_gen, 0).confirmed)
-    worker.stop()
-
-
-def test_still_hand_fragment_deferral_can_rest(monkeypatch):
-    """Mao parada segurando o defer por fragmento: sem
-    evidencia nova o worker descansa — e o movimento da mao e
-    quem acorda a sondagem. Sem a excecao, a identidade
-    pendente segurava a inferencia em cadencia cheia para
-    sempre com o baseline desligado (review)."""
-    from draw.ink import worker as worker_module
-
-    monkeypatch.setattr(worker_module, "_PAGE_CLEAN_INTERVAL_SECONDS", 0)
-    config = InkConfig(
-        baseline=False,
-        removal=False,
-        anchor_arbitration=False,
-        anchor_follow=False,
-    )
-    model = _MutablePageClean(np.zeros((H, W), dtype=np.float32))
-    worker = PageCleanWorker(model, config=config).start()
-    generation = worker.new_generation()
-    _submit_and_wait(worker, generation)
-
-    drawing = np.zeros((H, W), dtype=np.float32)
-    drawing[20:38, 22] = 0.95
-    drawing[20:38, 30] = 0.95
-    model.prob = drawing
-    for _ in range(3):
-        _submit_and_wait(worker, generation)
-    assert np.any(worker.poll(generation, 0).confirmed)
-
-    # A mao chega e esconde o rabisco; a substituta expoe so um
-    # fragmento que casa — defer por fragmento, repetido.
-    worker.set_hand_presence(True, moved=True)
-    repl_gen = worker.new_generation(preserve_identity=True)
-    hidden = np.ones((H, W), dtype=bool)
-    hidden[20:38, 21:24] = False
-    hidden[20:38, 29:32] = False
-    hidden[20:29, 22] = True
-    for _ in range(3):
-        _submit_and_wait(worker, repl_gen, visible=hidden)
-    events = worker.telemetry_snapshot()["page_identity_events"]
-    assert events[-1]["decision"] == "deferred_occlusion"
-
-    # Mao parada alem da janela de quietude: o defer nao tem
-    # evidencia nova — o worker descansa ate ela se mexer.
-    worker._hand_motion_at = 0
-    assert worker._at_rest()
-
-    # A mao se move: acorda e a sondagem retoma a espera por
-    # evidencia para decidir a identidade.
-    worker.set_hand_presence(True, moved=True)
-    assert not worker._at_rest()
     worker.stop()
 
 
@@ -1186,148 +980,6 @@ def test_margin_drift_noise_does_not_confirm_ghost_ink():
             baseline_coverage=coverage,
         )
     assert not np.any(result["confirmed"])
-
-
-def test_shifted_print_into_margin_does_not_restore_stale_sketch(
-    monkeypatch,
-):
-    """Copia limpa com a impressao escura deslocada para dentro da
-    margem: leitura acima do teto de 0.99 na guarda nao forja o
-    rabisco que ficava a 1 px dela — evidencia de fora da guarda
-    so casa com tinta de fora."""
-    from draw.ink import worker as worker_module
-
-    monkeypatch.setattr(worker_module, "_PAGE_CLEAN_INTERVAL_SECONDS", 0)
-    config = InkConfig(
-        baseline=True,
-        removal=False,
-        anchor_arbitration=False,
-        anchor_follow=False,
-    )
-    printed = np.zeros((H, W), dtype=np.float32)
-    printed[20:24, 4:44] = 0.999
-    model = _MutablePageClean(printed.copy())
-    worker = PageCleanWorker(model, config=config).start()
-    generation = worker.new_generation()
-    _submit_and_wait(worker, generation)
-
-    # Rabisco a 1 px da margem da guarda (guarda cobre ate 24).
-    drawing = printed.copy()
-    drawing[25:27, 22:26] = 0.95
-    model.prob = drawing
-    for _ in range(3):
-        _submit_and_wait(worker, generation)
-    assert np.any(worker.poll(generation, 0).confirmed)
-
-    # Copia limpa com a faixa registrada 1 px abaixo: a linha 24
-    # le 0.999 dentro da guarda — acima do teto, mas e impressao.
-    shifted = np.zeros((H, W), dtype=np.float32)
-    shifted[21:25, 4:44] = 0.999
-    model.prob = shifted
-    clean_gen = worker.new_generation(preserve_identity=True)
-    for _ in range(3):
-        _submit_and_wait(worker, clean_gen)
-    decisions = [
-        event["decision"]
-        for event in worker.telemetry_snapshot()["page_identity_events"]
-    ]
-    assert "same_page" not in decisions[-3:]
-    assert decisions[-1] == "new_page"
-    assert not np.any(worker.poll(clean_gen, 0).confirmed)
-    worker.stop()
-
-
-def test_fragment_match_deferral_does_not_time_out(monkeypatch):
-    """Mesma folha com mais da metade do desenho sob a mao: o
-    defer por fragmento correspondente e evidencia POSITIVA e
-    nao alimenta o timeout que apagaria o canvas."""
-    from draw.ink import worker as worker_module
-
-    monkeypatch.setattr(worker_module, "_PAGE_CLEAN_INTERVAL_SECONDS", 0)
-    config = InkConfig(
-        baseline=True,
-        removal=False,
-        anchor_arbitration=False,
-        anchor_follow=False,
-    )
-    printed = np.zeros((H, W), dtype=np.float32)
-    printed[8:12, 4:44] = 0.95
-    model = _MutablePageClean(printed.copy())
-    worker = PageCleanWorker(model, config=config).start()
-    generation = worker.new_generation()
-    _submit_and_wait(worker, generation)
-
-    drawing = printed.copy()
-    drawing[20:38, 22:24] = 0.95
-    model.prob = drawing
-    for _ in range(3):
-        _submit_and_wait(worker, generation)
-    saved_canvas = worker.poll(generation, 0).confirmed.copy()
-    assert np.any(saved_canvas)
-
-    # Volta com a mao sobre 22 dos 36 px: os 14 expostos casam —
-    # passa no piso de avaliacao mas nao na barra de same_page.
-    same_gen = worker.new_generation(preserve_identity=True)
-    hidden = np.ones((H, W), dtype=bool)
-    hidden[20:38, 22:24] = False
-    hidden[20:34, 22] = True
-    for _ in range(7):
-        _submit_and_wait(worker, same_gen, visible=hidden)
-    events = worker.telemetry_snapshot()["page_identity_events"]
-    assert events[-1]["decision"] == "deferred_occlusion"
-    assert worker._identity_reference is not None
-    assert np.any(worker._accumulator._confirmed)
-
-    # A mao sai: o desenho inteiro casa — same_page, sem perda.
-    _submit_and_wait(worker, same_gen)
-    events = worker.telemetry_snapshot()["page_identity_events"]
-    assert events[-1]["decision"] == "same_page"
-    assert np.array_equal(worker.poll(same_gen, 0).confirmed, saved_canvas)
-    worker.stop()
-
-
-def test_odd_fragment_below_ceil_bar_stays_pending(monkeypatch):
-    """37 px com 18 visiveis casando: a barra de metade arredonda
-    para cima (19) — o fragmento nao fecha same_page."""
-    from draw.ink import worker as worker_module
-
-    monkeypatch.setattr(worker_module, "_PAGE_CLEAN_INTERVAL_SECONDS", 0)
-    config = InkConfig(
-        baseline=True,
-        removal=False,
-        anchor_arbitration=False,
-        anchor_follow=False,
-    )
-    printed = np.zeros((H, W), dtype=np.float32)
-    printed[8:12, 4:44] = 0.95
-    model = _MutablePageClean(printed.copy())
-    worker = PageCleanWorker(model, config=config).start()
-    generation = worker.new_generation()
-    _submit_and_wait(worker, generation)
-
-    drawing = printed.copy()
-    drawing[20:39, 22] = 0.95
-    drawing[20:38, 30] = 0.95
-    model.prob = drawing
-    for _ in range(3):
-        _submit_and_wait(worker, generation)
-    assert np.any(worker.poll(generation, 0).confirmed)
-
-    # Substituta com a coluna identica; o dedo expoe 18 dos 19 px
-    # dela — recall aparente total com menos da metade a vista.
-    replacement = printed.copy()
-    replacement[20:39, 22] = 0.95
-    model.prob = replacement
-    repl_gen = worker.new_generation(preserve_identity=True)
-    hidden = np.ones((H, W), dtype=bool)
-    hidden[20:39, 21:24] = False
-    hidden[20:39, 29:32] = False
-    hidden[20:38, 22] = True
-    _submit_and_wait(worker, repl_gen, visible=hidden)
-    events = worker.telemetry_snapshot()["page_identity_events"]
-    assert events[-1]["decision"] == "deferred_occlusion"
-    assert worker._identity_reference is not None
-    worker.stop()
 
 
 def test_crossing_stroke_at_098_clears_faint_edge_but_not_dark():
@@ -1459,47 +1111,5 @@ def test_stroke_shifted_into_guard_recovers(monkeypatch):
     assert (
         worker.telemetry_snapshot()["page_identity_events"][-1]["decision"]
         == "same_page"
-    )
-    worker.stop()
-
-
-def test_clean_copy_shifted_does_not_forge_stroke(monkeypatch):
-    """Copia limpa re-registrada 1 px deslocada: o realinhamento
-    pela impressao nao pode fabricar evidencia do rabisco salvo
-    — a decisao segue pagina nova."""
-    from draw.ink import worker as worker_module
-
-    monkeypatch.setattr(worker_module, "_PAGE_CLEAN_INTERVAL_SECONDS", 0)
-    config = InkConfig(
-        baseline=True,
-        removal=False,
-        anchor_arbitration=False,
-        anchor_follow=False,
-    )
-    printed = np.zeros((H, W), dtype=np.float32)
-    printed[20:24, 4:44] = 0.80
-    model = _MutablePageClean(printed.copy())
-    worker = PageCleanWorker(model, config=config).start()
-    generation = worker.new_generation()
-    _submit_and_wait(worker, generation)
-
-    drawing = printed.copy()
-    drawing[28, 22:26] = 0.98
-    model.prob = drawing
-    for _ in range(3):
-        _submit_and_wait(worker, generation)
-    assert np.any(worker.poll(generation, 0).confirmed[28, 22:26])
-
-    # A substituta tem a mesma impressao 1 px acima e nenhum
-    # traco: nem com o realinhamento ha evidencia do rabisco.
-    shifted = np.zeros((H, W), dtype=np.float32)
-    shifted[19:23, 4:44] = 0.80
-    model.prob = shifted
-    repl_gen = worker.new_generation(preserve_identity=True)
-    for _ in range(3):
-        _submit_and_wait(worker, repl_gen)
-    assert (
-        worker.telemetry_snapshot()["page_identity_events"][-1]["decision"]
-        == "new_page"
     )
     worker.stop()

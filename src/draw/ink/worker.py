@@ -174,67 +174,6 @@ def _provisional_for_display(provisional, min_px):
     return out
 
 
-def _identity_required_visible_px(prior_px):
-    """Piso de evidencia visivel para a decisao de identidade.
-
-    A fracao proporcional vale em qualquer tamanho de referencia:
-    exigir o rabisco inteiro visivel adiava a decisao ate o
-    timeout apagar o canvas (um dedo na ponta bastava), e um piso
-    absoluto saltava de ~25% para ~100% logo acima dele — um
-    rabisco de 34 px com 4 px cobertos tambem apodrecia na
-    quarentena.
-    """
-    return max(
-        int(identity._IDENTITY_MIN_VISIBLE_FRACTION * prior_px),
-        1,
-    )
-
-
-def _identity_same_page_visible_px(prior_px):
-    """Caligrafia visivel minima para FECHAR same_page.
-
-    O piso de avaliacao habilita a decisao; consumir a referencia
-    exige metade do desenho a vista — um fragmento correspondente
-    numa folha substituta herdaria o rabisco inteiro assim que a
-    mao saisse, com a referencia ja descartada.
-    """
-    return max(
-        int(np.ceil(identity._IDENTITY_SAME_PAGE_VISIBLE_FRACTION * prior_px)),
-        1,
-    )
-
-
-def _shift_mask(mask, dy, dx):
-    """Desloca o mapa preenchendo com zeros — realinha a
-    evidencia da passada a grade da referencia salva."""
-    out = np.zeros_like(mask)
-    height, width = mask.shape
-    y0, y1 = max(0, dy), min(height, height + dy)
-    x0, x1 = max(0, dx), min(width, width + dx)
-    out[y0:y1, x0:x1] = mask[y0 - dy : y1 - dy, x0 - dx : x1 - dx]
-    return out
-
-
-def _identity_estimate_shift(seen, print_ref):
-    """Deslocamento residual (dy, dx) que alinha a tinta atual a
-    impressao salva.
-
-    O warp de registro ja resolve o grosso; o residuo de 1-3 px
-    e o que a margem da guarda absorve. Empates resolvem a favor
-    do zero — uma faixa longa so restringe o eixo perpendicular.
-    """
-    best = int(np.count_nonzero(seen & print_ref))
-    dy = dx = 0
-    radius = identity._IDENTITY_DILATION_KERNEL // 2
-    for sy in range(-radius, radius + 1):
-        for sx in range(-radius, radius + 1):
-            score = int(np.count_nonzero(_shift_mask(seen, sy, sx) & print_ref))
-            if score > best:
-                best = score
-                dy, dx = sy, sx
-    return dy, dx
-
-
 def _crop_all_visible(visible, corners):
     """Todo o recorte do quad visivel na mascara?
 
@@ -303,7 +242,6 @@ class _Pass:
     identity_reference_px: object = None
     identity_visible_reference_px: object = None
     identity_deferred: bool = False
-    identity_fragment_match: bool = False
     identity_timed_out: bool = False
     identity_switch_pending: bool = False
     identity_geometry_registered: bool = False
@@ -486,8 +424,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         # deixam de descrever o canvas (eval descarta).
         self._canvas_epoch = 0
         self._identity_reference = None
-        self._identity_baseline_reference = None
-        self._identity_print_reference = None
         self._identity_reference_corners = None
         self._identity_recovery_requested = False
         self._identity_defer_count = 0
@@ -566,6 +502,27 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._thread.start()
         return self
 
+    def _identity_reference_snapshot(self):
+        """Copia do que a folha mostrava, para a checagem de identidade.
+
+        Sem baseline e o canvas confirmado. Com baseline o canvas omite o
+        conteudo pre-existente, mas a camera ainda o ve na folha que
+        volta: a impressao capturada entra na referencia para que a
+        comparacao seja igual por igual (tudo o que estava na folha
+        contra tudo o que se ve), exatamente como sem baseline, onde o
+        impresso vira tinta confirmada.
+        """
+        reference = self._accumulator._confirmed
+        print_max = self._accumulator._baseline_exact_max
+        if not self._config.baseline or print_max is None:
+            return None if reference is None else reference.copy()
+        # Mesmo limiar do `seen` da checagem: o impresso que a passada
+        # enxerga como tinta e o impresso que a referencia guarda.
+        printed = print_max > self._accumulator.threshold
+        if reference is None or reference.shape != printed.shape:
+            return printed.astype(np.uint8) * 255
+        return np.where(printed, np.uint8(255), reference).astype(reference.dtype)
+
     def new_generation(self, preserve_identity=False):
         """Abre geracao; opcionalmente identifica a pagina anterior.
 
@@ -580,22 +537,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._previous_corners = None
             self._paper_ref = None
             if preserve_identity:
-                reference = self._accumulator._confirmed
-                baseline_reference = self._accumulator._baseline_guard
-                self._identity_reference = (
-                    None if reference is None else reference.copy()
-                )
-                self._identity_baseline_reference = (
-                    None
-                    if baseline_reference is None or not self._config.baseline
-                    else baseline_reference.copy()
-                )
-                print_reference = self._accumulator._baseline_exact_max
-                self._identity_print_reference = (
-                    None
-                    if print_reference is None or not self._config.baseline
-                    else print_reference >= self._config.vote_hit
-                )
+                self._identity_reference = self._identity_reference_snapshot()
                 self._identity_reference_corners = (
                     None
                     if self._anchor_corners is None
@@ -603,8 +545,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 )
             else:
                 self._identity_reference = None
-                self._identity_baseline_reference = None
-                self._identity_print_reference = None
                 self._identity_reference_corners = None
             self._generation += 1
             self._baseline_session_active = self._config.baseline
@@ -668,13 +608,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._activity_quiet_passes = 0
             self._condition.notify_all()
             return True
-
-    def identity_pending(self):
-        """Identidade da folha reaberta ainda nao decidiu — o
-        canvas retido e evidencia de comparacao, nao tinta
-        confirmada da geracao atual."""
-        with self._condition:
-            return bool(self._identity_recovery_requested)
 
     def baseline_state(self):
         """Prontidao e cobertura observada da referencia atual."""
@@ -942,20 +875,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             and np.any(self._accumulator._removal_streak)
         ):
             return False
-        if (
-            self._identity_recovery_requested
-            and (
-                self._identity_reference is not None
-                or self._identity_baseline_reference is not None
-            )
-            and not (self._hand_state is True and self._hand_still())
-        ):
-            # Identidade pendente pede sondagem — exceto com a mao
-            # parada: sem movimento nao ha evidencia nova e o defer
-            # por fragmento repetia a passada em cadencia cheia sem
-            # fim. O movimento da propria mao acorda a sondagem; sem
-            # sinal de mao (None) a sonda lenta e a unica fonte de
-            # evidencia e nao pode dormir.
+        if self._identity_recovery_requested and self._identity_reference is not None:
             return False
         if (
             self._generation_passes < _REST_MIN_GENERATION_PASSES
@@ -1514,10 +1434,9 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             if p.generation != self._generation:
                 return True
             p.first_pass = p.generation != self._worker_generation
-            p.recovering = (
-                self._identity_reference is not None
-                or self._identity_baseline_reference is not None
-            ) and (p.first_pass or self._identity_recovery_requested)
+            p.recovering = self._identity_reference is not None and (
+                p.first_pass or self._identity_recovery_requested
+            )
             p.anchor = (
                 self._identity_reference_corners
                 if p.recovering
@@ -1879,38 +1798,21 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         keep_page e quarantine_* do _Pass; timeout ou pagina nova
         resetam acumulador e ancora.
         """
-        p.identity_pending = self._identity_recovery_requested and (
-            self._identity_reference is not None
-            or self._identity_baseline_reference is not None
+        p.identity_pending = (
+            self._identity_recovery_requested and self._identity_reference is not None
         )
         if p.first_pass or p.identity_pending:
             identity_reference = self._identity_reference
-            identity_baseline_reference = self._identity_baseline_reference
-            has_identity_ref = (
-                identity_reference is not None
-                or identity_baseline_reference is not None
-            )
             identity_corners = self._identity_reference_corners
             identity_recovery_requested = self._identity_recovery_requested
             p.keep_page = False
-            if has_identity_ref:
+            if identity_reference is not None:
                 candidate = p.registered_prob
                 identity_visible = p.registered_visible
                 if identity_corners is not None and p.corners is not None:
                     p.identity_geometry_registered = True
-                prior_hw = (
-                    np.zeros(candidate.shape, dtype=bool)
-                    if identity_reference is None
-                    else (identity_reference > 0)
-                )
-                prior_bl = (
-                    np.zeros(candidate.shape, dtype=bool)
-                    if identity_baseline_reference is None
-                    else (identity_baseline_reference > 0)
-                )
-                prior_hw_px = int(np.count_nonzero(prior_hw))
-                prior_all = prior_hw | prior_bl
-                prior_px = int(np.count_nonzero(prior_all))
+                prior = identity_reference > 0
+                prior_px = int(np.count_nonzero(prior))
                 p.identity_reference_px = prior_px
                 if prior_px == 0:
                     seen_any = candidate > self._accumulator.threshold
@@ -1920,144 +1822,71 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     p.identity_recall = 1.0 if p.keep_page else 0.0
                 else:
                     seen = candidate > self._accumulator.threshold
-                    change_threshold = self._accumulator._baseline_change_threshold
-                    if np.any(prior_bl) and self._identity_print_reference is not None:
-                        # Realinha a candidata a grade salva pelo
-                        # residuo da impressao: um shift de 1 px
-                        # atravessando a fronteira da guarda nao pode
-                        # virar nem perder um rabisco real — primeiro
-                        # mede o shift do print, depois julga a regiao.
-                        # A evidencia do shift exclui o que supera a
-                        # referencia (rabisco novo), que enviesaria o
-                        # encaixe; so o conteudo inalterado mede.
-                        shift_evidence = seen
-                        if change_threshold is not None:
-                            shift_evidence = seen & (candidate <= change_threshold)
-                        dy, dx = _identity_estimate_shift(
-                            shift_evidence, self._identity_print_reference
-                        )
-                        if dy or dx:
-                            candidate = _shift_mask(candidate, dy, dx)
-                            seen = candidate > self._accumulator.threshold
-                            if identity_visible is not None:
-                                identity_visible = _shift_mask(identity_visible, dy, dx)
                     kernel = np.ones(
                         (identity._IDENTITY_DILATION_KERNEL,) * 2, np.uint8
                     )
                     seen_d = cv2.dilate(seen.astype(np.uint8), kernel) > 0
-                    seen_px = int(np.count_nonzero(seen))
-                    if prior_hw_px > 0 and np.any(prior_bl):
-                        # Evidencia de caligrafia separada por regiao:
-                        # pixel de rabisco fora da guarda so casa com
-                        # tinta fora dela — impressao deslocada que
-                        # entra na margem acima do teto nao forja o
-                        # rabisco vizinho — e pixel dentro da guarda
-                        # so casa com tinta que supera a referencia
-                        # salva. Na copia limpa a impressao inalterada
-                        # nao forja o rabisco; o traco confirmado
-                        # sobre ela continua contando.
-                        hw_out_d = (
-                            cv2.dilate((seen & ~prior_bl).astype(np.uint8), kernel) > 0
-                        )
-                        if (
-                            change_threshold is not None
-                            and change_threshold.shape == seen.shape
+                    if identity_visible is not None:
+                        prior_visible = prior & identity_visible
+                        prior_visible_px = int(np.count_nonzero(prior_visible))
+                        p.identity_visible_reference_px = prior_visible_px
+                        if prior_visible_px < max(
+                            identity._IDENTITY_MIN_VISIBLE_PX,
+                            int(identity._IDENTITY_MIN_VISIBLE_FRACTION * prior_px),
                         ):
-                            hw_in_d = (
+                            # Tinta anterior quase toda
+                            # coberta: decidir agora seria
+                            # condenar a pagina pela mao.
+                            # Adia; a referencia fica para a
+                            # proxima passada.
+                            p.identity_deferred = True
+                            p.quarantine_reason = "occlusion"
+                        else:
+                            prior_d = (
                                 cv2.dilate(
-                                    (seen & (candidate > change_threshold)).astype(
-                                        np.uint8
-                                    ),
+                                    prior_visible.astype(np.uint8),
                                     kernel,
                                 )
                                 > 0
                             )
-                        else:
-                            hw_in_d = np.zeros(seen.shape, dtype=bool)
-                        seen_hw_d = np.where(prior_bl, hw_in_d, hw_out_d)
-                    else:
-                        seen_hw_d = seen_d
-                    if identity_visible is not None:
-                        all_visible = prior_all & identity_visible
-                        all_visible_px = int(np.count_nonzero(all_visible))
-                        all_occluded = all_visible_px < _identity_required_visible_px(
-                            prior_px
-                        )
-                        if prior_hw_px > 0:
-                            hw_visible = prior_hw & identity_visible
-                            hw_visible_px = int(np.count_nonzero(hw_visible))
-                            hw_occluded = hw_visible_px < _identity_required_visible_px(
-                                prior_hw_px
+                            p.identity_recall = (
+                                np.count_nonzero(prior_visible & seen_d)
+                                / prior_visible_px
                             )
-                        else:
-                            hw_visible = prior_hw
-                            hw_visible_px = 0
-                            hw_occluded = False
+                            seen_px = int(np.count_nonzero(seen))
+                            p.identity_containment = (
+                                0.0
+                                if seen_px == 0
+                                else (np.count_nonzero(seen & prior_d) / seen_px)
+                            )
+                            p.keep_page = (
+                                p.identity_recall >= identity._PAGE_IDENTITY_MIN_RECALL
+                                and p.identity_containment
+                                >= identity._PAGE_IDENTITY_MIN_CONTAINMENT
+                            )
                     else:
-                        all_visible = prior_all
-                        all_visible_px = prior_px
-                        all_occluded = False
-                        hw_visible = prior_hw
-                        hw_visible_px = prior_hw_px
-                        hw_occluded = False
-                    if all_occluded or (prior_hw_px > 0 and hw_occluded):
-                        p.identity_deferred = True
-                        p.quarantine_reason = "occlusion"
-                        p.identity_visible_reference_px = (
-                            hw_visible_px if prior_hw_px > 0 else all_visible_px
-                        )
-                    else:
-                        all_d = cv2.dilate(all_visible.astype(np.uint8), kernel) > 0
+                        prior_d = cv2.dilate(prior.astype(np.uint8), kernel) > 0
+                        p.identity_recall = np.count_nonzero(prior & seen_d) / prior_px
+                        seen_px = int(np.count_nonzero(seen))
                         p.identity_containment = (
                             0.0
                             if seen_px == 0
-                            else (np.count_nonzero(seen & all_d) / seen_px)
+                            else (np.count_nonzero(seen & prior_d) / seen_px)
                         )
-                        if prior_hw_px > 0:
-                            p.identity_visible_reference_px = hw_visible_px
-                            p.identity_recall = (
-                                np.count_nonzero(hw_visible & seen_hw_d) / hw_visible_px
-                            )
-                        else:
-                            p.identity_visible_reference_px = all_visible_px
-                            p.identity_recall = (
-                                np.count_nonzero(all_visible & seen_d) / all_visible_px
-                            )
                         p.keep_page = (
                             p.identity_recall >= identity._PAGE_IDENTITY_MIN_RECALL
                             and p.identity_containment
                             >= identity._PAGE_IDENTITY_MIN_CONTAINMENT
                         )
-                        if (
-                            p.keep_page
-                            and prior_hw_px > 0
-                            and hw_visible_px
-                            < _identity_same_page_visible_px(prior_hw_px)
-                        ):
-                            # Match sobre um fragmento: a substituta
-                            # que expoe so um pedaco do rabisco
-                            # herdaria o desenho inteiro. A referencia
-                            # fica pendente ate a mao sair — e como a
-                            # evidencia e POSITIVA, a espera nao conta
-                            # para o timeout que apagaria o canvas.
-                            p.identity_deferred = True
-                            p.identity_fragment_match = True
-                            p.quarantine_reason = "fragment_match"
-                            p.keep_page = False
             if p.identity_deferred:
-                # Oclusao sem evidencia conta para o timeout;
-                # fragmento correspondente (evidencia positiva) espera
-                # a mao sair — zerar depois de 5 passadas apagava um
-                # desenho real sob a mao.
-                if not p.identity_fragment_match:
-                    self._identity_defer_count += 1
+                self._identity_defer_count += 1
                 p.quarantine_frames = self._identity_defer_count
                 p.identity_timed_out = (
                     p.quarantine_frames > identity._PAGE_IDENTITY_MAX_DEFERRALS
                 )
             if p.identity_deferred:
                 self._identity_switch_votes = 0
-            elif has_identity_ref and not p.keep_page:
+            elif identity_reference is not None and not p.keep_page:
                 self._identity_switch_votes += 1
                 p.identity_switch_pending = (
                     self._identity_switch_votes
@@ -2137,8 +1966,6 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 # Keep the old anchor when identity matched: all future
                 # observations remain registered into the same canvas.
                 self._identity_reference = None
-                self._identity_baseline_reference = None
-                self._identity_print_reference = None
                 self._identity_reference_corners = None
                 self._identity_recovery_requested = False
                 self._identity_defer_count = 0

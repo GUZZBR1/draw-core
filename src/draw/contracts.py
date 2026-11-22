@@ -397,7 +397,6 @@ class InkPublication:
     captured_at: float | None = None
     anchor_corners: np.ndarray | None = None
     full: bool = False
-    identity_pending: bool = False
 
     def __post_init__(self):
         if self.captured_at is not None and not (

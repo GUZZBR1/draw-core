@@ -49,13 +49,6 @@ _IDENTITY_DILATION_KERNEL = 2 * votes._INK_FRONTIER_RADIUS + 1
 _IDENTITY_MIN_VISIBLE_FRACTION = 0.25
 _IDENTITY_MIN_VISIBLE_PX = 32
 
-# Fechamento de same_page sob oclusao: o piso acima so habilita a
-# avaliacao. Para CONSUMIR a referencia num same_page, metade da
-# caligrafia anterior precisa estar a vista — um fragmento
-# correspondente numa folha substituta herdaria o desenho inteiro
-# antes da mao sair.
-_IDENTITY_SAME_PAGE_VISIBLE_FRACTION = 0.5
-
 # Julgamento de virada sob oclusao: a cobertura e medida sobre a
 # tinta confirmada VISIVEL; com menos que isto de tinta visivel, a
 # passada se abstem — nem avanca nem zera a sequencia de virada.
