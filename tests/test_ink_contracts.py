@@ -561,6 +561,12 @@ def test_unmasked_dark_occluder_does_not_erase_confirmed_ink(ink):
     want = _stroke_mask(scene)
     got0 = _confirmed(worker, generation) > 0
     assert _frac(got0, want) >= 0.9
+    cover = np.zeros((H, W), dtype=bool)
+    cover[70:110, 40:180] = True
+    covered = want_a & cover
+    # O trecho que vai ser coberto parte confirmado inteiro — se a
+    # leitura falhar em mais de uns pixels, o bug nao e do oclusor.
+    assert _frac(got0, covered) >= 0.97
 
     # Uma manga/objeto escuro pousa sobre parte do traco A e a
     # mascara de mao o erra por completo: o warp traz o objeto
@@ -569,8 +575,6 @@ def test_unmasked_dark_occluder_does_not_erase_confirmed_ink(ink):
     # exposto e o voto de remocao apaga o traco fisico em seis
     # passadas — sem borracha alguma na cena.
     clock.advance(2.1)  # elegibilidade de remocao apos a confirmacao
-    cover = np.zeros((H, W), dtype=bool)
-    cover[70:110, 40:180] = True
     occluded = scene.page.copy()
     occluded[cover] = OCCLUDER_GRAY
     for _ in range(8):
@@ -581,7 +585,51 @@ def test_unmasked_dark_occluder_does_not_erase_confirmed_ink(ink):
         _feed(worker, clock, scene.frame(generation, img=occluded))
 
     got = _confirmed(worker, generation) > 0
-    covered = want_a & cover
-    assert _frac(got, covered) >= 0.9, "traco sob objeto escuro sumiu"
+    assert _frac(got, covered) >= 0.97, "traco sob objeto escuro sumiu"
     assert _frac(got, want) >= 0.9
     assert _beyond(got, want, 3) == 0
+
+
+# ------------------------------------------------------------------
+# Contrato 10: objeto escuro na abertura nao semeia como referencia
+# nem gera tinta — pm.exposed devolve tudo-True antes da primeira
+# sementeira, entao so paper_ok impede que o bloco conte observacao.
+# ------------------------------------------------------------------
+
+
+def test_startup_occluder_never_seeds_nor_inks(ink):
+    worker, clock = ink
+    generation = worker.new_generation()
+    scene = _Scene()
+    cover = np.zeros((H, W), dtype=bool)
+    cover[60:120, 60:200] = True
+    occluded = scene.page.copy()
+    occluded[cover] = OCCLUDER_GRAY
+    # O objeto esta la desde a abertura e a mascara de mao o erra.
+    # Se a guarda estiver desligada, os blocos sobre o oclusor
+    # semeiam com o tom dele (110) — a referencia nasce envenenada
+    # e um traco de ~90 cairia dentro da razao para sempre.
+    for _ in range(6):
+        worker.set_hand_presence(True, moved=True)
+        _feed(worker, clock, scene.frame(generation, img=occluded))
+    worker.set_hand_presence(False)
+
+    pm = getattr(worker, "_page_model", None)
+    if pm is not None:
+        assert np.count_nonzero(pm.seeded & cover) == 0, (
+            "oclusor sem mascara virou referencia de pagina"
+        )
+    assert np.count_nonzero(_confirmed(worker, generation)) == 0
+
+    # Revelado, o papel semeia com o tom real e um traco de 90 —
+    # mais escuro que o papel, mais claro que o oclusor — confirma
+    # normalmente (a banda que a referencia envenenada suprimiria).
+    _passes(worker, clock, generation, scene, 6, dt=_DT_IDLE)
+    scene.page[75:81, 80:150] = 90.0
+    worker.set_hand_presence(True, moved=True)
+    _passes(worker, clock, generation, scene, 4)
+    worker.set_hand_presence(False)
+    _passes(worker, clock, generation, scene, 4, dt=_DT_IDLE)
+    want = _stroke_mask(scene)
+    got = _confirmed(worker, generation) > 0
+    assert _frac(got, want) >= 0.9
