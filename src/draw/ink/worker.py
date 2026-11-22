@@ -579,7 +579,7 @@ def _evaluate_page_identity(
                     # contra a pior vizinha nao admite), nao casar
                     # prova ausencia (a pauta vista onde a tinta
                     # estava).
-                    distinct, tone_obs = identity_model.saved_tone_evidence(
+                    distinct, tone_obs, unsure = identity_model.saved_tone_evidence(
                         identity_norm,
                         identity_gray_ref,
                         ambiguous,
@@ -589,8 +589,20 @@ def _evaluate_page_identity(
                         visible=identity_visible,
                         region=region,
                         prenormalized=True,
+                        with_unsure=True,
                     )
-                    ambiguous &= ~distinct
+                    ambiguous &= ~(distinct | unsure)
+                    if np.any(unsure):
+                        # Veto que depende de amostra escondida pela mao
+                        # nao e ambiguidade de tom: a tinta conta como
+                        # escondida — fica no denominador dos pisos de
+                        # evidencia (fragmento nao restaura o resto) e
+                        # volta a ser julgada quando a mao sai.
+                        identity_visible = (
+                            ~unsure
+                            if identity_visible is None
+                            else (identity_visible & ~unsure)
+                        )
             ambiguous_px = int(np.count_nonzero(ambiguous))
             if ambiguous_px == 0:
                 ambiguous = None

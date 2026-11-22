@@ -2476,11 +2476,12 @@ def test_saved_tone_evidence_hidden_projected_rule_stays_ambiguous():
     gray[29:31, 25:105] = 85.0
     hand = vis.copy()
     hand[32:34, :] = False
-    distinct, matched = model.saved_tone_evidence(
-        gray, levels, at, dy=-2, dx=0, near=3, visible=hand
+    distinct, matched, unsure = model.saved_tone_evidence(
+        gray, levels, at, dy=-2, dx=0, near=3, visible=hand, with_unsure=True
     )
     assert not distinct[29:31, 25:105].any()
     assert not matched.any()
+    assert unsure[29:31, 25:105].all()
     # A mao sai: a regra provadamente ficou e o traco reaparece.
     distinct, matched = model.saved_tone_evidence(
         gray, levels, at, dy=-2, dx=0, near=3, visible=vis
@@ -2526,6 +2527,41 @@ def test_page_model_hidden_projected_rule_does_not_discard_canvas(monkeypatch):
         assert "new_page" not in decisions
         assert decisions[-1] == "same_page"
         assert int(np.count_nonzero(_confirmed(worker, gen2)[29:31, 25:105])) == 160
+    finally:
+        worker.stop()
+
+
+def test_page_model_hidden_projected_rule_fragment_does_not_restore(monkeypatch):
+    """page_model.py:807: folha substituta com so a marca pequena (40 px)
+    da salva e banda impressa onde estava o traco longo (160 px), com a
+    mao na posicao projetada da regra vizinha: o traco conta como
+    escondido, nao some do denominador — 40 de 200 nao restaura."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        form = _ruled_form()
+        written = form.copy()
+        written[29:31, 25:105] = 65.0
+        written[50:52, 40:60] = INK
+        _, before = _saved_sheet(worker, form, written)
+        assert before >= 160
+
+        replacement = np.full((H, W), PAPER, dtype=np.float32)
+        replacement[34:36, 10:110] = 95.0
+        replacement[64:66, 10:110] = 95.0
+        replacement[80:82, 10:110] = 95.0
+        replacement[29:31, 25:105] = 85.0
+        replacement[50:52, 40:60] = INK
+        hand = np.ones((H, W), dtype=bool)
+        hand[32:34, :] = False
+        frames = identity_mod._PAGE_IDENTITY_SWITCH_CONSENSUS_FRAMES
+        gen2 = worker.new_generation(preserve_identity=True)
+        for _ in range(frames + 1):
+            _drive(worker, gen2, replacement, visible=hand)
+        decisions = [
+            e["decision"] for e in worker.telemetry_snapshot()["page_identity_events"]
+        ]
+        assert decisions and "same_page" not in decisions
     finally:
         worker.stop()
 

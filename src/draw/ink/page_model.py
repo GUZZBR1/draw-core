@@ -697,6 +697,7 @@ class PageModel:
         visible=None,
         region=None,
         prenormalized=False,
+        with_unsure=False,
     ):
         """Evidencia fotometrica da tinta salva nas posicoes `at`.
 
@@ -719,13 +720,22 @@ class PageModel:
 
         `region`=(y0, y1, x0, x1) e um bbox que contem `at` (evita a
         varredura da grade inteira); `prenormalized` como em
-        `darker_than_reference`.
+        `darker_than_reference`. `with_unsure` acrescenta um terceiro
+        mask: as posicoes de `at` tiradas de `distinct` so pela amostra
+        escondida — nao julgaveis nesta passada, como tinta sob a mao.
         """
         height, width = self.shape
         distinct = np.zeros(self.shape, dtype=bool)
         matched_obs = np.zeros(self.shape, dtype=bool)
-        if not self._has_seeded or levels is None or levels.shape != self.shape:
+        unsure_saved = np.zeros(self.shape, dtype=bool)
+
+        def result():
+            if with_unsure:
+                return distinct, matched_obs, unsure_saved
             return distinct, matched_obs
+
+        if not self._has_seeded or levels is None or levels.shape != self.shape:
+            return result()
         y0, y1, x0, x1 = (0, height, 0, width) if region is None else region
         ys, xs = np.nonzero(np.asarray(at, dtype=bool)[y0:y1, x0:x1])
         ys = ys + y0
@@ -734,14 +744,14 @@ class PageModel:
         known = np.isfinite(lv)
         ys, xs, lv = ys[known], xs[known], lv[known]
         if ys.size == 0:
-            return distinct, matched_obs
+            return result()
         reach = int(near) + max(abs(int(dy)), abs(int(dx)))
         ref_inf = self._reference_inf()
         min_gap = _nearest_reference_gap(ref_inf, ys, xs, lv, reach)
         keep = np.isfinite(min_gap) & (min_gap > self.novel_delta)
         ys, xs, lv = ys[keep], xs[keep], lv[keep]
         if ys.size == 0:
-            return distinct, matched_obs
+            return result()
         distinct[ys, xs] = True
         norm_gray = (
             np.asarray(gray, dtype=np.float32)
@@ -750,7 +760,6 @@ class PageModel:
         )
         vis = None if visible is None else np.asarray(visible, dtype=bool)
         matched_saved = np.zeros(self.shape, dtype=bool)
-        unsure_saved = np.zeros(self.shape, dtype=bool)
         for oy, ox in {(0, 0), (int(dy), int(dx))}:
             qy, qx = ys + oy, xs + ox
             ok = (qy >= 0) & (qy < height) & (qx >= 0) & (qx < width)
@@ -804,8 +813,9 @@ class PageModel:
                 # ausencia provada — o pixel volta a ser ambiguo.
                 unsure &= ~hit
                 unsure_saved[py[unsure], px[unsure]] = True
-        distinct &= ~(unsure_saved & ~matched_saved)
-        return distinct, matched_obs
+        unsure_saved &= ~matched_saved
+        distinct &= ~unsure_saved
+        return result()
 
     @staticmethod
     def _moved_reference(ref_inf, norm_gray, vis, cy, cx, reach, dy, dx):
