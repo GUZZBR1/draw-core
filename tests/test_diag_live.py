@@ -35,7 +35,9 @@ def test_aspect_grid_keeps_quad_proportion_on_the_long_side():
     tall = [[0, 0], [100, 0], [100, 300], [0, 300]]
     assert diag_live.aspect_grid(tall, long_side=900) == (300, 900)
     config.apply_format("a4")
-    assert max(diag_live.aspect_grid(wide)) == max(config.PAPER_W, config.PAPER_H)
+    assert max(diag_live.aspect_grid(wide)) == max(
+        config.current().width, config.current().height
+    )
 
 
 def test_luminance_splits_quad_left_right():

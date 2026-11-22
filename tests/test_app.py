@@ -1083,7 +1083,11 @@ def test_main_orientation_paisagem_deita_a_grade(monkeypatch):
         app_module,
         "run",
         lambda **kw: seen.append(
-            (config.PAPER_ORIENTATION, config.PAPER_W, config.PAPER_H)
+            (
+                config.current().orientation,
+                config.current().width,
+                config.current().height,
+            )
         ),
     )
     monkeypatch.setattr(sys, "argv", ["draw", "--orientation", "paisagem"])

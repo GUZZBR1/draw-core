@@ -362,8 +362,8 @@ def test_run_bundle_success_and_error_paths(monkeypatch, tmp_path):
     clip_dir = tmp_path / "c1"
     _write_fake_clip_json(clip_dir, expected=[{"rule": "ink_present", "min_px": 50}])
 
-    orig_w, orig_h = draw_config.PAPER_W, draw_config.PAPER_H
-    orig_markers = draw_config.MARKER_CENTERS
+    orig_w, orig_h = draw_config.current().width, draw_config.current().height
+    orig_markers = draw_config.current().marker_centers
 
     def fake_run_clip(cdir, flags, **_kw):
         draw_config.apply_format("a4", "paisagem")
@@ -388,8 +388,11 @@ def test_run_bundle_success_and_error_paths(monkeypatch, tmp_path):
     assert res.expected_verdicts == [
         {"rule": "ink_present", "ok": True, "detail": "canvas_px=120 (min=50)"}
     ]
-    assert (draw_config.PAPER_W, draw_config.PAPER_H) == (orig_w, orig_h)
-    assert draw_config.MARKER_CENTERS == orig_markers
+    assert (draw_config.current().width, draw_config.current().height) == (
+        orig_w,
+        orig_h,
+    )
+    assert draw_config.current().marker_centers == orig_markers
 
     def boom(*_a, **_kw):
         raise RuntimeError("quebrou no meio")
@@ -398,8 +401,11 @@ def test_run_bundle_success_and_error_paths(monkeypatch, tmp_path):
     err_res = run_bundle(clip_dir, "cand", [], **models)
     assert err_res.error == "quebrou no meio"
     assert err_res.canvas_px == 0
-    assert (draw_config.PAPER_W, draw_config.PAPER_H) == (orig_w, orig_h)
-    assert draw_config.MARKER_CENTERS == orig_markers
+    assert (draw_config.current().width, draw_config.current().height) == (
+        orig_w,
+        orig_h,
+    )
+    assert draw_config.current().marker_centers == orig_markers
 
 
 def test_run_corpus_ordering_only_and_sweep(monkeypatch, tmp_path):

@@ -323,8 +323,9 @@ class Pipeline:
         self.clean_recovery_pending = False
         # Buffer dono do canvas acumulado: mora aqui de um frame de
         # deteccao ao outro, e nenhum outro uso pode escrever nele.
+        spec = config_module.current()
         self.canvas_buffer = np.empty(
-            (config_module.PAPER_H, config_module.PAPER_W, 3),
+            (spec.height, spec.width, 3),
             dtype=np.uint8,
         )
         self.frame_number = 0
@@ -677,7 +678,8 @@ class Pipeline:
         self._detections_since = since
         self.clean_hand_present = None
         self.ink_worker.set_hand_presence(None)
-        want_shape = (config_module.PAPER_H, config_module.PAPER_W, 3)
+        spec = config_module.current()
+        want_shape = (spec.height, spec.width, 3)
         buf = getattr(self, "canvas_buffer", None)
         if buf is not None and buf.shape != want_shape:
             self.canvas_buffer = np.empty(want_shape, dtype=np.uint8)
