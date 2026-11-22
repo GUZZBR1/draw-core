@@ -157,6 +157,7 @@ class PageModel:
         self._all_seeded = False
         self._last_chroma_ok = True
         self._last_visible = None
+        self._last_norm = None
         self._seeded = np.zeros((height, width), dtype=bool)
         self._occluder_hold = np.zeros((height, width), dtype=np.uint8)
         self._hold_mask = np.zeros((height, width), dtype=bool)
@@ -257,6 +258,7 @@ class PageModel:
         self._last_chroma_ok = chroma_ok
         self._last_visible = visible
         norm_gray = gray if abs(gain - 1.0) <= 1e-4 else (gray / np.float32(gain))
+        self._last_norm = norm_gray
         if has_seed_now:
             self._ref[seed_now] = gray[seed_now]
             self._norm_ref[seed_now] = norm_gray[seed_now]
@@ -544,6 +546,82 @@ class PageModel:
         if not self._has_seeded:
             return np.zeros(self.shape, dtype=bool)
         return self._seeded & (np.abs(self._norm_ref - norm_gray) <= _RETURN_TOL)
+
+    def darker_than_reference(
+        self, gray, *, dy=0, dx=0, near=0, visible=None, region=None
+    ):
+        """Pixels mais escuros que a aparencia limpa ALINHADA, alem de `novel_delta`.
+
+        Compara `gray` (grade da ancora) a `_norm_ref` na posicao
+        deslocada de (dy, dx) — a mesma translacao que a pauta mede —
+        no dominio normalizado pela iluminacao da passada, entao um
+        escurecimento global nao vira marca nova. Cada pixel julga
+        contra a pior aparencia limpa que poderia ocupar o lugar: a
+        referencia semeada mais escura a ate `near` px — a variacao
+        de borda da marca impressa deslocada. Pixel sem referencia
+        alcancavel nao prova nada (False).
+
+        `region`=(y0, y1, x0, x1) restringe a computacao pesada: a
+        margem necessaria (near + |deslocamento|) e acrescentada por
+        dentro, e posicoes fora dela voltam darker=False, expected=inf.
+        Em folha A4 a comparacao full-frame dominava a avaliacao de
+        identidade.
+
+        Devolve (darker, expected): `expected` e a aparencia limpa
+        propagada usada no julgamento (float32; inf onde nenhuma
+        referencia semeada alcanca). A comparacao com o nivel de
+        cinza da tinta salva (`expected - level` dentro de
+        `novel_delta`) e o que separa "indistinguivel" de
+        "aparencia de pauta provando ausencia"."""
+        # O ganho de iluminacao e global — medido na folha inteira,
+        # nao no recorte.
+        norm_gray = self._normalized(gray, visible)
+        height, width = self.shape
+        if not self._has_seeded:
+            return (
+                np.zeros(self.shape, dtype=bool),
+                np.full(self.shape, np.inf, dtype=np.float32),
+            )
+        if region is None:
+            cy0, cy1, cx0, cx1 = 0, height, 0, width
+        else:
+            pad = near + max(abs(dy), abs(dx))
+            cy0 = max(0, int(region[0]) - pad)
+            cy1 = min(height, int(region[1]) + pad)
+            cx0 = max(0, int(region[2]) - pad)
+            cx1 = min(width, int(region[3]) + pad)
+        seeded_c = self._seeded[cy0:cy1, cx0:cx1]
+        ref = np.full(seeded_c.shape, np.inf, dtype=np.float32)
+        ref[seeded_c] = self._norm_ref[cy0:cy1, cx0:cx1][seeded_c]
+        if dy or dx:
+            ch, cw = seeded_c.shape
+            shifted = np.full(seeded_c.shape, np.inf, dtype=np.float32)
+            src_y0, src_y1 = max(0, -dy), min(ch, ch - dy)
+            src_x0, src_x1 = max(0, -dx), min(cw, cw - dx)
+            if src_y1 > src_y0 and src_x1 > src_x0:
+                shifted[src_y0 + dy : src_y1 + dy, src_x0 + dx : src_x1 + dx] = ref[
+                    src_y0:src_y1, src_x0:src_x1
+                ]
+            ref = shifted
+        if near > 0:
+            ref = cv2.erode(ref, np.ones((2 * near + 1, 2 * near + 1), dtype=np.uint8))
+        darker = np.zeros(self.shape, dtype=bool)
+        darker[cy0:cy1, cx0:cx1] = np.isfinite(ref) & (
+            ref - norm_gray[cy0:cy1, cx0:cx1] > self.novel_delta
+        )
+        expected = np.full(self.shape, np.inf, dtype=np.float32)
+        expected[cy0:cy1, cx0:cx1] = ref
+        return darker, expected
+
+    @property
+    def last_normalized_gray(self):
+        """O gray normalizado pela iluminacao da ultima observacao.
+
+        None antes do primeiro observe — a referencia fotometrica
+        que a maquina de identidade guarda junto da mascara de
+        tinta salva.
+        """
+        return self._last_norm
 
     def seeding_pending(self, visible=None):
         """Visivel sem referencia em bloco com semeadura em curso.

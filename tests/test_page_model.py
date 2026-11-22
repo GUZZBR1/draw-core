@@ -432,24 +432,32 @@ def test_page_model_clean_replacement_with_adjacent_print_rejects_old_tick(
             _drive(worker, gen1, with_tick, visible=vis_all)
         assert np.count_nonzero(_confirmed(worker, gen1)) == 10
 
-        # Caso 1: a mesma folha com o tick retorna -> same_page preserva os 10 px
+        # Caso 1: a mesma folha com o tick retorna. A pauta impressa e
+        # tao escura quanto o tick (INK=40): o pixel escuro na posicao
+        # salva pode ser a pauta ou o traco — a passada nao distingue
+        # por aparencia. O veredito honesto e INCONCLUIDO com hold:
+        # nao vota contra, nao herda para copia identica e protege a
+        # referencia para sempre — repetir a passada nunca decide.
         gen2 = worker.new_generation(preserve_identity=True)
-        _drive(worker, gen2, with_tick, visible=vis_all)
+        for _ in range(6):
+            _drive(worker, gen2, with_tick, visible=vis_all)
         events = worker.telemetry_snapshot()["page_identity_events"]
-        assert events[-1]["decision"] == "same_page"
-        assert np.count_nonzero(_confirmed(worker, gen2)[20:25, 55:57]) == 10
+        assert events[-1]["decision"] == "deferred_occlusion"
+        assert np.count_nonzero(worker._identity_reference[20:25, 55:57]) == 10
 
-        # Caso 1b (R1798-1802): a mesma folha retorna com residuo de 1 px para a esquerda
-        # (impresso em [20:25, 49:54], tick em [20:25, 54:56]) -> same_page preserva o tick
+        # Caso 1b: a mesma folha retorna com residuo de 1 px para a esquerda
+        # (impresso em [20:25, 49:54], tick em [20:25, 54:56]) — mesma
+        # ambiguidade fotometrica: protegido, nao destruido.
         shifted_with_tick = np.full((H, W), PAPER, dtype=np.float32)
         shifted_with_tick[20:25, 49:54] = INK
         shifted_with_tick[10:15, 9:39] = INK
         shifted_with_tick[20:25, 54:56] = INK
         gen2b = worker.new_generation(preserve_identity=True)
-        _drive(worker, gen2b, shifted_with_tick, visible=vis_all)
+        for _ in range(6):
+            _drive(worker, gen2b, shifted_with_tick, visible=vis_all)
         events = worker.telemetry_snapshot()["page_identity_events"]
-        assert events[-1]["decision"] == "same_page"
-        assert np.count_nonzero(_confirmed(worker, gen2b)[20:25, 55:57]) == 10
+        assert events[-1]["decision"] == "deferred_occlusion"
+        assert np.count_nonzero(worker._identity_reference[20:25, 55:57]) == 10
 
         # Caso 2: copia limpa do formulario (sem o tick manuscrito, mesmo deslocada 1 px)
         # entra -> new_page limpa o tick
@@ -521,14 +529,18 @@ def test_page_model_reacquires_visible_tick_beside_occluded_printed_mark(monkeyp
             _drive(worker, gen1, with_tick, visible=vis_all)
         assert np.count_nonzero(_confirmed(worker, gen1)) == 10
 
-        # Na reaquisicao, a mao cobre a marca impressa [20:25, 53:55] mas deixa o tick visivel
+        # Na reaquisicao, a mao cobre a marca impressa [20:25, 53:55] mas deixa o
+        # tick visivel. O tick e tao escuro quanto a pauta (INK=40): escuro na
+        # posicao salva sem escurecer a referencia local e INCONCLUSIVO — o
+        # hold protege a referencia; repetir a passada nunca condena.
         vis_hand = np.ones((H, W), dtype=bool)
         vis_hand[18:27, 45:55] = False
         gen2 = worker.new_generation(preserve_identity=True)
-        _drive(worker, gen2, with_tick, visible=vis_hand)
+        for _ in range(6):
+            _drive(worker, gen2, with_tick, visible=vis_hand)
         events = worker.telemetry_snapshot()["page_identity_events"]
-        assert events[-1]["decision"] == "same_page"
-        assert np.count_nonzero(_confirmed(worker, gen2)[20:25, 55:57]) == 10
+        assert events[-1]["decision"] == "deferred_occlusion"
+        assert np.count_nonzero(worker._identity_reference[20:25, 55:57]) == 10
     finally:
         worker.stop()
 
@@ -598,7 +610,11 @@ def test_identity_recovery_budget_on_a4_grid(monkeypatch):
         )
     per_pass_ms = (time.monotonic() - start) / 20 * 1000
     assert res[0] is True
-    assert per_pass_ms < 10.0
+    # O dominio ambiguo (fotometria local) e o guard-full adicionaram
+    # ~1 ms ao custo base de ~8 ms medido em 739180e — o bound pega
+    # regressao de ordem de grandeza (varredura float inteira,
+    # dilatacao global), nao ruido de ~15% sob carga.
+    assert per_pass_ms < 15.0
 
     # Verifica na trabalhadora real que _evaluate_page_identity roda fora de _condition
     monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
@@ -1745,8 +1761,11 @@ def test_page_model_reacquires_stroke_drawn_entirely_on_printed_rule(monkeypatch
         assert events[-1]["decision"] == "same_page"
         assert int(np.count_nonzero(_confirmed(worker, gen2))) == confirmed_before
 
-        # Copia limpa com a MESMA regra (sem o traco): nada mais escuro
-        # que a pauta na posicao salva — nao herda o desenho.
+        # Copia limpa com a MESMA regra (sem o traco): as posicoes salvas
+        # mostram a pauta esperada (95), e o nivel salvo da tinta era 40
+        # — a aparencia de pauta na posicao PROVA que a tinta nao esta
+        # ali (um traco de 40 escureceria o lugar). Ausencia real, nao
+        # ambiguidade: mismatch e new_page, sem herdar o desenho.
         gen3 = worker.new_generation(preserve_identity=True)
         for _ in range(identity_mod._PAGE_IDENTITY_SWITCH_CONSENSUS_FRAMES):
             _drive(worker, gen3, form, visible=vis_all)
@@ -1926,5 +1945,146 @@ def test_page_model_first_baseline_pass_after_switch_uses_own_geometry(
         pm = worker._page_model
         first_call = next(vis for pm_id, vis in observed if pm_id == id(pm))
         assert first_call is None or np.all(first_call)
+    finally:
+        worker.stop()
+
+
+def test_page_model_pencil_stroke_beside_printed_rule_reacquires(monkeypatch):
+    """R673-681: traco lapis (70) colado a regra impressa (95) e julgado
+    contra o papel LOCAL embaixo dele (235), nao contra a pauta —
+    a mesma folha restaura."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        gen1 = worker.new_generation()
+        vis_all = np.ones((H, W), dtype=bool)
+        form = np.full((H, W), PAPER, dtype=np.float32)
+        form[30, 20:100] = 95.0
+        for _ in range(3):
+            _drive(worker, gen1, form, visible=vis_all)
+        assert np.count_nonzero(_confirmed(worker, gen1)) == 0
+
+        # Traco de lapis em 70 uma linha abaixo da regra impressa:
+        # a comparacao antiga com a pauta (0.7 * 95 = 66.5) apagava
+        # o traco; o local (papel 235 - 70 > delta) prova escrita.
+        penciled = form.copy()
+        penciled[31, 40:70] = 70.0
+        for _ in range(6):
+            _drive(worker, gen1, penciled, visible=vis_all)
+        confirmed_before = int(np.count_nonzero(_confirmed(worker, gen1)))
+        assert confirmed_before >= 20
+
+        gen2 = worker.new_generation(preserve_identity=True)
+        _drive(worker, gen2, penciled, visible=vis_all)
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] == "same_page"
+        assert np.count_nonzero(_confirmed(worker, gen2)[31, 40:70]) == 30
+    finally:
+        worker.stop()
+
+
+def test_page_model_single_traced_mark_clean_replacement_rejects(monkeypatch):
+    """R665-681: marca impressa unica totalmente tracada — a copia
+    limpa nao herda porque a pauta vista na posicao salva prova a
+    ausencia do nivel de tinta guardado (40 != 95)."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        gen1 = worker.new_generation()
+        vis_all = np.ones((H, W), dtype=bool)
+        form = np.full((H, W), PAPER, dtype=np.float32)
+        # A UNICA marca impressa da folha: 80 px de regra cinza
+        form[40:44, 40:60] = 95.0
+        for _ in range(3):
+            _drive(worker, gen1, form, visible=vis_all)
+        assert np.count_nonzero(_confirmed(worker, gen1)) == 0
+
+        # Traco manuscrito cobrindo a marca INTEIRA (80 px): nao sobra
+        # amostra de pauta limpa fora da posicao salva — o caso exato
+        # em que a mediana global ficava sem referencia e a posicao
+        # sozinha herdava o desenho na copia.
+        traced = form.copy()
+        traced[40:44, 40:60] = INK
+        for _ in range(6):
+            _drive(worker, gen1, traced, visible=vis_all)
+        confirmed_before = int(np.count_nonzero(_confirmed(worker, gen1)))
+        assert confirmed_before >= 60
+
+        # Mesma folha: o traco escurece a marca (40 vs 95 esperado) -> same_page
+        gen2 = worker.new_generation(preserve_identity=True)
+        _drive(worker, gen2, traced, visible=vis_all)
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] == "same_page"
+        assert int(np.count_nonzero(_confirmed(worker, gen2))) == confirmed_before
+
+        # Copia limpa com a MESMA marca (sem o traco): as posicoes
+        # salvas mostram 95 = esperado; a tinta salva era 40 —
+        # distinguivel -> ausencia real -> new_page.
+        gen3 = worker.new_generation(preserve_identity=True)
+        for _ in range(identity_mod._PAGE_IDENTITY_SWITCH_CONSENSUS_FRAMES):
+            _drive(worker, gen3, form, visible=vis_all)
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] == "new_page"
+        assert np.count_nonzero(_confirmed(worker, gen3)) == 0
+    finally:
+        worker.stop()
+
+
+def test_page_model_two_print_tones_darker_mark_does_not_inherit(monkeypatch):
+    """R665-681: formulario com regras claras (110) e marca escura (65):
+    na copia deslocada, a marca de 65 na posicao salva prova ausencia
+    da tinta de nivel 40 — o mediano global antigo a admitiria."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    vis_all = np.ones((H, W), dtype=bool)
+
+    def _seeded_worker():
+        w = _worker(InkConfig(page_model=True))
+        gen1 = w.new_generation()
+        form = np.full((H, W), PAPER, dtype=np.float32)
+        form[30, 10:110] = 110.0  # regra clara
+        form[60, 40:60] = 65.0  # marca impressa escura
+        for _ in range(3):
+            _drive(w, gen1, form, visible=vis_all)
+        assert np.count_nonzero(_confirmed(w, gen1)) == 0
+        # Traco manuscrito (40) logo abaixo da marca escura
+        marked = form.copy()
+        marked[61, 40:60] = INK
+        for _ in range(6):
+            _drive(w, gen1, marked, visible=vis_all)
+        assert np.count_nonzero(_confirmed(w, gen1)) == 20
+        return w
+
+    # Copia deslocada 1 px para baixo: a marca de 65 ocupa as linhas
+    # 61-62 — a linha 61 e a posicao salva do traco. Escuro na posicao,
+    # mas o nivel esperado (65) difere do nivel salvo (40) > delta:
+    # ausencia provada -> new_page, nao heranca.
+    worker = _seeded_worker()
+    try:
+        gen2 = worker.new_generation(preserve_identity=True)
+        copy_shifted = np.full((H, W), PAPER, dtype=np.float32)
+        copy_shifted[31, 10:110] = 110.0
+        copy_shifted[61:63, 40:60] = 65.0
+        for _ in range(identity_mod._PAGE_IDENTITY_SWITCH_CONSENSUS_FRAMES):
+            _drive(worker, gen2, copy_shifted, visible=vis_all)
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] == "new_page"
+        assert np.count_nonzero(_confirmed(worker, gen2)) == 0
+    finally:
+        worker.stop()
+
+    # Mesma folha deslocada: o traco real aterrissa na linha 62 e
+    # escurece a posicao deslocada (40 vs 65 esperado) -> same_page.
+    worker = _seeded_worker()
+    try:
+        gen2 = worker.new_generation(preserve_identity=True)
+        same_shifted = np.full((H, W), PAPER, dtype=np.float32)
+        same_shifted[31, 10:110] = 110.0
+        same_shifted[61, 40:60] = 65.0
+        same_shifted[62, 40:60] = INK
+        for _ in range(identity_mod._PAGE_IDENTITY_SWITCH_CONSENSUS_FRAMES):
+            _drive(worker, gen2, same_shifted, visible=vis_all)
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] == "same_page"
+        assert np.count_nonzero(_confirmed(worker, gen2)[62, 40:60]) == 20
     finally:
         worker.stop()
