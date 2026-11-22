@@ -1737,12 +1737,17 @@ def _bend_across_offset_seam(mark_shift=None):
 @pytest.mark.parametrize("mark_shift", [None, 0, 2, 4, 7])
 def test_pen_crossings_away_from_the_seam_do_not_erase_a_genuine_bend(mark_shift):
     """Review #139 (_seam_bridge): um cruzamento alto longe da costura não liga
-    as pautas defasadas, então não é evidência de remendo de sombra. A dobra
-    inteira (468 px) fica, com ou sem cruzamentos, qualquer que seja o
-    deslocamento deles em relação à pauta."""
-    prob = _bend_across_offset_seam(mark_shift)
-    out = ruling.RulingFilter().apply(prob.copy())
-    assert (out[280:294, 562:638] > 0.5).sum() >= 468
+    as pautas defasadas, então não é evidência de remendo de sombra. TODO pixel
+    da dobra dentro da faixa fica — conferido pela máscara do traço, não por
+    total, que as marcas de caneta inflariam."""
+    box = (slice(280, 294), slice(562, 638))
+    expected = (_bend_across_offset_seam(None) > 0.5)[box]
+    out = ruling.RulingFilter().apply(_bend_across_offset_seam(mark_shift).copy())
+    kept = (out > 0.5)[box]
+    marks = np.zeros_like(expected)
+    marks[:, [575 - 562, 576 - 562, 620 - 562, 621 - 562]] = True  # as marcas
+    assert expected.sum() == 468
+    assert (kept & expected & ~marks).sum() == (expected & ~marks).sum()
 
 
 def test_a_wide_shadow_patch_joining_offset_rules_does_not_pass_as_a_bend():
@@ -1754,3 +1759,40 @@ def test_a_wide_shadow_patch_joining_offset_rules_does_not_pass_as_a_bend():
     out = ruling.RulingFilter().apply(prob.copy())
     assert (out[80:96, 562:578] > 0.5).sum() == 0
     assert (out[80:96, 622:638] > 0.5).sum() == 0
+
+
+def test_a_staggered_shadow_patch_joining_offset_rules_does_not_pass_as_a_bend():
+    """Review #139: o remendo liga as pautas por intervalos que só se
+    sobrepõem em colunas vizinhas (80-91 à esquerda, 82-93 à direita), nenhum
+    cobrindo o desnível inteiro sozinho. Duas colunas seguidas quase tão altas
+    já são ponte."""
+    prob = _fold_page(offset_r=8, left_sh=13, right_sh=13, split_x=600)
+    prob[82:92, 598:602] = 0.97
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[80:96, 562:596] > 0.5).sum() == 0
+    assert (out[80:96, 606:638] > 0.5).sum() == 0
+
+
+def _chain(spans, x0):
+    """Cadeia de `_Run` (x crescente) a partir de (top, bot) por coluna."""
+    nodes = [ruling._Run(x0 + i, top, bot, i - 1) for i, (top, bot) in enumerate(spans)]
+    return nodes, len(nodes) - 1
+
+
+def test_seam_bridge_reads_both_levels_from_the_chain_when_the_back_trace_is_empty():
+    """Review #139: na cauda curta o traço de volta não cobre coluna fora da
+    janela (`src_tops` vazio). A cadeia cruza a divisa, então os dois níveis
+    saem dela: o remendo (12 px de altura numa coluna só) é ponte; a dobra
+    gradual, não."""
+    split = 600
+    flat_a = [(280, 285)] * 12  # pauta de origem, x 588..599
+    flat_b = [(288, 293)] * 12  # pauta de destino, x 600..611 (+ janela)
+    patch = flat_a[:10] + [(280, 293)] * 4 + flat_b[2:]  # remendo em 598..601
+    bend = flat_a + [(282, 287), (284, 289), (286, 291)] + [(288, 293)] * 18
+    nodes, tid = _chain(patch, 588)
+    assert ruling._seam_bridge(nodes, tid, 640, 1, split, [])
+    nodes, tid = _chain(bend, 588)
+    assert not ruling._seam_bridge(nodes, tid, 640, 1, split, [])
+    # sem nível de origem observável (nem na cadeia): abstém
+    nodes, tid = _chain([(288, 293)] * 30, 600)
+    assert not ruling._seam_bridge(nodes, tid, 640, 1, split, [])

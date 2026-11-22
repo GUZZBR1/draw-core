@@ -1015,19 +1015,24 @@ def _rule_run(tracks, i, k, tail):
     return run
 
 
-def _seam_bridge(nodes, tid, band_edge, direction, src_top):
+def _seam_bridge(nodes, tid, band_edge, direction, split, src_tops):
     """O caminho cruza a divisa por um remendo alto (sombra) ou por dobra?
 
     Uma dobra distribui o desnível entre as pautas ao longo das colunas: em
     nenhuma coluna o intervalo cobre o desnível inteiro. Um remendo de sombra
-    o concentra: perto da costura há um intervalo de altura >= espessura +
-    desnível (da pauta de origem à de destino).
+    o concentra: perto da divisa há um intervalo de altura >= espessura +
+    desnível (da pauta de origem à de destino) ou, quando o remendo liga as
+    pautas por intervalos que só se sobrepõem em colunas vizinhas, duas
+    colunas seguidas quase tão altas (desnível menos `_THIN_MARGIN`).
 
     A evidência é medida ONDE as pautas se ligam — as colunas a até
-    `_SEAM_WIN` da costura —, nunca no trecho todo: um cruzamento de caneta
-    longe da costura é alto mas não liga pauta nenhuma, e um remendo largo
-    não pode esconder a própria ponte subindo a mediana. Os níveis das duas
-    pautas e a espessura de referência saem das colunas FORA da janela.
+    `_SEAM_WIN` da divisa `split` (primeira coluna do destino) —, nunca no
+    trecho todo: um cruzamento de caneta longe da divisa é alto mas não liga
+    pauta nenhuma, e um remendo largo não pode esconder a própria ponte
+    subindo a mediana. Os níveis das duas pautas e a espessura de referência
+    saem das colunas FORA da janela: o lado do destino vem da cadeia, o da
+    origem vem da cadeia (quando o traço já nasce antes da divisa) e do
+    traço de volta `src_tops`. Sem nível de origem observável, abstém.
     """
     chain = []
     cur = tid
@@ -1036,20 +1041,33 @@ def _seam_bridge(nodes, tid, band_edge, direction, src_top):
         if (band_edge - n.x) * direction > 0:
             chain.append(n)
         cur = n.pred
-    if not chain:
+    near = sorted(
+        (n for n in chain if abs(n.x - split) <= _SEAM_WIN), key=lambda n: n.x
+    )
+    far_dst = [
+        n
+        for n in chain
+        if (n.x - split) * direction >= 0 and abs(n.x - split) > _SEAM_WIN
+    ]
+    far_src_chain = [
+        n.top
+        for n in chain
+        if (n.x - split) * direction < 0 and abs(n.x - split) > _SEAM_WIN
+    ]
+    src = list(src_tops) + far_src_chain
+    if not near or not far_dst or not src:
         return False
-    seam = chain[-1].x  # a raiz da floresta nasce na costura
-    near = [n for n in chain if abs(n.x - seam) <= _SEAM_WIN]
-    far = [n for n in chain if abs(n.x - seam) > _SEAM_WIN]
-    if not far:
-        return False
-    base = float(np.median([n.bot - n.top + 1 for n in far]))
+    base = float(np.median([n.bot - n.top + 1 for n in far_dst]))
     # desnível entre os topos das duas pautas, medidos fora da janela
-    gap = abs(float(np.median([n.top for n in far])) - src_top)
+    gap = abs(float(np.median([n.top for n in far_dst])) - float(np.median(src)))
     if gap <= _THIN_MARGIN:
         return False
-    # intervalo que cobre o desnível inteiro: da pauta de origem à de destino
-    return any((n.bot - n.top + 1) >= base + gap for n in near)
+    h = [n.bot - n.top + 1 for n in near]
+    if max(h) >= base + gap:
+        return True
+    # remendo escalonado: duas colunas seguidas cobrem o desnível (menos a margem)
+    tall = [x >= base + gap - _THIN_MARGIN for x in h]
+    return any(a and b for a, b in zip(tall, tall[1:], strict=False))
 
 
 def _project_forest(
@@ -1091,9 +1109,10 @@ def _project_forest(
     nodes_s, tips_s = _trace_ink_run(
         ink, yc0, seam_col, limit_src, -direction, stop_src
     )
-    # topo da pauta de origem: a floresta de volta, fora da janela da costura
-    far_s = [n.top for n in nodes_s if abs(n.x - seam_col) > _SEAM_WIN]
-    src_top = float(np.median(far_s)) if far_s else None
+    # divisa entre as trilhas e topos da pauta de origem (floresta de volta,
+    # fora da janela da divisa)
+    split = t_src.x1 if direction > 0 else t_src.x0
+    src_tops = [n.top for n in nodes_s if abs(n.x - split) > _SEAM_WIN]
     stop_dst = max(need, bulk_dst + _GUTTER_EDGE_RUN + 1) if has_dst else need + 1
     qual_dst = set()
     qual_tips = []
@@ -1118,10 +1137,8 @@ def _project_forest(
                 break
         if not clean:
             continue
-        if (
-            require_bend
-            and src_top is not None
-            and _seam_bridge(nodes, tid, band_in_edge, direction, src_top)
+        if require_bend and _seam_bridge(
+            nodes, tid, band_in_edge, direction, split, src_tops
         ):
             continue
         qual_tips.append(tid)
