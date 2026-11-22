@@ -501,6 +501,14 @@ def test_light_sheet_slide_does_not_duplicate_ink(ink):
         )
         clock.advance(_DT_ACTIVE)
         assert worker.pump(), f"quadro do deslize (residuo {residual}) nao rodou"
+        # Duplicacao transitoria: uma copia confirmada no meio do
+        # deslize poderia sumir ate o assentamento e escapar da
+        # leitura final — a cada quadro processado o canvas nao pode
+        # ter tinta confirmada alem do envelope do residuo.
+        conf, _prov, _v = _display(worker, generation)
+        assert np.count_nonzero((np.asarray(conf) > 0) & ~_dilate(before, 4)) == 0, (
+            f"tinta transitoria no quadro de residuo {residual}"
+        )
     worker.set_hand_presence(False)
     _passes(worker, clock, generation, scene, 3, dt=_DT_IDLE)
 
