@@ -747,6 +747,8 @@ class _Pass:
     identity_geometry_registered: bool = False
     identity_pending: bool = False
     identity_owned: bool = False
+    pm_rezero: bool = False
+    pm_rezero_applied: bool = False
     keep_page: bool = False
     quarantine_reason: object = None
     quarantine_frames: int = 0
@@ -878,6 +880,9 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         # publicado do PageModel: (epoca do modelo, fracao semeada,
         # pixels visiveis pendentes).
         self._pm_rezero_requested = False
+        # Semeadura pos re-zero em curso: segura o descanso ate o modelo
+        # novo semear, senao a pagina parada dorme sem referencia.
+        self._pm_rezero_seeding = False
         self._pm_status = None
         # Relogio monotonico injetavel: o padrao e o do processo;
         # replays com pump() passam o relogio da cena.
@@ -1045,6 +1050,10 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._identity_defer_count = 0
             self._identity_switch_votes = 0
             self._identity_hold_seen = False
+            # Uma folha/fonte nova cancela o re-zero pendente: o pedido
+            # era sobre a folha anterior.
+            self._pm_rezero_requested = False
+            self._pm_rezero_seeding = False
             self._guard_memo.clear()
             self._previous_corners = None
             self._paper_ref = None
@@ -1451,7 +1460,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             return False
         if self._identity_recovery_requested and self._identity_reference is not None:
             return False
-        if self._pm_rezero_requested:
+        if self._pm_rezero_requested or self._pm_rezero_seeding:
             return False
         if (
             self._generation_passes < _REST_MIN_GENERATION_PASSES
@@ -2402,11 +2411,23 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         with self._condition:
             if self._stopped:
                 return False
-            if p.generation != self._generation or p.pm_epoch != (
-                self._canvas_epoch,
-                self._pm_reset_seq,
+            step = 1 if p.pm_rezero_applied else 0
+            if (
+                p.generation != self._generation
+                or p.pm_epoch != (self._canvas_epoch + step, self._pm_reset_seq + step)
+                or (p.pm_rezero_applied and not self._pm_rezero_requested)
             ):
                 return True
+            if p.pm_rezero_applied:
+                # Commit do re-zero (#130): canvas e modelo novos juntos,
+                # canvas vazio publicado nesta passada.
+                self._pm_rezero_requested = False
+                self._pm_rezero_seeding = True
+                self._accumulator.reset()
+                self._canvas_epoch += 1
+                self._pm_reset_seq += 1
+                self._pm_baseline_ink = None
+                p.force_publish = True
             delta_job = self._pass_vote_and_publish(p)
             self._condition.notify_all()
         if delta_job is not None:
@@ -2772,21 +2793,16 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # None para o avaliador nao projetar GT por uma
             # geometria que nunca chegou ao canvas.
             p.last_reg = None
-        if (
+        # Re-zero (#130): so candidata aqui. A troca de modelo e o clear
+        # do canvas dependem de a passada ter papel utilizavel, o que so
+        # se sabe depois da mascara de papel (fora do lock) — ver
+        # _pass_paper_and_page_model e o commit em _pass_commit.
+        p.pm_rezero = bool(
             self._pm_rezero_requested
             and self._config.page_model
             and p.pass_voted
             and not p.identity_owned
-        ):
-            # Re-zero (#130): canvas e PageModel recomecam nesta
-            # passada — a epoca nova descarta o modelo, que semeia de
-            # novo o que esta a vista, e o canvas vazio sai no publish.
-            self._pm_rezero_requested = False
-            self._accumulator.reset()
-            self._canvas_epoch += 1
-            self._pm_reset_seq += 1
-            self._pm_baseline_ink = None
-            p.force_publish = True
+        )
         p.pm_epoch = (self._canvas_epoch, self._pm_reset_seq)
         if self._config.page_model and p.pass_voted:
             confirmed = self._accumulator._confirmed
@@ -2987,6 +3003,18 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 obs_visible = (
                     p.paper_ok if obs_visible is None else (obs_visible & p.paper_ok)
                 )
+            if p.pm_rezero and (obs_visible is None or bool(np.any(obs_visible))):
+                # Papel utilizavel nesta passada: o modelo recomeca aqui e
+                # o canvas e zerado no commit. Sem papel (sombra, mao,
+                # guarda rejeitando tudo) o pedido segue pendente e o
+                # canvas atual fica intacto.
+                pm = page_model.PageModel(p.prob.shape)
+                self._page_model = pm
+                p.pm_epoch = (p.pm_epoch[0] + 1, p.pm_epoch[1] + 1)
+                self._pm_epoch = p.pm_epoch
+                p.next_baseline_ink = np.zeros(p.prob.shape, dtype=bool)
+                p.pm_confirm_obs = pm.confirm_obs
+                p.pm_rezero_applied = True
             pm.observe(
                 gray,
                 visible=obs_visible,
@@ -3014,6 +3042,14 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             )
             p.reg_info["pm_suppressed_px"] = int(np.count_nonzero(suppress & voting_px))
             p.reg_info["pm_pending_px"] = int(np.count_nonzero(pm.pending(obs_visible)))
+            # Papel rastreado sem referencia, inclusive o que esta coberto
+            # agora: e o que a interface precisa para nao dizer "pronto"
+            # antes de a mao liberar uma regiao ainda nao semeada.
+            p.reg_info["pm_unseeded_px"] = int(
+                np.count_nonzero(
+                    ~pm.seeded if pm_coverage is None else pm_coverage & ~pm.seeded
+                )
+            )
             baseline_seen = (
                 suppress & obs_admissible & (p.prob > self._accumulator.threshold)
             )
@@ -3024,8 +3060,21 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             )
             if np.any(baseline_erased):
                 p.next_baseline_ink[baseline_erased] = False
-            if np.any(suppress):
-                p.prob = np.where(suppress, 0.0, p.prob).astype(np.float32)
+            # Traco confirmado sobre impresso que voltou a aparencia
+            # semeada (apagado): a impressao ainda pontua como tinta e o
+            # removedor nunca veria ausencia. Zera a evidencia ali para
+            # que a remocao conte; as salvaguardas do acumulador
+            # (visibilidade, testemunha, passadas consecutivas) seguem.
+            restored = (
+                pm.seeded
+                & ~novel_mask
+                & confirmed_ink
+                & p.next_baseline_ink
+                & obs_admissible
+            )
+            zero = suppress | restored
+            if np.any(zero):
+                p.prob = np.where(zero, 0.0, p.prob).astype(np.float32)
 
     def _pass_vote_and_publish(self, p):
         """Voto, acumulador e publicacao sob _condition: comita estado,
@@ -3048,8 +3097,14 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._pm_status = (
                 p.pm_epoch,
                 float(p.reg_info["pm_seeded_frac"]),
-                int(p.reg_info.get("pm_pending_px", 0)),
+                int(p.reg_info.get("pm_unseeded_px", 0)),
             )
+            if (
+                self._pm_rezero_seeding
+                and p.pm_seeding_remaining == 0
+                and p.reg_info["pm_seeded_frac"] > 0.0
+            ):
+                self._pm_rezero_seeding = False
         guard_corners = (
             self._anchor_corners if self._anchor_corners is not None else p.corners
         )

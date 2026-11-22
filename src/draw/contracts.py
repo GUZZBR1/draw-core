@@ -250,8 +250,9 @@ class InkBaselineState:
 
     phase: "disabled", "waiting_page", "seeding", "recapturing",
     "ready_partial" (ha area visivel ainda sem referencia) ou "ready".
-    fraction e a fracao da grade ja semeada; pending_px os pixels
-    visiveis que ainda nao tem referencia.
+    fraction e a fracao da grade ja semeada; pending_px os pixels de
+    papel rastreado ainda sem referencia, inclusive os cobertos agora.
+    "ready" so sem nenhum pendente.
     """
 
     enabled: bool
