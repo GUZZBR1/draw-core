@@ -137,20 +137,20 @@ def test_legacy_mode_holds_an_armed_streak_when_the_witness_dies(monkeypatch):
         for _ in range(3):
             _pass(worker, generation, _paper())
         streak = worker._accumulator._removal_streak
-        assert streak is not None and int(streak[COVERED].max()) > 0
+        armed = int(streak[COVERED].max())
+        assert armed > 0
         # A sombra espalha e o modelo perde o desenho inteiro: sem
         # testemunha, o streak armado congela em vez de drenar — com
-        # paper_exposed=True ele completava a remocao no escuro.
+        # paper_exposed=True ele completava a remocao no escuro. O pin
+        # no valor armado pega dreno parcial que um teto frouxo deixaria
+        # passar.
         ink.content = np.zeros((H, W), np.float32)
         for _ in range(registration._REMOVAL_PASSES + 4):
             _pass(worker, generation, _paper())
         snap = worker.poll(generation, 0)
         assert snap.confirmed[COVERED].all()
         assert snap.confirmed[WITNESS].all()
-        assert (
-            int(worker._accumulator._removal_streak[COVERED].max())
-            < registration._REMOVAL_PASSES
-        )
+        assert int(worker._accumulator._removal_streak[COVERED].max()) == armed
         # A sombra sai com a tinta intacta: a leitura volta e o streak
         # pendurado zera — nada fica armado esperando a proxima falta
         # (o canvas intacto sozinho nao prova isso: um streak parado
