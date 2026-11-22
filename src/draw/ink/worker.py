@@ -833,6 +833,10 @@ def _evaluate_page_identity(
                 recall >= identity._PAGE_IDENTITY_MIN_RECALL
                 and containment >= identity._PAGE_IDENTITY_MIN_CONTAINMENT
             ):
+                # Hold (prazo congelado) so quando parte da tinta salva
+                # esta escondida e ainda pode reaparecer. Com ela toda
+                # a vista, outra passada igual nao traz evidencia nova:
+                # o adiamento queima a quarentena e termina.
                 return (
                     False,
                     recall,
@@ -841,7 +845,7 @@ def _evaluate_page_identity(
                     0,
                     True,
                     "occlusion",
-                    True,
+                    prior_vis_px < prior_px,
                 )
             keep_page = True
         elif ambiguous_seen:

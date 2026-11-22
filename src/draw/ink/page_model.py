@@ -108,6 +108,27 @@ def _block_fraction(mask, block, raw=False):
     return sums / _block_fraction(np.ones((height, width), dtype=bool), block, raw=True)
 
 
+def _nearest_reference_gap(ref_inf, ys, xs, values, reach):
+    """min |ref_inf[q] - value| sobre q a ate `reach` px (Chebyshev) de
+    cada (ys, xs); inf onde nenhuma referencia semeada e alcancavel.
+
+    Varre os vizinhos por indice: os pontos sao poucos perto da grade
+    (fora dela, ou inf, nao reproduz nada).
+    """
+    height, width = ref_inf.shape
+    gap_min = np.full(ys.shape, np.inf, dtype=np.float32)
+    for oy in range(-reach, reach + 1):
+        qy = ys + oy
+        in_y = (qy >= 0) & (qy < height)
+        qy = np.clip(qy, 0, height - 1)
+        for ox in range(-reach, reach + 1):
+            qx = xs + ox
+            inside = in_y & (qx >= 0) & (qx < width)
+            gap = np.abs(ref_inf[qy, np.clip(qx, 0, width - 1)] - values)
+            np.minimum(gap_min, np.where(inside, gap, np.inf), out=gap_min)
+    return gap_min
+
+
 def _expand(blocks, shape, block):
     """Mascara por bloco de volta a grade de pixels."""
     height, width = shape
@@ -709,20 +730,9 @@ class PageModel:
         ys, xs, lv = ys[known], xs[known], lv[known]
         if ys.size == 0:
             return distinct, matched_obs
-        # Posicoes ambiguas sao poucas perto da grade: varre os vizinhos
-        # por indice (fora da grade ou nao semeado nao reproduz nada).
         reach = int(near) + max(abs(int(dy)), abs(int(dx)))
         ref_inf = self._reference_inf()
-        min_gap = np.full(ys.shape, np.inf, dtype=np.float32)
-        for oy in range(-reach, reach + 1):
-            qy = ys + oy
-            in_y = (qy >= 0) & (qy < height)
-            qy = np.clip(qy, 0, height - 1)
-            for ox in range(-reach, reach + 1):
-                qx = xs + ox
-                inside = in_y & (qx >= 0) & (qx < width)
-                gap = np.abs(ref_inf[qy, np.clip(qx, 0, width - 1)] - lv)
-                np.minimum(min_gap, np.where(inside, gap, np.inf), out=min_gap)
+        min_gap = _nearest_reference_gap(ref_inf, ys, xs, lv, reach)
         keep = np.isfinite(min_gap) & (min_gap > self.novel_delta)
         ys, xs, lv = ys[keep], xs[keep], lv[keep]
         if ys.size == 0:
@@ -741,7 +751,15 @@ class PageModel:
             if vis is not None:
                 ok_v = vis[qy, qx]
                 qy, qx, lq = qy[ok_v], qx[ok_v], lq[ok_v]
-            hit = np.abs(norm_gray[qy, qx] - lq) <= self.novel_delta
+            obs = norm_gray[qy, qx]
+            saved_gap = np.abs(obs - lq)
+            # A observacao tem de ser melhor explicada pela tinta salva
+            # que por QUALQUER aparencia limpa alcancavel: pauta de uma
+            # copia limpa um pouco mais escura (85 vs 95) cai dentro do
+            # delta da escrita salva (65), mas segue mais perto da
+            # pauta — e pauta, nao tinta.
+            clean_gap = _nearest_reference_gap(ref_inf, qy, qx, obs, reach)
+            hit = (saved_gap <= self.novel_delta) & (saved_gap < clean_gap)
             matched_obs[qy[hit], qx[hit]] = True
         return distinct, matched_obs
 

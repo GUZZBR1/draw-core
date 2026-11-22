@@ -2288,6 +2288,37 @@ def test_identity_coincidental_fragment_does_not_restore_ambiguous_canvas():
     )
     assert res[0] is False
     assert res[1] is not None and res[1] < identity_mod._PAGE_IDENTITY_MIN_RECALL
+    # Tinta salva toda a vista: adiamento sem hold, queima a quarentena.
+    assert res[5] is True and res[7] is False
+
+
+def test_page_model_clean_copy_darker_print_does_not_inherit(monkeypatch):
+    """page_model.py:744: copia limpa com a pauta um pouco mais escura (85
+    contra 95) fica a menos de `novel_delta` da escrita salva (65), mas
+    segue mais perto da pauta — nao herda o canvas salvo."""
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        form = np.full((H, W), PAPER, dtype=np.float32)
+        form[30:34, 10:110] = 95.0
+        written = form.copy()
+        written[30:34, 20:100] = 65.0
+        _, before = _saved_sheet(worker, form, written)
+        assert before > 0
+
+        darker_copy = form.copy()
+        darker_copy[30:34, 10:110] = 85.0
+        vis = np.ones((H, W), dtype=bool)
+        frames = identity_mod._PAGE_IDENTITY_SWITCH_CONSENSUS_FRAMES
+        bound = identity_mod._PAGE_IDENTITY_MAX_DEFERRALS + frames + 1
+        gen2 = worker.new_generation(preserve_identity=True)
+        for _ in range(bound):
+            _drive(worker, gen2, darker_copy, visible=vis)
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert "same_page" not in [e["decision"] for e in events]
+        assert int(np.count_nonzero(_confirmed(worker, gen2))) == 0
+    finally:
+        worker.stop()
 
 
 def test_align_identity_baseline_removes_prior_halo_across_band_edge():
