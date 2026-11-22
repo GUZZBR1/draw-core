@@ -152,13 +152,16 @@ def test_legacy_mode_holds_an_armed_streak_when_the_witness_dies(monkeypatch):
             < registration._REMOVAL_PASSES
         )
         # A sombra sai com a tinta intacta: a leitura volta e o streak
-        # pendurado zera — nada fica armado esperando a proxima falta.
+        # pendurado zera — nada fica armado esperando a proxima falta
+        # (o canvas intacto sozinho nao prova isso: um streak parado
+        # em 1-5 retomaria a contagem na proxima falta).
         ink.content = _prob()
         for _ in range(3):
             _pass(worker, generation, _paper())
         snap = worker.poll(generation, 0)
         assert snap.confirmed[COVERED].all()
         assert snap.confirmed[WITNESS].all()
+        assert not worker._accumulator._removal_streak.any()
     finally:
         worker.stop()
 
