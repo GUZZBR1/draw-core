@@ -757,13 +757,23 @@ class PageModel:
             obs = norm_gray[qy, qx]
             saved_gap = np.abs(obs - lq)
             # A observacao tem de ser melhor explicada pela tinta salva
-            # que pela aparencia limpa no MESMO quadro: pauta de uma
-            # copia limpa um pouco mais escura (85 vs 95) cai dentro do
-            # delta da escrita salva (65), mas segue mais perto da
-            # pauta. A referencia mora na grade salva: sob a hipotese
-            # (oy, ox) a observacao em q volta para q - (oy, ox), a
-            # posicao salva, e so `near` a cerca.
-            clean_gap = _nearest_reference_gap(ref_inf, py, px, obs, int(near))
+            # que pela aparencia limpa: pauta de uma copia limpa um
+            # pouco mais escura (85 vs 95) cai dentro do delta da
+            # escrita salva (65), mas segue mais perto da pauta. A
+            # referencia mora na grade salva e cada quadro so alcanca
+            # `near`: o do candidato (q volta para a posicao salva) e
+            # o da folha medida (q - (dy, dx)) — o traco no lugar
+            # salvo nao prova que a pauta tambem nao andou.
+            near_i = int(near)
+            clean_gap = _nearest_reference_gap(ref_inf, py, px, obs, near_i)
+            if (oy, ox) != (int(dy), int(dx)):
+                np.minimum(
+                    clean_gap,
+                    _nearest_reference_gap(
+                        ref_inf, qy - int(dy), qx - int(dx), obs, near_i
+                    ),
+                    out=clean_gap,
+                )
             hit = (saved_gap <= self.novel_delta) & (saved_gap < clean_gap)
             matched_obs[qy[hit], qx[hit]] = True
         return distinct, matched_obs

@@ -2352,6 +2352,29 @@ def test_saved_tone_evidence_shifted_match_uses_saved_frame():
     assert matched[32, 40:70].all()
 
 
+def test_saved_tone_evidence_unshifted_match_checks_aligned_print():
+    """page_model.py:766: regra um pouco mais escura (85 contra 95) da
+    copia limpa cai sobre o traco salvo (65) com a folha a -3 linhas: o
+    candidato no lugar salvo tambem consulta a pauta no quadro medido."""
+    model = pm_mod.PageModel((H, W))
+    form = np.full((H, W), PAPER, dtype=np.float32)
+    form[34:36, 10:110] = 95.0
+    vis = np.ones((H, W), dtype=bool)
+    for _ in range(4):
+        model.observe(form, visible=vis, paper=vis)
+    levels = np.full((H, W), np.nan, dtype=np.float32)
+    levels[30, 40:70] = 65.0
+    at = np.zeros((H, W), dtype=bool)
+    at[30, 40:70] = True
+    gray = np.full((H, W), PAPER, dtype=np.float32)
+    gray[30:32, 10:110] = 85.0  # a regra da copia limpa, 4 linhas acima
+    distinct, matched = model.saved_tone_evidence(
+        gray, levels, at, dy=-3, dx=0, near=3, visible=vis
+    )
+    assert distinct[30, 40:70].all()
+    assert not matched.any()
+
+
 def test_align_identity_baseline_removes_prior_halo_across_band_edge():
     """worker.py:367: tinta salva logo FORA da banda de busca ainda projeta
     o halo dilatado dela para dentro — nao pode puxar o ajuste."""
