@@ -68,6 +68,7 @@ _MIN_VISIBLE = 2 * _SUPPORT_W  # colunas na imagem p/ valer uma linha extrapolad
 _GUTTER_FRAC = 0.6  # fração das linhas grossas na coluna
 _GUTTER_MIN_W = 16  # colunas contínuas (mais largo que qualquer traço de caneta)
 _GUTTER_EDGE_RUN = 3  # colunas bastam num trecho que encosta na divisa
+_SEAM_WIN = 4  # colunas de cada lado da costura onde as pautas defasadas se ligam
 _GUTTER_VOTE_W = _PROB_MIN_RUN  # janela de continuação fora da faixa
 _VOTE_FRAC = 0.85  # fração mínima de colunas grossas na janela de voto
 _GUTTER_EXTRA = 4  # px a mais de espessura apagável dentro da faixa
@@ -1014,14 +1015,19 @@ def _rule_run(tracks, i, k, tail):
     return run
 
 
-def _seam_bridge(nodes, tid, band_edge, direction):
+def _seam_bridge(nodes, tid, band_edge, direction, src_top):
     """O caminho cruza a divisa por um remendo alto (sombra) ou por dobra?
 
     Uma dobra distribui o desnível entre as pautas ao longo das colunas: em
-    nenhuma coluna o intervalo abrange a transição inteira. Um remendo de
-    sombra a concentra: a ponte precisa cobrir o gap vertical todo numa
-    coluna só, então a altura do intervalo chega a sombra+gap. Compara o
-    pico de altura da cadeia in-band com o desnível percorrido.
+    nenhuma coluna o intervalo cobre o desnível inteiro. Um remendo de sombra
+    o concentra: perto da costura há um intervalo de altura >= espessura +
+    desnível (da pauta de origem à de destino).
+
+    A evidência é medida ONDE as pautas se ligam — as colunas a até
+    `_SEAM_WIN` da costura —, nunca no trecho todo: um cruzamento de caneta
+    longe da costura é alto mas não liga pauta nenhuma, e um remendo largo
+    não pode esconder a própria ponte subindo a mediana. Os níveis das duas
+    pautas e a espessura de referência saem das colunas FORA da janela.
     """
     chain = []
     cur = tid
@@ -1030,11 +1036,20 @@ def _seam_bridge(nodes, tid, band_edge, direction):
         if (band_edge - n.x) * direction > 0:
             chain.append(n)
         cur = n.pred
-    if len(chain) < 3:
+    if not chain:
         return False
-    h = np.array([n.bot - n.top + 1 for n in chain], float)
-    gap = abs(chain[0].top + chain[0].bot - chain[-1].top - chain[-1].bot) / 2
-    return bool(h.max() - np.median(h) >= gap and gap > _THIN_MARGIN)
+    seam = chain[-1].x  # a raiz da floresta nasce na costura
+    near = [n for n in chain if abs(n.x - seam) <= _SEAM_WIN]
+    far = [n for n in chain if abs(n.x - seam) > _SEAM_WIN]
+    if not far:
+        return False
+    base = float(np.median([n.bot - n.top + 1 for n in far]))
+    # desnível entre os topos das duas pautas, medidos fora da janela
+    gap = abs(float(np.median([n.top for n in far])) - src_top)
+    if gap <= _THIN_MARGIN:
+        return False
+    # intervalo que cobre o desnível inteiro: da pauta de origem à de destino
+    return any((n.bot - n.top + 1) >= base + gap for n in near)
 
 
 def _project_forest(
@@ -1070,6 +1085,15 @@ def _project_forest(
     yc0 = int(round(float(t_src.paths[k_src, seam_col - t_src.x0])))
     limit_dst = w if direction > 0 else -1
     nodes, tips = _trace_ink_run(ink, yc0, seam_col, limit_dst, direction, band_in_edge)
+    # traça de volta na origem: preserva só colunas conectadas ao traço na costura
+    limit_src = -1 if direction > 0 else w
+    stop_src = band_out_edge - 1 if direction > 0 else band_out_edge + 1
+    nodes_s, tips_s = _trace_ink_run(
+        ink, yc0, seam_col, limit_src, -direction, stop_src
+    )
+    # topo da pauta de origem: a floresta de volta, fora da janela da costura
+    far_s = [n.top for n in nodes_s if abs(n.x - seam_col) > _SEAM_WIN]
+    src_top = float(np.median(far_s)) if far_s else None
     stop_dst = max(need, bulk_dst + _GUTTER_EDGE_RUN + 1) if has_dst else need + 1
     qual_dst = set()
     qual_tips = []
@@ -1094,7 +1118,11 @@ def _project_forest(
                 break
         if not clean:
             continue
-        if require_bend and _seam_bridge(nodes, tid, band_in_edge, direction):
+        if (
+            require_bend
+            and src_top is not None
+            and _seam_bridge(nodes, tid, band_in_edge, direction, src_top)
+        ):
             continue
         qual_tips.append(tid)
         cur = tid
@@ -1104,12 +1132,6 @@ def _project_forest(
     if not qual_dst:
         return [], []
     visited_dst = [nodes[i].visit() for i in sorted(qual_dst)]
-    # traça de volta na origem: preserva só colunas conectadas ao traço na costura
-    limit_src = -1 if direction > 0 else w
-    stop_src = band_out_edge - 1 if direction > 0 else band_out_edge + 1
-    nodes_s, tips_s = _trace_ink_run(
-        ink, yc0, seam_col, limit_src, -direction, stop_src
-    )
     if require_src_out:
         # a saída do lado de origem é provada a partir das pontas qualificadas:
         # uma dobra pode sair da faixa por uma linha diferente da pauta de onde

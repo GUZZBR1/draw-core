@@ -1715,3 +1715,42 @@ def test_a_gradual_bend_across_the_seam_survives_on_a_sparse_pair():
     # os ombros das outras pautas continuam saindo
     assert (out[80:86, 562:596] > 0.5).sum() == 0
     assert (out[88:94, 606:638] > 0.5).sum() == 0
+
+
+def _bend_across_offset_seam(mark_shift=None):
+    """Traço de 6 px que dobra 8 px na costura de metades defasadas (par
+    esparso). `mark_shift` põe dois cruzamentos verticais de caneta, longe da
+    costura, deslocados do nível da pauta em `mark_shift` linhas."""
+    prob = _fold_page(split_x=600, offset_r=8)
+    y = 280
+    prob[y : y + 6, 530:599] = 0.95
+    for i, x in enumerate(range(599, 604)):
+        dy = min(8, 2 * i)
+        prob[y + dy : y + dy + 6, x] = 0.95
+    prob[y + 8 : y + 14, 603:660] = 0.95
+    if mark_shift is not None:
+        for x in (575, 620):
+            prob[y - 10 + mark_shift : y + 16 + mark_shift, x : x + 2] = 0.95
+    return prob
+
+
+@pytest.mark.parametrize("mark_shift", [None, 0, 2, 4, 7])
+def test_pen_crossings_away_from_the_seam_do_not_erase_a_genuine_bend(mark_shift):
+    """Review #139 (_seam_bridge): um cruzamento alto longe da costura não liga
+    as pautas defasadas, então não é evidência de remendo de sombra. A dobra
+    inteira (468 px) fica, com ou sem cruzamentos, qualquer que seja o
+    deslocamento deles em relação à pauta."""
+    prob = _bend_across_offset_seam(mark_shift)
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[280:294, 562:638] > 0.5).sum() >= 468
+
+
+def test_a_wide_shadow_patch_joining_offset_rules_does_not_pass_as_a_bend():
+    """Review #139: remendo largo (40 col) de 12 px ligando pautas defasadas
+    8 px. A largura sobe a mediana da espessura e escondia a ponte; a ponte
+    se mede onde as pautas se ligam, não contra a mediana do trecho."""
+    prob = _fold_page(offset_r=8, left_sh=13, right_sh=13, split_x=600)
+    prob[80:92, 580:620] = 0.97
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[80:96, 562:578] > 0.5).sum() == 0
+    assert (out[80:96, 622:638] > 0.5).sum() == 0
