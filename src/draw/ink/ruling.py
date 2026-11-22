@@ -782,6 +782,11 @@ class _PageFold:
         if not aligned:
             raise ValueError("carga do vinco desalinhada")
 
+    @property
+    def valid(self):
+        """(K, X) bool por trilha: caminho dentro da folha — campo da _Pass."""
+        return [p.valid for p in self.passes]
+
     def check_joined(self, joined_list):
         """Confere a saída do veredito: uma máscara por trilha, no shape da grossa."""
         ok = len(joined_list) == len(self.thick) and all(
@@ -789,6 +794,27 @@ class _PageFold:
         )
         if not ok:
             raise ValueError("veredito do vinco desalinhado com a carga")
+
+
+class _PairedVotes(NamedTuple):
+    """Decisão de voto e veto do conjunto pareado numa faixa."""
+
+    ok_l: np.ndarray | None  # voto esquerdo apos veto/borda (None: sem lado)
+    ok_r: np.ndarray | None
+    vl: np.ndarray | None  # voto cru esquerdo (serve ao resgate por traco)
+    vr: np.ndarray | None
+    cl: np.ndarray | None  # veto de ombro esquerdo (None: sem referencia)
+    cr: np.ndarray | None
+
+
+class _FoldJob(NamedTuple):
+    """Trabalho do vinco numa passada: a carga, a tinta e a saída parcial."""
+
+    ink: np.ndarray  # mapa binário (H, W)
+    page: _PageFold  # carga conferida na fronteira
+    joined: list  # máscaras (K, X) — os blocos escrevem aqui
+    h_run: int  # altura típica da pauta
+    need: int  # janela de voto exigida
 
 
 def _trace_ink_run(ink, yc0, seam_col, limit, direction, stop_col, clip_r=2 * _R):
@@ -1130,6 +1156,250 @@ def _project_line(
     return True
 
 
+def _verdict_paired(side_l, side_r, kl, kr, l_vot, r_vot, l_edge, r_edge):
+    """Voto + veto de ombro do conjunto pareado (ou trilha única) na faixa.
+
+    Bloco puro de decisão — não olha tinta, não marca nada. `ok_*` é o voto
+    após o veto e as bordas; `v*`, `c*` seguem crus para o resgate por traço.
+    """
+    vl = side_l.vote[kl] if l_vot else None
+    vr = side_r.vote[kr] if r_vot else None
+    # o ombro de referência mede-se no MESMO conjunto do veredito: para o
+    # par, só as linhas pareadas (a linha sem par decide pelo conjunto do
+    # próprio lado, na seção de sem-par)
+    has_pl = vl is not None and int(vl.sum()) > _min_bulk(kl.size)
+    has_pr = vr is not None and int(vr.sum()) > _min_bulk(kl.size)
+    cl = (
+        side_l.ext[kl] > _bulk_ext(side_l.ext[kl][vl]) + _GUTTER_EDGE_RUN
+        if has_pl
+        else None
+    )
+    cr = (
+        side_r.ext[kr] > _bulk_ext(side_r.ext[kr][vr]) + _GUTTER_EDGE_RUN
+        if has_pr
+        else None
+    )
+    ok_l = vl.copy() if vl is not None else None
+    ok_r = vr.copy() if vr is not None else None
+    if vl is not None and vr is not None:
+        # o veto de ombro só fecha o par quando os dois lados têm
+        # referência (um ombro unilateral não veta)
+        if has_pl and has_pr:
+            ok_l &= cl
+            ok_r &= cr
+    else:
+        # lado único observável: borda de imagem aceita o voto com o veto do
+        # próprio ombro; cauda curta decide linha a linha pelo traço conectado
+        if vl is not None and r_edge and cl is not None:
+            ok_l &= cl
+        if vr is not None and l_edge and cr is not None:
+            ok_r &= cr
+    if l_edge and r_edge:
+        # nenhum lado observável: sem evidência não há isenção — sombra
+        # cobrindo o crop inteiro sai por completo
+        ok_l = ok_r = np.zeros(kl.size, bool)
+    else:
+        if l_edge and ok_l is None:
+            ok_l = np.ones(kl.size, bool)
+        if r_edge and ok_r is None:
+            ok_r = np.ones(kl.size, bool)
+    return _PairedVotes(ok_l, ok_r, vl, vr, cl, cr)
+
+
+def _mark_paired(job, a, b, i_l, i_r, kl, kr, pv, side_l, side_r):
+    """Trecho decidido por voto/borda: marca a faixa e resgata dobras.
+
+    Protege o trecho inteiro da faixa nas linhas que passaram nos dois
+    lados; linha que passou só num lado (dobra saindo pela pauta vizinha)
+    ainda é verificada pelo traço conectado de `_project_line`.
+    """
+    tracks, valid_list, joined = job.page.tracks, job.page.valid, job.joined
+    cont = pv.ok_l & pv.ok_r
+    if i_l == i_r:
+        t = tracks[i_l]
+        joined[i_l][kl, a - t.x0 : b - t.x0] |= cont[:, None]
+        if pv.vl is not None:
+            for idx_c in np.flatnonzero(~cont & pv.vl):
+                if pv.cl is None or pv.cl[idx_c]:
+                    _project_line(
+                        job.ink,
+                        tracks,
+                        valid_list,
+                        joined,
+                        i_l,
+                        kl[idx_c],
+                        1,
+                        a,
+                        b,
+                        job.h_run,
+                        job.need,
+                        i_l,
+                        side_r.has_bulk,
+                        side_r.bulk,
+                        seam_override=a,
+                    )
+        if pv.vr is not None:
+            for idx_c in np.flatnonzero(~cont & pv.vr):
+                if pv.cr is None or pv.cr[idx_c]:
+                    _project_line(
+                        job.ink,
+                        tracks,
+                        valid_list,
+                        joined,
+                        i_l,
+                        kr[idx_c],
+                        -1,
+                        a,
+                        b,
+                        job.h_run,
+                        job.need,
+                        i_l,
+                        side_l.has_bulk,
+                        side_l.bulk,
+                        seam_override=b - 1,
+                    )
+    else:
+        t_l, t_r = tracks[i_l], tracks[i_r]
+        joined[i_l][kl, a - t_l.x0 :] |= cont[:, None]
+        joined[i_r][kr, : b - t_r.x0] |= cont[:, None]
+        # dobra dentro da faixa: passou num lado e falhou no outro (esq <-> dir)
+        if pv.vl is not None and pv.vr is not None:
+            for idx_c in np.flatnonzero(~cont & pv.vl):
+                if pv.cl is None or pv.cl[idx_c]:
+                    _project_line(
+                        job.ink,
+                        tracks,
+                        valid_list,
+                        joined,
+                        i_l,
+                        kl[idx_c],
+                        1,
+                        a,
+                        b,
+                        job.h_run,
+                        job.need,
+                        i_r,
+                        side_r.has_bulk,
+                        side_r.bulk,
+                    )
+            for idx_c in np.flatnonzero(~cont & pv.vr):
+                if pv.cr is None or pv.cr[idx_c]:
+                    _project_line(
+                        job.ink,
+                        tracks,
+                        valid_list,
+                        joined,
+                        i_r,
+                        kr[idx_c],
+                        -1,
+                        a,
+                        b,
+                        job.h_run,
+                        job.need,
+                        i_l,
+                        side_l.has_bulk,
+                        side_l.bulk,
+                    )
+
+
+def _verdict_short_tail(
+    job, a, b, i_l, i_r, kl, kr, pv, side_l, side_r, l_short, r_short
+):
+    """Cauda curta: lado sem janela decide linha a linha pelo traço.
+
+    O lado sem espaço para a janela de voto é provado pelo traço conectado
+    a partir do limite da faixa (`require_src_out` prova também a saída do
+    outro lado, cobrindo o resgate de linha reprovada só no voto).
+    """
+    tracks, valid_list, joined = job.page.tracks, job.page.valid, job.joined
+    for idx_c in range(kl.size):
+        l_ok = pv.ok_l[idx_c] if pv.ok_l is not None else None
+        r_ok = pv.ok_r[idx_c] if pv.ok_r is not None else None
+        if r_short:
+            l_resc = pv.vl is not None and not pv.vl[idx_c]
+            if l_ok is False and not l_resc:
+                # veto de ombro fechado: não traça nem marca
+                continue
+            r_ok = _project_line(
+                job.ink,
+                tracks,
+                valid_list,
+                joined,
+                i_l,
+                kl[idx_c],
+                1,
+                a,
+                b,
+                job.h_run,
+                job.need,
+                i_dst=(i_r if i_l != i_r else i_l),
+                has_d=side_r.has_bulk,
+                bulk_d=side_r.bulk,
+                require_src_out=l_short or l_resc,
+                seam_override=a,
+            )
+            if l_short or l_resc:
+                l_ok = r_ok
+        elif l_short:
+            r_resc = pv.vr is not None and not pv.vr[idx_c]
+            if r_ok is False and not r_resc:
+                continue
+            l_ok = _project_line(
+                job.ink,
+                tracks,
+                valid_list,
+                joined,
+                i_l if i_l == i_r else i_r,
+                (kl if i_l == i_r else kr)[idx_c],
+                -1,
+                a,
+                b,
+                job.h_run,
+                job.need,
+                i_dst=i_l,
+                has_d=side_l.has_bulk,
+                bulk_d=side_l.bulk,
+                require_src_out=r_resc,
+                seam_override=b - 1,
+            )
+            if r_resc:
+                r_ok = l_ok
+        # manter exige os dois lados; a marcação já veio do traço
+
+
+def _verdict_unmatched(job, a, b, i_l, i_r, kl, kr, side_l, side_r):
+    """Linhas sem par na divisa: cada uma decide pelo traço do destino.
+
+    O ombro da origem é provisório — um traço com comprimento de ombro pode
+    continuar em branco (ombro de verdade não passa do veto por ramo).
+    """
+    if i_l == i_r:
+        return
+    tracks, valid_list, joined = job.page.tracks, job.page.valid, job.joined
+    for i_s, i_d, matched_s, has_d, b_d, d in (
+        (i_l, i_r, kl, side_r.has_bulk, side_r.bulk, 1),
+        (i_r, i_l, kr, side_l.has_bulk, side_l.bulk, -1),
+    ):
+        unmatched = np.setdiff1d(np.arange(tracks[i_s].paths.shape[0]), matched_s)
+        for k in unmatched:
+            _project_line(
+                job.ink,
+                tracks,
+                valid_list,
+                joined,
+                i_s,
+                k,
+                d,
+                a,
+                b,
+                job.h_run,
+                job.need,
+                i_d,
+                has_d,
+                b_d,
+            )
+
+
 def _joined_through_bands(page, gutter_full, ink, h_run):
     """Lista de máscaras (K, X): trecho da linha na faixa que continua grosso fora dela.
 
@@ -1139,7 +1409,6 @@ def _joined_through_bands(page, gutter_full, ink, h_run):
     colunas efetivamente visitadas por caminhos com continuação qualificada.
     """
     tracks, thick, matches = page.tracks, page.thick, page.matches
-    valid_list = [p.valid for p in page.passes]
     joined = [np.zeros_like(raw) for raw in thick]
     edges = np.flatnonzero(
         np.diff(np.concatenate([[0], gutter_full.view(np.uint8), [0]]))
@@ -1148,6 +1417,7 @@ def _joined_through_bands(page, gutter_full, ink, h_run):
         return joined
     w = gutter_full.size
     need = _GUTTER_VOTE_W
+    job = _FoldJob(ink, page, joined, h_run, need)
     for a, b in zip(edges[::2], edges[1::2], strict=True):
         over = [i for i, t in enumerate(tracks) if t.x0 < b and t.x1 > a]
         if not over:
@@ -1169,243 +1439,41 @@ def _joined_through_bands(page, gutter_full, ink, h_run):
 
         side_l, _ = _side_bulks(tracks, thick, matches, i_l, a, b, need)
         _, side_r = _side_bulks(tracks, thick, matches, i_r, a, b, need)
-        cols_l, vote_l, ext_l, has_l, bulk_l = side_l
-        cols_r, vote_r, ext_r, has_r, bulk_r = side_r
         # Evidência por lado: janela de voto (>= need colunas), cauda curta
         # (espaço observável — trilha ou fora dela — sem janela: a continuação
         # tem de sair do traço, nunca de voto unilateral) ou borda da imagem
         # (nada observável).
-        l_vot = cols_l.shape[1] >= need
-        r_vot = cols_r.shape[1] >= need
+        l_vot = side_l.cols.shape[1] >= need
+        r_vot = side_r.cols.shape[1] >= need
         l_edge = a == 0
         r_edge = b == w
         l_short = not l_vot and not l_edge
         r_short = not r_vot and not r_edge
 
-        # 1. Linhas pareadas (ou trilha única)
+        # 1. Linhas pareadas (ou trilha única): o bloco de veredito decide,
+        #    os blocos de marcação executam
         if kl.size > 0:
-            vl = vote_l[kl] if l_vot else None
-            vr = vote_r[kr] if r_vot else None
-            # o ombro de referência mede-se no MESMO conjunto do veredito:
-            # para o par, só as linhas pareadas (a linha sem par decide pelo
-            # conjunto do próprio lado, na seção 2)
-            has_pl = vl is not None and int(vl.sum()) > _min_bulk(kl.size)
-            has_pr = vr is not None and int(vr.sum()) > _min_bulk(kl.size)
-            cl = (
-                ext_l[kl] > _bulk_ext(ext_l[kl][vl]) + _GUTTER_EDGE_RUN
-                if has_pl
-                else None
-            )
-            cr = (
-                ext_r[kr] > _bulk_ext(ext_r[kr][vr]) + _GUTTER_EDGE_RUN
-                if has_pr
-                else None
-            )
-            ok_l = vl.copy() if vl is not None else None
-            ok_r = vr.copy() if vr is not None else None
-            if vl is not None and vr is not None:
-                # o veto de ombro só fecha o par quando os dois lados têm
-                # referência (um ombro unilateral não veta)
-                if has_pl and has_pr:
-                    ok_l &= cl
-                    ok_r &= cr
-            else:
-                # lado único observável: borda de imagem aceita o voto com o
-                # veto do próprio ombro; cauda curta decide linha a linha pelo
-                # traço conectado (abaixo)
-                if vl is not None and r_edge and cl is not None:
-                    ok_l &= cl
-                if vr is not None and l_edge and cr is not None:
-                    ok_r &= cr
-            if l_edge and r_edge:
-                # nenhum lado observável: sem evidência não há isenção —
-                # sombra cobrindo o crop inteiro sai por completo
-                ok_l = ok_r = np.zeros(kl.size, bool)
-            else:
-                if l_edge and ok_l is None:
-                    ok_l = np.ones(kl.size, bool)
-                if r_edge and ok_r is None:
-                    ok_r = np.ones(kl.size, bool)
-
+            pv = _verdict_paired(side_l, side_r, kl, kr, l_vot, r_vot, l_edge, r_edge)
             if not (l_short or r_short):
-                # os dois lados decididos por voto/borda: protege o trecho
-                # inteiro da faixa, e a dobra (traço que sai pela pauta vizinha)
-                # ainda é verificada pelo traço
-                cont = ok_l & ok_r
-                if i_l == i_r:
-                    t = tracks[i_l]
-                    joined[i_l][kl, a - t.x0 : b - t.x0] |= cont[:, None]
-                    if vl is not None:
-                        for idx_c in np.flatnonzero(~cont & vl):
-                            if cl is None or cl[idx_c]:
-                                _project_line(
-                                    ink,
-                                    tracks,
-                                    valid_list,
-                                    joined,
-                                    i_l,
-                                    kl[idx_c],
-                                    1,
-                                    a,
-                                    b,
-                                    h_run,
-                                    need,
-                                    i_l,
-                                    has_r,
-                                    bulk_r,
-                                    seam_override=a,
-                                )
-                    if vr is not None:
-                        for idx_c in np.flatnonzero(~cont & vr):
-                            if cr is None or cr[idx_c]:
-                                _project_line(
-                                    ink,
-                                    tracks,
-                                    valid_list,
-                                    joined,
-                                    i_l,
-                                    kr[idx_c],
-                                    -1,
-                                    a,
-                                    b,
-                                    h_run,
-                                    need,
-                                    i_l,
-                                    has_l,
-                                    bulk_l,
-                                    seam_override=b - 1,
-                                )
-                else:
-                    t_l, t_r = tracks[i_l], tracks[i_r]
-                    joined[i_l][kl, a - t_l.x0 :] |= cont[:, None]
-                    joined[i_r][kr, : b - t_r.x0] |= cont[:, None]
-                    # dobra dentro da faixa: passou num lado e falhou no outro (esq <-> dir)
-                    if vl is not None and vr is not None:
-                        for idx_c in np.flatnonzero(~cont & vl):
-                            if cl is None or cl[idx_c]:
-                                _project_line(
-                                    ink,
-                                    tracks,
-                                    valid_list,
-                                    joined,
-                                    i_l,
-                                    kl[idx_c],
-                                    1,
-                                    a,
-                                    b,
-                                    h_run,
-                                    need,
-                                    i_r,
-                                    has_r,
-                                    bulk_r,
-                                )
-                        for idx_c in np.flatnonzero(~cont & vr):
-                            if cr is None or cr[idx_c]:
-                                _project_line(
-                                    ink,
-                                    tracks,
-                                    valid_list,
-                                    joined,
-                                    i_r,
-                                    kr[idx_c],
-                                    -1,
-                                    a,
-                                    b,
-                                    h_run,
-                                    need,
-                                    i_l,
-                                    has_l,
-                                    bulk_l,
-                                )
+                _mark_paired(job, a, b, i_l, i_r, kl, kr, pv, side_l, side_r)
             else:
-                # cauda curta: o lado sem janela é provado pelo traço conectado
-                # a partir do limite da faixa (com require_src_out ele prova
-                # também a saída do outro lado, o que cobre o resgate de uma
-                # linha reprovada só no voto)
-                for idx_c in range(kl.size):
-                    l_ok = ok_l[idx_c] if ok_l is not None else None
-                    r_ok = ok_r[idx_c] if ok_r is not None else None
-                    if r_short:
-                        l_resc = vl is not None and not vl[idx_c]
-                        if l_ok is False and not l_resc:
-                            # veto de ombro fechado: não traça nem marca
-                            continue
-                        r_ok = _project_line(
-                            ink,
-                            tracks,
-                            valid_list,
-                            joined,
-                            i_l,
-                            kl[idx_c],
-                            1,
-                            a,
-                            b,
-                            h_run,
-                            need,
-                            i_dst=(i_r if i_l != i_r else i_l),
-                            has_d=has_r,
-                            bulk_d=bulk_r,
-                            require_src_out=l_short or l_resc,
-                            seam_override=a,
-                        )
-                        if l_short or l_resc:
-                            l_ok = r_ok
-                    elif l_short:
-                        r_resc = vr is not None and not vr[idx_c]
-                        if r_ok is False and not r_resc:
-                            continue
-                        l_ok = _project_line(
-                            ink,
-                            tracks,
-                            valid_list,
-                            joined,
-                            i_l if i_l == i_r else i_r,
-                            (kl if i_l == i_r else kr)[idx_c],
-                            -1,
-                            a,
-                            b,
-                            h_run,
-                            need,
-                            i_dst=i_l,
-                            has_d=has_l,
-                            bulk_d=bulk_l,
-                            require_src_out=r_resc,
-                            seam_override=b - 1,
-                        )
-                        if r_resc:
-                            r_ok = l_ok
-                    # manter exige os dois lados; a marcação já veio do traço
+                _verdict_short_tail(
+                    job,
+                    a,
+                    b,
+                    i_l,
+                    i_r,
+                    kl,
+                    kr,
+                    pv,
+                    side_l,
+                    side_r,
+                    l_short,
+                    r_short,
+                )
 
         # 2. Linhas sem par na divisa (esq -> dir e dir -> esq)
-        if i_l != i_r:
-            for i_s, i_d, matched_s, has_d, b_d, d in (
-                (i_l, i_r, kl, has_r, bulk_r, 1),
-                (i_r, i_l, kr, has_l, bulk_l, -1),
-            ):
-                unmatched = np.setdiff1d(
-                    np.arange(tracks[i_s].paths.shape[0]), matched_s
-                )
-                for k in unmatched:
-                    # o veredito sai do traço do destino: o ombro da origem é
-                    # provisório — um traco com comprimento de ombro pode
-                    # continuar em branco (ombro de verdade não passa do veto
-                    # por ramo)
-                    _project_line(
-                        ink,
-                        tracks,
-                        valid_list,
-                        joined,
-                        i_s,
-                        k,
-                        d,
-                        a,
-                        b,
-                        h_run,
-                        need,
-                        i_d,
-                        has_d,
-                        b_d,
-                    )
+        _verdict_unmatched(job, a, b, i_l, i_r, kl, kr, side_l, side_r)
     return joined
 
 
