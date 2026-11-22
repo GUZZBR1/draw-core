@@ -724,12 +724,15 @@ class _Continuation(NamedTuple):
 
     `x`, `top`, `bot` localizam o ÚLTIMO intervalo grosso do caminho — a
     cauda fina onde o traço parou não decide pousio nem veto de ombro.
+    `tail` guarda o trecho grosso consecutivo que produziu esse intervalo
+    — é ele, não só o ponto final, que diz se a saída SEGUE uma pauta.
     """
 
     ext: int  # extensão grossa medida por `_extent` (não é contagem de colunas)
     x: int
     top: int
     bot: int
+    tail: tuple = ()  # (x, top, bot) das colunas grossas consecutivas do fim
 
 
 class _SideStats(NamedTuple):
@@ -805,6 +808,8 @@ class _PairedVotes(NamedTuple):
     vr: np.ndarray | None
     cl: np.ndarray | None  # veto de ombro esquerdo (None: sem referencia)
     cr: np.ndarray | None
+    has_pl: bool = False  # conjunto pareado sustenta referência própria (esq)
+    has_pr: bool = False
 
 
 class _FoldJob(NamedTuple):
@@ -881,16 +886,17 @@ def _trace_branch_out(ink, x_start, top0, bot0, limit, direction, h_run, need, s
     história grossa do outro.
     """
     h = ink.shape[0]
-    # (top, bot, hist, last_thick): cada caminho vivo carrega a sequência de
-    # espessura e a posição do último intervalo grosso — é ela, não a cauda
-    # fina, que responde ao veto de ombro
-    active = [(top0, bot0, (), None)]
-    ends = []  # (hist, last_thick) de cada caminho encerrado
+    # (top, bot, hist, last_thick, tail, last_tail): cada caminho vivo
+    # carrega a sequência de espessura, a posição do último intervalo
+    # grosso e o trecho grosso consecutivo que o produziu — é o trecho,
+    # não só o ponto final, que responde ao veto de ombro
+    active = [(top0, bot0, (), None, (), ())]
+    ends = []  # (hist, last_thick, last_tail) de cada caminho encerrado
     x = x_start
     for x in range(x_start + direction, limit, direction):
         col = ink[:, x]
         nxt = []
-        for pt, pb, hist, lt in active:
+        for pt, pb, hist, lt, tail, lt_tail in active:
             pc = (pt + pb) // 2
             lo, hi = max(0, pt), min(h, pb + 1)
             mine = -1  # último intervalo deste pai em nxt
@@ -902,41 +908,46 @@ def _trace_branch_out(ink, x_start, top0, bot0, limit, direction, h_run, need, s
                     top -= 1
                 while bot + 1 < h and col[bot + 1] and (bot + 1) - pc <= 2 * _R:
                     bot += 1
-                nxt.append((top, bot, hist, lt))
+                nxt.append((top, bot, hist, lt, tail, lt_tail))
                 mine = len(nxt) - 1
             if mine < 0:
-                ends.append((hist, lt))
+                ends.append((hist, lt, lt_tail))
         if not nxt:
             active = []
             break
-        active = []
-        seen = set()
-        for top, bot, hist, lt in nxt:
+        seen = {}
+        for top, bot, hist, lt, tail, lt_tail in nxt:
             thick = (bot - top + 1) > h_run + _THIN_MARGIN
             h2 = hist + (thick,)
+            tail2 = (tail + ((x, top, bot),))[-stop:] if thick else ()
             lt2 = (x, top, bot) if thick else lt
+            lt_tail2 = tail2 if thick else lt_tail
             if len(h2) >= need and (not h2[-1] or len(h2) >= stop):
-                ends.append((h2, lt2))
+                ends.append((h2, lt2, lt_tail2))
                 continue
-            state = (top, bot, h2, lt2)
+            state = (top, bot, h2, lt2, tail2, lt_tail2)
             # reencontros repetidos podem produzir estados idênticos: sem
             # dedup, cada cópia refaz o mesmo traço e dobra na próxima
-            # bifurcação (16 ciclos medidos: 65.536 caminhos, >2 s)
-            if state not in seen:
-                seen.add(state)
-                active.append(state)
+            # bifurcação (16 ciclos medidos: 65.536 caminhos, >2 s). A
+            # chave exclui o tail — em empate fica o trecho mais curto,
+            # que é o menos provável de fechar o veto de ombro
+            key = (top, bot, h2, lt2)
+            prev = seen.get(key)
+            if prev is None or len(lt_tail2) < len(prev[5]):
+                seen[key] = state
+        active = list(seen.values())
         if not active:
             break
-    for _top, _bot, hist, lt in active:
-        ends.append((hist, lt))
+    for _top, _bot, hist, lt, _tail, lt_tail in active:
+        ends.append((hist, lt, lt_tail))
     out = []
-    for hist, lt in ends:
+    for hist, lt, lt_tail in ends:
         if len(hist) < need or lt is None:
             continue
         arr = np.array(hist, bool)[None, :]
         if arr[:, :need].mean() < _VOTE_FRAC:
             continue
-        out.append(_Continuation(int(_extent(arr, need)[0]), *lt))
+        out.append(_Continuation(int(_extent(arr, need)[0]), *lt, lt_tail))
     return list(dict.fromkeys(out))
 
 
@@ -956,31 +967,74 @@ def _mark_visited_track(joined_track, track, valid_track, visited):
         joined_track[hit, lx] = True
 
 
-def _lands_on_track(track, valid, x, top, bot):
-    """O intervalo (top, bot) na coluna x cobre algum caminho válido da trilha?"""
-    if not (track.x0 <= x < track.x1):
-        return False
-    lx = x - track.x0
-    return bool(
-        (
-            valid[:, lx]
-            & (track.paths[:, lx] >= top - 2)
-            & (track.paths[:, lx] <= bot + 2)
-        ).any()
-    )
-
-
-def _lands_on_ruling(tracks, valid_list, x, top, bot):
-    """O terminal em x cobre pauta válida da trilha que CONTÉM a coluna x?
+def _ruling_hit(tracks, valid_list, x, top, bot):
+    """(i, k) do caminho válido coberto por (top, bot) na coluna x, ou None.
 
     O terminal pode sair da trilha da faixa quando ela termina antes da
-    divisa: um ombro que atravessa a costura continua sendo ombro — a
-    trilha certa é a da coluna x, não a da faixa.
+    divisa: a trilha certa é a da coluna x, não a da faixa. Devolve o
+    caminho coberto mais próximo do centro do intervalo.
     """
     for i, t in enumerate(tracks):
         if t.x0 <= x < t.x1:
-            return _lands_on_track(t, valid_list[i], x, top, bot)
-    return False
+            lx = x - t.x0
+            hit = np.flatnonzero(
+                valid_list[i][:, lx]
+                & (t.paths[:, lx] >= top - 2)
+                & (t.paths[:, lx] <= bot + 2)
+            )
+            if not hit.size:
+                return None
+            mid = (top + bot) / 2
+            return i, int(hit[np.argmin(np.abs(t.paths[hit, lx] - mid))])
+    return None
+
+
+def _rule_run(tracks, i, k, tail):
+    """Colunas grossas consecutivas do fim de `tail` que seguem a pauta k.
+
+    A pauta segue por y(x): dentro da trilha, `paths[k, x-x0]`; fora, o
+    valor extrapolado na borda (`paths[k, 0]`/`[-1]`) — é o que mantém o
+    veto do ombro ALINHADO atravessando a costura e, ao mesmo tempo,
+    libera a dobra que só pousa na pauta deslocada: o ombro segue a pauta
+    em todas as colunas da saída, a dobra só nas últimas.
+    """
+    t = tracks[i]
+    run = 0
+    for x, ctop, cbot in reversed(tail):
+        if t.x0 <= x < t.x1:
+            y = t.paths[k, x - t.x0]
+        elif x < t.x0:
+            y = t.paths[k, 0]
+        else:
+            y = t.paths[k, -1]
+        if ctop - 2 <= y <= cbot + 2:
+            run += 1
+        else:
+            break
+    return run
+
+
+def _seam_bridge(nodes, tid, band_edge, direction):
+    """O caminho cruza a divisa por um remendo alto (sombra) ou por dobra?
+
+    Uma dobra distribui o desnível entre as pautas ao longo das colunas: em
+    nenhuma coluna o intervalo abrange a transição inteira. Um remendo de
+    sombra a concentra: a ponte precisa cobrir o gap vertical todo numa
+    coluna só, então a altura do intervalo chega a sombra+gap. Compara o
+    pico de altura da cadeia in-band com o desnível percorrido.
+    """
+    chain = []
+    cur = tid
+    while cur != -1:
+        n = nodes[cur]
+        if (band_edge - n.x) * direction > 0:
+            chain.append(n)
+        cur = n.pred
+    if len(chain) < 3:
+        return False
+    h = np.array([n.bot - n.top + 1 for n in chain], float)
+    gap = abs(chain[0].top + chain[0].bot - chain[-1].top - chain[-1].bot) / 2
+    return bool(h.max() - np.median(h) >= gap and gap > _THIN_MARGIN)
 
 
 def _project_forest(
@@ -999,6 +1053,7 @@ def _project_forest(
     has_dst=False,
     bulk_dst=0,
     require_src_out=False,
+    require_bend=False,
 ):
     """(visited_src, visited_dst): listas de `_Visit`, floresta + ramos filtrados.
 
@@ -1028,15 +1083,18 @@ def _project_forest(
         # irmão de sombra não veta o ramo que termina em espaço em branco
         clean = False
         for cont in paths:
-            shadow = (
-                has_dst
-                and cont.ext <= bulk_dst + _GUTTER_EDGE_RUN
-                and _lands_on_ruling(tracks, valid_list, cont.x, cont.top, cont.bot)
+            hit = None
+            if has_dst and cont.ext <= bulk_dst + _GUTTER_EDGE_RUN:
+                hit = _ruling_hit(tracks, valid_list, cont.x, cont.top, cont.bot)
+            shadow = hit is not None and _rule_run(tracks, *hit, cont.tail) >= min(
+                cont.ext, need
             )
             if not shadow:
                 clean = True
                 break
         if not clean:
+            continue
+        if require_bend and _seam_bridge(nodes, tid, band_in_edge, direction):
             continue
         qual_tips.append(tid)
         cur = tid
@@ -1123,6 +1181,7 @@ def _project_line(
     has_d=False,
     bulk_d=0,
     require_src_out=False,
+    require_bend=False,
     seam_override=None,
 ):
     """Projeta uma linha pela costura via `_project_forest` e marca só visitadas.
@@ -1155,6 +1214,7 @@ def _project_line(
         has_d,
         bulk_d,
         require_src_out,
+        require_bend,
     )
     if not v_dst:
         return False
@@ -1198,18 +1258,19 @@ def _verdict_paired(side_l, side_r, kl, kr, l_vot, r_vot, l_edge, r_edge):
     ok_l = vl.copy() if vl is not None else None
     ok_r = vr.copy() if vr is not None else None
     if vl is not None and vr is not None:
-        if cl is not None and cr is not None:
+        if not (has_pl or has_pr):
+            # par esparso: nenhum conjunto pareado sustenta referência
+            # própria. As refs de fallback do lado inteiro medem o ombro
+            # para o veto/traço, mas não autorizam o voto cru — uma linha
+            # pode votar nas bordas e ainda estar desconectada no meio da
+            # faixa. A linha votada é provada pelo traço (_mark_paired)
+            ok_l = np.zeros(kl.size, bool)
+            ok_r = np.zeros(kl.size, bool)
+        elif cl is not None and cr is not None:
             # o veto de ombro só fecha o par quando os dois lados têm
             # referência (um ombro unilateral não veta)
             ok_l &= cl
             ok_r &= cr
-        elif cl is None and cr is None:
-            # nenhum lado mede referência comum (pares esparsos sem
-            # padrão de ombro): o voto cru não decide — um remendo de
-            # sombra votaria nos dois lados e salvaria a faixa inteira.
-            # A linha votada é provada pelo traço (resgate em _mark_paired)
-            ok_l = np.zeros(kl.size, bool)
-            ok_r = np.zeros(kl.size, bool)
     else:
         # lado único observável: borda de imagem aceita o voto com o veto do
         # próprio ombro; cauda curta decide linha a linha pelo traço conectado
@@ -1226,7 +1287,7 @@ def _verdict_paired(side_l, side_r, kl, kr, l_vot, r_vot, l_edge, r_edge):
             ok_l = np.ones(kl.size, bool)
         if r_edge and ok_r is None:
             ok_r = np.ones(kl.size, bool)
-    return _PairedVotes(ok_l, ok_r, vl, vr, cl, cr)
+    return _PairedVotes(ok_l, ok_r, vl, vr, cl, cr, has_pl, has_pr)
 
 
 def _mark_paired(job, a, b, i_l, i_r, kl, kr, pv, side_l, side_r):
@@ -1243,7 +1304,7 @@ def _mark_paired(job, a, b, i_l, i_r, kl, kr, pv, side_l, side_r):
         joined[i_l][kl, a - t.x0 : b - t.x0] |= cont[:, None]
         if pv.vl is not None:
             for idx_c in np.flatnonzero(~cont & pv.vl):
-                if pv.cl is None or pv.cl[idx_c]:
+                if pv.cl is None or pv.cl[idx_c] or not pv.has_pl:
                     _project_line(
                         job.ink,
                         tracks,
@@ -1263,7 +1324,7 @@ def _mark_paired(job, a, b, i_l, i_r, kl, kr, pv, side_l, side_r):
                     )
         if pv.vr is not None:
             for idx_c in np.flatnonzero(~cont & pv.vr):
-                if pv.cr is None or pv.cr[idx_c]:
+                if pv.cr is None or pv.cr[idx_c] or not pv.has_pr:
                     _project_line(
                         job.ink,
                         tracks,
@@ -1287,8 +1348,14 @@ def _mark_paired(job, a, b, i_l, i_r, kl, kr, pv, side_l, side_r):
         joined[i_r][kr, : b - t_r.x0] |= cont[:, None]
         # dobra dentro da faixa: passou num lado e falhou no outro (esq <-> dir)
         if pv.vl is not None and pv.vr is not None:
+            # o ombro do destino é medido no conjunto pareado, não nas
+            # linhas soltas do lado — um par esparso (sem ref própria) não
+            # pode morrer pelo ombro de pautas que não são as dele; nesse
+            # caso a ponte/bend decide por geometria
+            bulk_pr = _bulk_ext(side_r.ext[kr][pv.vr]) if pv.has_pr else 0
+            bulk_pl = _bulk_ext(side_l.ext[kl][pv.vl]) if pv.has_pl else 0
             for idx_c in np.flatnonzero(~cont & pv.vl):
-                if pv.cl is None or pv.cl[idx_c]:
+                if pv.cl is None or pv.cl[idx_c] or not pv.has_pl:
                     _project_line(
                         job.ink,
                         tracks,
@@ -1302,11 +1369,12 @@ def _mark_paired(job, a, b, i_l, i_r, kl, kr, pv, side_l, side_r):
                         job.h_run,
                         job.need,
                         i_r,
-                        side_r.has_bulk,
-                        side_r.bulk,
+                        pv.has_pr,
+                        bulk_pr,
+                        require_bend=not pv.has_pr,
                     )
             for idx_c in np.flatnonzero(~cont & pv.vr):
-                if pv.cr is None or pv.cr[idx_c]:
+                if pv.cr is None or pv.cr[idx_c] or not pv.has_pr:
                     _project_line(
                         job.ink,
                         tracks,
@@ -1320,8 +1388,9 @@ def _mark_paired(job, a, b, i_l, i_r, kl, kr, pv, side_l, side_r):
                         job.h_run,
                         job.need,
                         i_l,
-                        side_l.has_bulk,
-                        side_l.bulk,
+                        pv.has_pl,
+                        bulk_pl,
+                        require_bend=not pv.has_pl,
                     )
 
 
@@ -1340,8 +1409,10 @@ def _verdict_short_tail(
         r_ok = pv.ok_r[idx_c] if pv.ok_r is not None else None
         if r_short:
             l_resc = pv.vl is not None and not pv.vl[idx_c]
-            if l_ok is False and not l_resc:
-                # veto de ombro fechado: não traça nem marca
+            if l_ok is False and not l_resc and (pv.has_pl or pv.has_pr):
+                # veto de ombro fechado: não traça nem marca. Par esparso
+                # (sem ref própria) tem ok zerado só para forçar a prova —
+                # o traço ainda tem de rodar
                 continue
             r_ok = _project_line(
                 job.ink,
@@ -1356,16 +1427,17 @@ def _verdict_short_tail(
                 job.h_run,
                 job.need,
                 i_dst=(i_r if i_l != i_r else i_l),
-                has_d=side_r.has_bulk,
-                bulk_d=side_r.bulk,
+                has_d=pv.has_pr,
+                bulk_d=(_bulk_ext(side_r.ext[kr][pv.vr]) if pv.has_pr else 0),
                 require_src_out=l_short or l_resc,
+                require_bend=not pv.has_pr,
                 seam_override=a,
             )
             if l_short or l_resc:
                 l_ok = r_ok
         elif l_short:
             r_resc = pv.vr is not None and not pv.vr[idx_c]
-            if r_ok is False and not r_resc:
+            if r_ok is False and not r_resc and (pv.has_pl or pv.has_pr):
                 continue
             l_ok = _project_line(
                 job.ink,
@@ -1380,9 +1452,10 @@ def _verdict_short_tail(
                 job.h_run,
                 job.need,
                 i_dst=i_l,
-                has_d=side_l.has_bulk,
-                bulk_d=side_l.bulk,
+                has_d=pv.has_pl,
+                bulk_d=(_bulk_ext(side_l.ext[kl][pv.vl]) if pv.has_pl else 0),
                 require_src_out=r_resc,
+                require_bend=not pv.has_pl,
                 seam_override=b - 1,
             )
             if r_resc:

@@ -1554,7 +1554,10 @@ def test_repeated_reunions_do_not_duplicate_paths(monkeypatch):
 def test_reunions_with_mixed_widths_stay_bounded(monkeypatch):
     """Review: o teste de dedup usava larguras iguais (estados idênticos se
     fundem). Com pauta fina + traço grosso as histórias diferem e o dedup
-    não funde — mede o trabalho que SOBREVIVE: linear, não 2^n."""
+    não funde — mede o trabalho que SOBREVIVE: linear, não 2^n.
+    `_extent` conta só quem passa no voto — `flatnonzero` roda uma vez por
+    estado ativo por coluna e mede a expansão inteira, incluindo ramos que
+    o voto rejeita depois."""
     calls = 0
     extent = ruling._extent
 
@@ -1563,7 +1566,16 @@ def test_reunions_with_mixed_widths_stay_bounded(monkeypatch):
         calls += 1
         return extent(arr, need)
 
+    scans = 0
+    flatnonzero = ruling.np.flatnonzero
+
+    def counting_scan(arr):
+        nonlocal scans
+        scans += 1
+        return flatnonzero(arr)
+
     monkeypatch.setattr(ruling, "_extent", counting)
+    monkeypatch.setattr(ruling.np, "flatnonzero", counting_scan)
     h, w = 90, 46
     ink = np.zeros((h, w), np.uint8)
     ink[40:42, :] = 1  # pauta fina (2 px)
@@ -1572,6 +1584,9 @@ def test_reunions_with_mixed_widths_stay_bounded(monkeypatch):
     paths = ruling._trace_branch_out(ink, 0, 40, 49, w - 1, 1, 3, 12, 33)
     assert paths
     assert calls <= 128  # ~2 por coluna observado; 2^22 estaria fora da mesa
+    # ~34 estados/coluna observados: a expansão pré-voto existe e é medida
+    # aqui — o cap é tripwire de regressão exponencial, não bound justo
+    assert scans <= 2048
 
 
 def test_thin_branch_after_reunion_does_not_borrow_thickness():
@@ -1636,3 +1651,67 @@ def test_a_shoulder_before_the_split_does_not_protect_the_right_fold():
     prob[160:166, 640:720] = 0.97  # traço grosso longo à direita da linha 2
     out = ruling.RulingFilter().apply(prob.copy())
     assert (out[:, 609:638] > 0.5).sum() == 0
+
+
+def test_a_stroke_bending_onto_offset_ruling_is_not_a_shoulder():
+    """Review: faixa [560,588) antes da divisa (600), pauta direita deslocada
+    8 px, ombros do lado da costura terminando em 599. Um traço de 6 px segue
+    a pauta esquerda e dobra para a pauta direita em 599-602: o veto de ombro
+    não pode olhar só o ponto final — só as colunas de pouso ficam na pauta,
+    o resto da saída é dobra, não ombro."""
+    prob = _fold_page(fa=560, fb=588, left_sh=13, right_sh=12, split_x=600, offset_r=8)
+    y = 280  # pauta esquerda k=5; a direita equivalente é y+8=288
+    prob[y : y + 6, 530:599] = 0.95
+    for i, x in enumerate(range(599, 604)):
+        dy = min(8, 2 * i)
+        prob[y + dy : y + dy + 6, x] = 0.95
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[280:286, 562:586] > 0.5).all()
+    others = out[:, 562:586] > 0.5
+    others[280:286, :] = False
+    assert others.sum() == 0
+
+
+def test_an_offset_bend_that_only_lands_is_still_a_shoulder():
+    """Controle do anterior: um ombro comum de 13 col que SEGUE a pauta até
+    depois da divisa continua vetado — a dobra libera o veto porque só
+    termina na pauta, não porque termina nela."""
+    prob = _fold_page(fa=560, fb=588, left_sh=13, right_sh=12, split_x=600, offset_r=0)
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[:, 562:586] > 0.5).sum() == 0
+
+
+def test_a_sparse_pair_with_an_in_fold_gap_is_not_protected_by_foreign_shoulder():
+    """Review: metades defasadas 8 px, só o par (0,0) emendado por remendo
+    escuro na costura. Ombros de 13 col nas linhas alternadas à esquerda —
+    o lado inteiro mede referência de fallback, mas o conjunto pareado não
+    sustenta a própria. Com gap de 7 col dentro da faixa na pauta direita,
+    o par está desconectado: o voto cru não decide, o traço encontra o gap."""
+    prob = _fold_page(offset_r=8, left_sh=13, right_sh=0, split_x=600)
+    prob[80:90, 598:602] = 0.97  # remendo ligando o par (0,0) na costura
+    prob[88:94, 640:653] = 0.95  # ombro de 13 col só na pauta direita do par
+    prob[88:94, 610:617] = 0  # gap de 7 col dentro da faixa na pauta direita
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[80:86, 562:596] > 0.5).sum() == 0
+    assert (out[88:94, 606:638] > 0.5).sum() == 0
+
+
+def test_a_gradual_bend_across_the_seam_survives_on_a_sparse_pair():
+    """Review: metades defasadas 8 px + ombros de 13 col — um traço de 6 px
+    numa pauta SEM ombro dobra gradualmente através da costura para a pauta
+    direita, estendendo 13 col além das bordas da faixa. O traço cria o único
+    par: sem referência própria, o ombro das pautas soltas não pode vetá-lo.
+    A dobra distribui o desnível ao longo das colunas — diferente do remendo
+    de sombra, que concentra o gap inteiro numa coluna."""
+    prob = _fold_page(offset_r=8, left_sh=13, right_sh=13, split_x=600)
+    y = 280  # pauta esquerda k=5 (ímpar, sem ombro); a direita é y+8=288
+    prob[y : y + 6, 547:597] = 0.95
+    for x in range(597, 604):
+        prob[y + (x - 597) : y + (x - 597) + 6, x] = 0.95
+    prob[288:294, 604:653] = 0.95
+    out = ruling.RulingFilter().apply(prob.copy())
+    assert (out[280:286, 562:596] > 0.5).all()
+    assert (out[288:294, 604:638] > 0.5).all()
+    # os ombros das outras pautas continuam saindo
+    assert (out[80:86, 562:596] > 0.5).sum() == 0
+    assert (out[88:94, 606:638] > 0.5).sum() == 0
