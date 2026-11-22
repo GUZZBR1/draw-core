@@ -572,16 +572,20 @@ def test_page_model_reacquires_partially_covered_stroke_crossing_printed_rule(
         worker.stop()
 
 
-def test_identity_recovery_budget_on_a4_grid():
-    """worker.py:236: alinhamento e avaliacao de identidade em grade A4 rodam fora do lock e < 10 ms."""
+def test_identity_recovery_budget_on_a4_grid(monkeypatch):
+    """worker.py:236 & test_page_model.py:575: avaliacao de identidade A4 com marcas em cantos opostos < 10 ms e fora do lock do worker."""
     shape = (1200, 850)
     ref = np.zeros(shape, dtype=np.uint8)
     ref[400:420, 300:350] = 255
     baseline = np.zeros(shape, dtype=bool)
+    # Marcas impressas em cantos opostos cobrindo quase toda a folha A4
+    baseline[10:15, 10:200] = True
     baseline[200:205, 100:700] = True
-    baseline[400:405, 250:300] = True
+    baseline[1180:1185, 650:840] = True
     candidate = np.zeros(shape, dtype=np.float32)
+    candidate[11:16, 11:201] = 0.95
     candidate[201:206, 101:701] = 0.95
+    candidate[1181:1186, 651:841] = 0.95
     candidate[401:421, 301:351] = 0.95
     visible = np.ones(shape, dtype=bool)
     worker_mod._evaluate_page_identity(ref, baseline, candidate, visible, 0.7)
@@ -591,6 +595,49 @@ def test_identity_recovery_budget_on_a4_grid():
     per_pass_ms = (time.monotonic() - start) / 20 * 1000
     assert res[0] is True
     assert per_pass_ms < 10.0
+
+    # Verifica na trabalhadora real que _evaluate_page_identity roda fora de _condition
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    entered = threading.Event()
+    release = threading.Event()
+    orig_eval = worker_mod._evaluate_page_identity
+
+    def _hooked_eval(*args, **kwargs):
+        entered.set()
+        release.wait(timeout=5.0)
+        return orig_eval(*args, **kwargs)
+
+    monkeypatch.setattr(worker_mod, "_evaluate_page_identity", _hooked_eval)
+    worker = _worker(InkConfig(page_model=True))
+    try:
+        gen1 = worker.new_generation()
+        form = np.full((H, W), PAPER, dtype=np.float32)
+        form[10:15, 10:40] = INK
+        for _ in range(3):
+            _drive(worker, gen1, form)
+        with_ink = form.copy()
+        with_ink[50:60, 50:60] = INK
+        for _ in range(4):
+            _drive(worker, gen1, with_ink)
+
+        gen2 = worker.new_generation(preserve_identity=True)
+        worker.submit(WarpedPage(_bgr(with_ink), gen2, Q0))
+        assert entered.wait(timeout=5.0)
+
+        t0 = time.monotonic()
+        worker.submit(WarpedPage(_bgr(with_ink), gen2, Q0))
+        elapsed = time.monotonic() - t0
+        assert elapsed < 0.2
+        assert not release.is_set()
+        release.set()
+
+        _drive(worker, gen2, with_ink)
+        assert worker.error is None
+        events = worker.telemetry_snapshot()["page_identity_events"]
+        assert events[-1]["decision"] == "same_page"
+    finally:
+        release.set()
+        worker.stop()
 
 
 def test_page_model_reference_stays_within_camera_range_after_large_brightness_jump():

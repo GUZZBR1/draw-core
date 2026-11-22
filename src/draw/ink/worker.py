@@ -234,31 +234,23 @@ def _align_identity_baseline(identity_baseline, seen, prior, radius, kernel):
     seen_indep = seen & ~prior_d
     if not np.any(seen_indep):
         return identity_baseline
-    ys_b, xs_b = np.nonzero(base_nonprior)
-    ys_s, xs_s = np.nonzero(seen_indep)
-    y0 = max(0, max(int(ys_b.min()) - radius, int(ys_s.min()) - radius))
-    y1 = min(
-        base_nonprior.shape[0],
-        min(int(ys_b.max()) + radius + 1, int(ys_s.max()) + radius + 1),
-    )
-    x0 = max(0, max(int(xs_b.min()) - radius, int(xs_s.min()) - radius))
-    x1 = min(
-        base_nonprior.shape[1],
-        min(int(xs_b.max()) + radius + 1, int(xs_s.max()) + radius + 1),
-    )
-    if y1 <= y0 or x1 <= x0:
-        return identity_baseline
-    base_crop = base_nonprior[y0:y1, x0:x1]
-    seen_crop = seen_indep[y0:y1, x0:x1]
-    best_overlap = int(np.count_nonzero(base_crop & seen_crop))
+    base_ys, base_xs = np.nonzero(base_nonprior)
+    if base_ys.size > 4096:
+        step = (base_ys.size + 4095) // 4096
+        base_ys = base_ys[::step]
+        base_xs = base_xs[::step]
+    h, w = seen_indep.shape
+    best_overlap = int(np.count_nonzero(seen_indep[base_ys, base_xs]))
     best_dy, best_dx = 0, 0
     best_dist = 0
     for dy in range(-radius, radius + 1):
         for dx in range(-radius, radius + 1):
             if dy == 0 and dx == 0:
                 continue
-            shifted_crop = _shift_bool_mask(base_crop, dy, dx)
-            overlap = int(np.count_nonzero(shifted_crop & seen_crop))
+            ys = base_ys + dy
+            xs = base_xs + dx
+            valid = (ys >= 0) & (ys < h) & (xs >= 0) & (xs < w)
+            overlap = int(np.count_nonzero(seen_indep[ys[valid], xs[valid]]))
             dist = abs(dy) + abs(dx)
             if overlap > best_overlap or (overlap == best_overlap and dist < best_dist):
                 best_overlap = overlap
