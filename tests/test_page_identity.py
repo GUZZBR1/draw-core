@@ -8,6 +8,7 @@ import pytest
 from draw.contracts import WarpedPage
 from draw.ink import identity as identity_mod
 from draw.ink import worker as worker_mod
+from draw.ink.config import InkConfig
 
 SHAPE = (120, 100)
 QUAD = np.float32([[0, 0], [100, 0], [100, 120], [0, 120]])
@@ -201,20 +202,107 @@ def test_guard_majority_ink_still_resolves_same_page(worker):
     np.testing.assert_array_equal(worker.poll(gen, 0).confirmed, canvas_a)
 
 
-def test_hand_over_majority_still_resolves_same_page(worker):
+def test_hand_over_majority_holds_then_restores_same_page(worker):
     canvas_a = settle(worker)
     gen = worker.new_generation(preserve_identity=True)
     # Mesma folha, mesma pose, com a mao sobre 60% da tinta: a
-    # fatia visivel casa 1,0 e a geometria alcancou a referencia
-    # inteira — o same_page resolve na hora e restaura o desenho.
-    # Contar a tinta visivel contra a referencia total lia a mao
-    # como "nunca comparado": o defer de no_overlap queimava a
-    # quarentena e o timeout apagava o desenho salvo.
+    # fatia visivel casa, mas o desenho inteiro so volta quando a
+    # comparacao cobrir metade do dominio — enquanto isso o hold
+    # abstem o voto SEM queimar a quarentena (uma substituta com
+    # marcas coincidentes na parte visivel nao pode herdar a tinta
+    # escondida, e o desenho salvo nao vira wipe no timeout).
     visible = np.ones(SHAPE, bool)
     visible[10:43, 10:60] = False
-    drive(worker, gen, visible=visible)
+    for _ in range(3):
+        drive(worker, gen, visible=visible)
+        event = last_event(worker)
+        assert event["decision"] == "deferred_occlusion"
+        assert event["quarantine_reason"] == "occlusion"
+        assert event["quarantine_frames"] == 0
+        np.testing.assert_array_equal(worker._identity_reference, canvas_a)
+        assert not np.any(worker.poll(gen, 0).confirmed)
+    # Mao levanta: a referencia inteira e comparada — same_page
+    # resolve e o desenho volta intacto.
+    drive(worker, gen)
     assert last_event(worker)["decision"] == "same_page"
     np.testing.assert_array_equal(worker.poll(gen, 0).confirmed, canvas_a)
+
+
+def test_replacement_with_matching_visible_marks_holds(worker):
+    canvas_a = settle(worker)
+    gen = worker.new_generation(preserve_identity=True)
+    # Substituta na mesma pose: a metade visivel repete as marcas
+    # de A, a mao cobre a regiao onde a tinta difere. O match na
+    # fatia vista nao distingue retorno de substituicao — o hold
+    # abstem sem queimar a quarentena e a referencia segue intacta.
+    replacement = np.zeros(SHAPE, np.float32)
+    replacement[43:65, 10:60] = 0.95
+    visible = np.ones(SHAPE, bool)
+    visible[10:43, 10:60] = False
+    for _ in range(3):
+        drive(worker, gen, prob=replacement, visible=visible)
+        event = last_event(worker)
+        assert event["decision"] == "deferred_occlusion"
+        assert event["quarantine_reason"] == "occlusion"
+        assert event["quarantine_frames"] == 0
+        np.testing.assert_array_equal(worker._identity_reference, canvas_a)
+        assert not np.any(worker.poll(gen, 0).confirmed)
+    # Mao levanta mostrando papel em branco onde A tinha tinta: o
+    # consenso de troca resolve — a tinta escondida de A nunca
+    # chega ao canvas da substituta.
+    for _ in range(identity_mod._PAGE_IDENTITY_SWITCH_CONSENSUS_FRAMES):
+        drive(worker, gen, prob=replacement)
+        if last_event(worker)["decision"] == "new_page":
+            break
+    assert last_event(worker)["decision"] == "new_page"
+    for _ in range(4):
+        drive(worker, gen, prob=replacement)
+    confirmed = worker.poll(gen, 0).confirmed
+    assert np.count_nonzero(confirmed) > 0
+    assert not np.any(confirmed[10:43, 10:60])
+
+
+def test_reanchored_auto_guard_keeps_recovery(monkeypatch):
+    # Cobertura com a guarda AUTOMATICA e mudanca real de ancora
+    # (o estado que o follow deixa: canvas intacto, ancora nova).
+    # A tinta na faixa ja estava confirmada quando a faixa passou a
+    # cobri-la — a guarda so limita votos novos e remocao, nao
+    # apaga o confirmado. A referencia e capturada na ancora
+    # migrada e o same_page devolve o desenho inteiro: com o piso
+    # medido sobre a referencia total, o match perfeito no miolo
+    # deferiria ate o timeout apagar o desenho.
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(worker_mod, "_IDLE_PROBE_SECONDS", 0)
+    shape = (240, 320)
+    quad_a = np.float32([[0, 0], [320, 0], [320, 240], [0, 240]])
+    quad_b = np.float32([[8, 4], [316, 6], [312, 236], [10, 234]])
+    worker = worker_mod.PageCleanWorker(
+        Model(), config=InkConfig(border_guard_px=None)
+    ).start()
+    try:
+        interior = np.zeros(shape, np.float32)
+        interior[60:110, 130:190] = 0.95
+        for _ in range(4):
+            drive(worker, 0, prob=interior, corners=quad_a)
+        edge = np.zeros(shape, np.uint8)
+        edge[0:5, 10:310] = 255
+        edge[235:239, 10:310] = 255
+        edge[5:235, 0:5] = 255
+        edge[5:235, 315:319] = 255
+        worker._accumulator.restore_confirmed(edge)
+        canvas_a = worker._accumulator._confirmed.copy()
+        worker._anchor_corners = quad_b
+        gen = worker.new_generation(preserve_identity=True)
+        drive(
+            worker,
+            gen,
+            prob=np.maximum(interior, edge.astype(np.float32)),
+            corners=quad_b,
+        )
+        assert last_event(worker)["decision"] == "same_page"
+        np.testing.assert_array_equal(worker.poll(gen, 0).confirmed, canvas_a)
+    finally:
+        worker.stop()
 
 
 def test_deferral_fields_declared_in_all_states(worker):

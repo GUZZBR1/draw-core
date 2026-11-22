@@ -2148,6 +2148,29 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         p.identity_visible_reference_px = prior_eval_px
                         p.identity_deferred = True
                         p.quarantine_reason = "no_overlap"
+                    elif p.keep_page and prior_eval_px < max(
+                        identity._IDENTITY_MIN_VISIBLE_PX,
+                        int(
+                            identity._PAGE_IDENTITY_MIN_REFERENCE_FRACTION
+                            * prior_domain_px
+                        ),
+                    ):
+                        # A geometria alcancou a referencia, mas a
+                        # mao cobre a maior parte da tinta no
+                        # dominio: o match na fatia visivel nao
+                        # distingue a mesma folha de uma substituta
+                        # cujas marcas divergentes estao escondidas —
+                        # restaurar o desenho inteiro herdaria tinta
+                        # que a passada nunca comparou. Mesmo hold
+                        # do interior oculto: segura a decisao SEM
+                        # queimar a quarentena nem votar — a copia
+                        # fica recuperavel ate uma passada
+                        # desobstruida distinguir retorno de
+                        # substituicao.
+                        p.identity_visible_reference_px = prior_eval_px
+                        p.identity_deferred = True
+                        p.identity_hold = True
+                        p.quarantine_reason = "occlusion"
             if p.identity_deferred:
                 # O hold por interior oculto nao queima a
                 # quarentena: reter a referencia e separado de
