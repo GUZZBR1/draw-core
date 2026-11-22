@@ -534,11 +534,15 @@ def test_stroke_seen_once_before_hand_exit_finishes_confirming(ink):
     scene.draw((90, 96, 60, 260))
     worker.set_hand_presence(True, moved=True)
     _passes(worker, clock, generation, scene, 1, must=True)
+    want = _stroke_mask(scene)
+    # Uma leitura so nao confirma a janela de votos: se o traco ja
+    # estivesse confirmado, a fase pos-saida seria vacua.
+    got = _confirmed(worker, generation) > 0
+    assert _frac(got, want) < 0.5, "traco confirmou antes da saida da mao"
     worker.set_hand_presence(False)
     ran = _passes(worker, clock, generation, scene, 8, dt=_DT_IDLE)
     assert any(ran), "nenhuma passada rodou depois da saida da mao"
 
-    want = _stroke_mask(scene)
     got = _confirmed(worker, generation) > 0
     assert _frac(got, want) >= 0.95
     assert _beyond(got, want, 2) <= 0.02 * np.count_nonzero(want)
