@@ -16,6 +16,9 @@ path depends on this folder.
   (`--selfcheck`, `--record`, `--dump`). Uses `draw.infra.safe_io` for
   bounded JPEG decoding.
 
-If the helper is not running, nothing changes: Draw captures from the
-camera as usual (local webcam, `hvcam+reverse://` with
-`hvcam-host.exe --reverse`, or a network URL — see `--source`).
+If the helper is not running, nothing changes on the default path:
+Draw captures from the camera as usual (local webcam,
+`hvcam+reverse://` with `hvcam-host.exe --reverse`, or a network URL —
+see `--source`). An explicit `--source tcp://host` fails with an error
+when the helper is not listening — there is no automatic fallback to
+another camera.
