@@ -520,6 +520,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         self._identity_recovery_requested = False
         self._identity_defer_count = 0
         self._identity_switch_votes = 0
+        self._identity_hold_seen = False
         # Memo da guarda por quad: a ancora fica estavel por longas
         # sequencias e rasterizar a mascara cheia a cada passada,
         # sob o lock, custa arrays da pagina inteira.
@@ -609,6 +610,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             self._identity_recovery_requested = bool(preserve_identity)
             self._identity_defer_count = 0
             self._identity_switch_votes = 0
+            self._identity_hold_seen = False
             self._guard_memo.clear()
             self._previous_corners = None
             self._paper_ref = None
@@ -2018,9 +2020,14 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     # Tinta anterior quase toda coberta pela mao:
                     # decidir agora seria condenar a pagina pelo
                     # que a passada nao ve. Adia; a referencia
-                    # fica para a proxima passada.
+                    # fica para a proxima passada. Uma vez iniciado
+                    # o hold por match parcial, a oclusao apertando
+                    # nao e evidencia nova: queimar o prazo agora
+                    # apagaria o desenho que o hold existe para
+                    # proteger.
                     p.identity_visible_reference_px = prior_eval_px
                     p.identity_deferred = True
+                    p.identity_hold = self._identity_hold_seen
                     p.quarantine_reason = "occlusion"
                 elif prior_eval_px == 0:
                     unobserved_px = (
@@ -2152,21 +2159,25 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         identity._IDENTITY_MIN_VISIBLE_PX,
                         int(
                             identity._PAGE_IDENTITY_MIN_REFERENCE_FRACTION
-                            * prior_domain_px
+                            * prior_guard_px
                         ),
                     ):
                         # A geometria alcancou a referencia, mas a
-                        # mao cobre a maior parte da tinta no
-                        # dominio: o match na fatia visivel nao
+                        # mao cobre a maior parte da tinta
+                        # julgavel: o match na fatia visivel nao
                         # distingue a mesma folha de uma substituta
                         # cujas marcas divergentes estao escondidas —
                         # restaurar o desenho inteiro herdaria tinta
-                        # que a passada nunca comparou. Mesmo hold
-                        # do interior oculto: segura a decisao SEM
-                        # queimar a quarentena nem votar — a copia
-                        # fica recuperavel ate uma passada
-                        # desobstruida distinguir retorno de
-                        # substituicao.
+                        # que a passada nunca comparou. O piso e
+                        # sobre a referencia julgavel inteira, nao
+                        # sobre a fatia alcancada: dois pisos de 50%
+                        # em cascata (metade alcancada x metade
+                        # vista) restaurariam com so um quarto
+                        # comparado. Mesmo hold do interior oculto:
+                        # segura a decisao SEM queimar a quarentena
+                        # nem votar — a copia fica recuperavel ate
+                        # uma passada desobstruida distinguir
+                        # retorno de substituicao.
                         p.identity_visible_reference_px = prior_eval_px
                         p.identity_deferred = True
                         p.identity_hold = True
@@ -2182,6 +2193,13 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                 p.identity_timed_out = (
                     p.quarantine_frames > identity._PAGE_IDENTITY_MAX_DEFERRALS
                 )
+            if p.identity_hold:
+                # O hold e pegajoso na recuperacao: depois de um
+                # match parcial ou dominio oculto, uma oclusao mais
+                # pesada nas passadas seguintes tambem nao queima a
+                # quarentena — o prazo so corre para evidencia
+                # geometrica (no_overlap) ou oclusao sem hold previo.
+                self._identity_hold_seen = True
             if p.identity_deferred:
                 self._identity_switch_votes = 0
             elif identity_reference is not None and not p.keep_page:
@@ -2266,6 +2284,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     self._accumulator.restore_confirmed(identity_reference)
                 # Keep the old anchor when identity matched: all future
                 # observations remain registered into the same canvas.
+                self._identity_hold_seen = False
                 self._identity_reference = None
                 self._identity_reference_corners = None
                 self._identity_recovery_requested = False

@@ -262,6 +262,61 @@ def test_replacement_with_matching_visible_marks_holds(worker):
     assert not np.any(confirmed[10:43, 10:60])
 
 
+def test_deepening_occlusion_stays_inside_hold(worker):
+    canvas_a = settle(worker)
+    gen = worker.new_generation(preserve_identity=True)
+    # 1a passada: mao sobre 60% da tinta — o match parcial engata o
+    # hold. Nas seguintes a mao cobre 80%: a passada cai no gate de
+    # baixa visibilidade, que QUEIMA a quarentena — mas depois do
+    # hold engatado nao e evidencia nova: segue protegido ate a mao
+    # sair. Sem o hold pegajoso o timeout apagava o desenho salvo.
+    visible = np.ones(SHAPE, bool)
+    visible[10:43, 10:60] = False
+    drive(worker, gen, visible=visible)
+    assert last_event(worker)["decision"] == "deferred_occlusion"
+    visible[10:54, 10:60] = False
+    for _ in range(identity_mod._PAGE_IDENTITY_MAX_DEFERRALS + 1):
+        drive(worker, gen, visible=visible)
+        event = last_event(worker)
+        assert event["decision"] == "deferred_occlusion"
+        assert event["quarantine_reason"] == "occlusion"
+        assert event["quarantine_frames"] == 0
+        np.testing.assert_array_equal(worker._identity_reference, canvas_a)
+        assert not np.any(worker.poll(gen, 0).confirmed)
+    drive(worker, gen)
+    assert last_event(worker)["decision"] == "same_page"
+    np.testing.assert_array_equal(worker.poll(gen, 0).confirmed, canvas_a)
+
+
+def test_quarter_coverage_holds_instead_of_restoring(worker):
+    # Os dois pisos de 50% em cascata deixavam passar um quarto:
+    # pegada alcanca ~60% da referencia E a mao esconde ~40% do
+    # alcancado → so ~36% da tinta julgavel foi comparada. O piso
+    # de visibilidade mede contra a referencia julgavel inteira —
+    # segurando (hold, sem queimar) ate a mao revelar o resto.
+    ink_a = np.zeros(SHAPE, np.float32)
+    ink_a[10:65, 10:20] = 0.95  # fora da pegada da passada
+    ink_a[10:65, 60:98] = 0.95  # dentro da pegada parcial
+    for _ in range(4):
+        drive(worker, 0, prob=ink_a)
+    canvas_a = worker._accumulator._confirmed.copy()
+    gen = worker.new_generation(preserve_identity=True)
+    part_quad = np.float32([[60, 0], [100, 0], [100, 120], [60, 120]])
+    visible = np.ones(SHAPE, bool)
+    visible[10:32, 60:99] = False
+    for _ in range(3):
+        drive(worker, gen, prob=ink_a, corners=part_quad, visible=visible)
+        event = last_event(worker)
+        assert event["decision"] == "deferred_occlusion"
+        assert event["quarantine_reason"] == "occlusion"
+        assert event["quarantine_frames"] == 0
+        np.testing.assert_array_equal(worker._identity_reference, canvas_a)
+        assert not np.any(worker.poll(gen, 0).confirmed)
+    drive(worker, gen, prob=ink_a, corners=part_quad)
+    assert last_event(worker)["decision"] == "same_page"
+    np.testing.assert_array_equal(worker.poll(gen, 0).confirmed, canvas_a)
+
+
 def test_reanchored_auto_guard_keeps_recovery(monkeypatch):
     # Cobertura com a guarda AUTOMATICA e mudanca real de ancora
     # (o estado que o follow deixa: canvas intacto, ancora nova).
