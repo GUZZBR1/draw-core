@@ -613,7 +613,14 @@ def _dil(mask, px=3):
     return cv2.dilate(mask.astype(np.uint8), k) > 0
 
 
-def _flag_value(raw, current):
+def _is_nullable(obj, fname):
+    import typing
+
+    hint = typing.get_type_hints(type(obj)).get(fname)
+    return hint is not None and type(None) in typing.get_args(hint)
+
+
+def _flag_value(raw, current, *, nullable=False):
     raw = raw.strip()
     if isinstance(current, bool):
         if raw.lower() in ("1", "true"):
@@ -621,6 +628,8 @@ def _flag_value(raw, current):
         if raw.lower() in ("0", "false"):
             return False
         raise ValueError(f"valor bool invalido: {raw!r}")
+    if nullable and raw.lower() == "none":
+        return None
     if current is None:  # campo opcional numerico (InkConfig.pass_interval_s)
         return float(raw)
     return type(current)(raw)
@@ -651,11 +660,23 @@ def _parse_flags(flags):
             fname = name[4:]
             if not hasattr(ink, fname):
                 raise ValueError(f"InkConfig sem campo {fname!r}")
-            object.__setattr__(ink, fname, _flag_value(raw, getattr(ink, fname)))
+            object.__setattr__(
+                ink,
+                fname,
+                _flag_value(
+                    raw, getattr(ink, fname), nullable=_is_nullable(ink, fname)
+                ),
+            )
         else:
             if not hasattr(config, name) or name == "ink":
                 raise ValueError(f"PipelineConfig sem campo {name!r}")
-            object.__setattr__(config, name, _flag_value(raw, getattr(config, name)))
+            object.__setattr__(
+                config,
+                name,
+                _flag_value(
+                    raw, getattr(config, name), nullable=_is_nullable(config, name)
+                ),
+            )
     # object.__setattr__ pula __post_init__: revalida o par final (ex.: t_high < t_low).
     ink = dataclasses.replace(ink)
     object.__setattr__(config, "ink", ink)

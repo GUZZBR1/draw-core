@@ -80,6 +80,25 @@ def test_confirmed_ink_is_never_retracted():
     assert result["retracted_px_total"] == 0
 
 
+def test_guard_excluded_provisional_is_not_retraction():
+    acc = accumulator_mod.LayeredInkAccumulator(threshold=0.7)
+    first = acc.add(_prob([(FLICKER, 0.85), (WEAK, 0.85)]))
+    assert _px(first["provisional"], FLICKER) == 300
+    assert _px(first["provisional"], WEAK) == 200
+    # A re-ancoragem alargou a guarda sobre a faixa do provisorio:
+    # a passada deixou de inspecionar ali — a tinta nao sumiu e
+    # nao pode contar como retracao. Dentro da guarda a retracao
+    # segue valendo.
+    guard = np.ones((H, W), dtype=bool)
+    guard[FLICKER] = False
+    result = None
+    for _ in range(3):
+        result = acc.add(_prob([]), valid_mask=guard)
+    assert _px(result["provisional"], FLICKER) == 0
+    assert _px(result["provisional"], WEAK) == 0
+    assert result["retracted_px_total"] == 200
+
+
 class _ScriptedProbInk:
     threshold = 0.7
 
@@ -112,10 +131,14 @@ def _drive_until(worker, generation, predicate, timeout=5.0):
 def test_worker_display_shows_provisional_before_poll_confirms(
     monkeypatch,
 ):
-    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.01)
+    # pass_interval_s=0,3s: a passada mede ~27ms, entao a versao
+    # provisoria vive ~270ms — margem segura para o poll de 5ms;
+    # com 0,01s a v1 morria entre dois polls e o teste oscilava.
+    monkeypatch.setattr(worker_mod, "_PAGE_CLEAN_INTERVAL_SECONDS", 0.05)
     strong_twice = _prob([(STRONG, 0.95)])
     fake = _ScriptedProbInk([strong_twice])
-    worker = worker_mod.PageCleanWorker(fake).start()
+    config = worker_mod.InkConfig(pass_interval_s=0.3)
+    worker = worker_mod.PageCleanWorker(fake, config=config).start()
     try:
         generation = worker.new_generation()
         got = _drive_until(

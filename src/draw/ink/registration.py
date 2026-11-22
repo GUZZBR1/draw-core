@@ -155,8 +155,35 @@ def _deadband_step(frozen, corners, over):
     return frozen, frozen, over, False, shift
 
 
+def _sampled_warp(matrix, shape):
+    """Pegada amostrada de um warp de registro, na grade `shape`.
+
+    True onde o warp leu de fato a passada; False na faixa que o
+    registro preencheu de zeros. Unica fonte do raster — a pegada
+    de _sampled_footprint e o clipe de visibilidade do registro
+    nunca divergem.
+    """
+    size = (shape[1], shape[0])
+    return (
+        cv2.warpPerspective(
+            np.ones(shape, np.uint8),
+            matrix,
+            size,
+            flags=cv2.INTER_NEAREST,
+            borderValue=0,
+        )
+        > 0
+    )
+
+
 def _register_ink_probability(
-    prob, anchor, corners, visible=None, visible_cam=None, pass_corners=None
+    prob,
+    anchor,
+    corners,
+    visible=None,
+    visible_cam=None,
+    pass_corners=None,
+    sampled=None,
 ):
     """Registra a passada na geometria ancora; devolve (prob, visible).
 
@@ -206,16 +233,9 @@ def _register_ink_probability(
             # "visivel" ai contaria tinta velha fora do recorte como
             # ausencia — a folha re-posta noutra pose apagaria o
             # traco (review do PR #118).
-            visible &= (
-                cv2.warpPerspective(
-                    np.ones(prob.shape, np.uint8),
-                    matrix,
-                    size,
-                    flags=cv2.INTER_NEAREST,
-                    borderValue=0,
-                )
-                > 0
-            )
+            if sampled is None:
+                sampled = _sampled_warp(matrix, prob.shape)
+            visible &= sampled
         elif visible is not None:
             visible = (
                 cv2.warpPerspective(
@@ -228,3 +248,54 @@ def _register_ink_probability(
                 > 0
             )
     return prob, visible
+
+
+def _sampled_footprint(anchor, corners, shape):
+    """Pegada amostrada do registro na grade da ancora.
+
+    Mascara True onde o warp ancora<-corners leu de fato a passada;
+    False na faixa que o registro preencheu de zeros por falta de
+    amostra (quad que recuou uma borda para dentro). Sem mascara de
+    visibilidade, esses zeros sao indistinguiveis de papel apagado —
+    a pegada separa "nao observei" de "observei vazio".
+
+    None quando nao ha geometria ou o registro e identidade: a
+    pegada e a grade inteira e a mascara seria redundante.
+    """
+    if anchor is None or corners is None:
+        return None
+    matrix = _registration_matrix(anchor, corners, shape)
+    if _registration_is_identity(matrix):
+        return None
+    return _sampled_warp(matrix, shape)
+
+
+def _observed_footprint(anchor, reg_corners, live_corners, shape):
+    """Pegada observada de verdade: o que o warp leu E o que a
+    passada cobriu.
+
+    A pegada do registro (reg_corners) mede onde o warp ancora<-
+    registro encontrou amostra. Sob banda morta o registro usa o
+    quad CONGELADO — se o quad vivo recuou uma borda, a faixa que
+    ele deixou de ver continua marcada como amostrada e os zeros/
+    papel deslocado dela apagam o traco de borda como se tivessem
+    sido observados. Cruzar com a pegada do quad vivo separa o
+    "nao observei" do "observei vazio" nesse caso. O sentido
+    contrario tambem protege: pixel coberto pelo vivo mas lido
+    fora do mapa pelo registro recebe preenchimento zero, nao
+    observacao. None em uma das pegadas vale grade inteira; None
+    nas duas devolve None.
+    """
+    footprint = _sampled_footprint(anchor, reg_corners, shape)
+    if live_corners is None or (
+        reg_corners is not None and np.array_equal(live_corners, reg_corners)
+    ):
+        # Sem banda morta o vivo e o registro sao o mesmo quad:
+        # a segunda rasterizacao repetiria a primeira bit a bit.
+        return footprint
+    live = _sampled_footprint(anchor, live_corners, shape)
+    if footprint is None:
+        return live
+    if live is not None:
+        footprint = footprint & live
+    return footprint
