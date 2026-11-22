@@ -1,5 +1,7 @@
 """F-11 Block 2: identidade por geracao no worker real, sem tracker paralelo."""
 
+import dataclasses
+
 import numpy as np
 import pytest
 
@@ -175,6 +177,44 @@ def test_fragment_match_does_not_restore_unevaluated_reference(worker):
     # que a pegada nunca avaliou nao e herdado.
     assert np.count_nonzero(confirmed) > 0
     assert not np.any(confirmed[:, :55])
+
+
+def test_guard_majority_ink_still_resolves_same_page(worker):
+    # A guarda alarga DEPOIS do desenho confirmado (re-ancoragem
+    # adota posicao nova): 62% da tinta salva fica sob a faixa e
+    # nunca mais e julgavel. Com o piso de cobertura medido sobre
+    # a referencia total, um match perfeito no miolo nunca o
+    # atingia e a quarentena apagava o desenho no timeout — a
+    # medida e so geometrica, sobre a tinta julgavel.
+    ink_a = np.zeros(SHAPE, np.float32)
+    ink_a[2:9, 15:85] = 0.95
+    ink_a[111:118, 15:85] = 0.95
+    ink_a[40:60, 30:60] = 0.95
+    for _ in range(4):
+        drive(worker, 0, prob=ink_a)
+    canvas_a = worker.poll(0, 0).confirmed
+    assert np.count_nonzero(canvas_a) > 0
+    gen = worker.new_generation(preserve_identity=True)
+    worker._config = dataclasses.replace(worker._config, border_guard_px=10)
+    drive(worker, gen, prob=ink_a)
+    assert last_event(worker)["decision"] == "same_page"
+    np.testing.assert_array_equal(worker.poll(gen, 0).confirmed, canvas_a)
+
+
+def test_hand_over_majority_still_resolves_same_page(worker):
+    canvas_a = settle(worker)
+    gen = worker.new_generation(preserve_identity=True)
+    # Mesma folha, mesma pose, com a mao sobre 60% da tinta: a
+    # fatia visivel casa 1,0 e a geometria alcancou a referencia
+    # inteira — o same_page resolve na hora e restaura o desenho.
+    # Contar a tinta visivel contra a referencia total lia a mao
+    # como "nunca comparado": o defer de no_overlap queimava a
+    # quarentena e o timeout apagava o desenho salvo.
+    visible = np.ones(SHAPE, bool)
+    visible[10:43, 10:60] = False
+    drive(worker, gen, visible=visible)
+    assert last_event(worker)["decision"] == "same_page"
+    np.testing.assert_array_equal(worker.poll(gen, 0).confirmed, canvas_a)
 
 
 def test_deferral_fields_declared_in_all_states(worker):

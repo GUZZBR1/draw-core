@@ -287,11 +287,13 @@ def _observed_footprint(anchor, reg_corners, live_corners, shape):
     nas duas devolve None.
     """
     footprint = _sampled_footprint(anchor, reg_corners, shape)
-    live = (
-        None
-        if live_corners is None
-        else _sampled_footprint(anchor, live_corners, shape)
-    )
+    if live_corners is None or (
+        reg_corners is not None and np.array_equal(live_corners, reg_corners)
+    ):
+        # Sem banda morta o vivo e o registro sao o mesmo quad:
+        # a segunda rasterizacao repetiria a primeira bit a bit.
+        return footprint
+    live = _sampled_footprint(anchor, live_corners, shape)
     if footprint is None:
         return live
     if live is not None:

@@ -2120,21 +2120,31 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                         and p.identity_containment
                         >= identity._PAGE_IDENTITY_MIN_CONTAINMENT
                     )
-                    if p.keep_page and prior_eval_px < max(
+                    if p.keep_page and prior_domain_px < max(
                         identity._IDENTITY_MIN_VISIBLE_PX,
-                        int(identity._PAGE_IDENTITY_MIN_REFERENCE_FRACTION * prior_px),
+                        int(
+                            identity._PAGE_IDENTITY_MIN_REFERENCE_FRACTION
+                            * prior_guard_px
+                        ),
                     ):
-                        # Fragmento: o que casa avaliou so uma
-                        # fatia da referencia — restaurar o resto
-                        # seria aceitar como prova o que a
-                        # passada nunca comparou (uma substituta
-                        # cobrindo 60% do quad com so a marca
-                        # coincidente fecha recall 400/400).
-                        # Inconclusivo geometrico: adia sem votar;
-                        # o timeout resolve o caso persistente
-                        # pelo caminho seguro — endurecer para
-                        # new_page aqui puniria a folha real que
-                        # volta parcialmente ao quadro.
+                        # Fragmento: a pegada alcancou so uma fatia
+                        # da referencia julgavel — restaurar o resto
+                        # seria aceitar como prova o que a passada
+                        # nunca comparou (uma substituta cobrindo
+                        # 60% do quad com so a marca coincidente
+                        # fecha recall 400/400). A medida e so
+                        # geometrica: tinta sob a mao fica fora do
+                        # numerador E do denominador (a oclusao ja
+                        # adia em cima, sem queimar a quarentena), e
+                        # tinta sob a guarda nunca e julgavel — sem
+                        # as duas exclusoes um match perfeito na
+                        # parte util deferiria ate o timeout apagar
+                        # o desenho salvo. Inconclusivo geometrico:
+                        # adia sem votar; o timeout resolve o caso
+                        # persistente pelo caminho seguro —
+                        # endurecer para new_page aqui puniria a
+                        # folha real que volta parcialmente ao
+                        # quadro.
                         p.identity_visible_reference_px = prior_eval_px
                         p.identity_deferred = True
                         p.quarantine_reason = "no_overlap"
