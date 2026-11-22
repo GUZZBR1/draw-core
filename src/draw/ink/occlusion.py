@@ -243,6 +243,7 @@ class PaperExposureGuard:
         self._texture_dark_share = None
         self._marks_hold_age = None
         self._marks_pending_age = 0
+        self._occluded_confirmed = None
 
     @property
     def pending_fill_recovery(self):
@@ -491,6 +492,7 @@ class PaperExposureGuard:
             self._fill_adopted = np.zeros(current.shape, dtype=bool)
             self._recovering = np.zeros(current.shape, dtype=np.uint8)
             self._was_anomalous = np.zeros(current.shape, dtype=bool)
+            self._occluded_confirmed = np.zeros((height, width), dtype=bool)
 
         known = np.isfinite(self._reference)
         candidates = current[updateable]
@@ -589,8 +591,38 @@ class PaperExposureGuard:
             self._texture_ink_mask.astype(np.uint8),
             np.ones((2 * _TEXTURE_MARK_DILATE + 1,) * 2, dtype=np.uint8),
         )
+        # Tinta confirmada sob tile anômalo é conteúdo provado sob
+        # oclusão, nunca marca de oclusor: o traço que viveu sob tile
+        # denso demais para aprender a própria tinta virava "marca
+        # nova" para sempre quando a anomalia caía — a remoção
+        # congelava no veto por posição (merge do #161 no PR #144).
+        # A isenção NÃO vale para tinta confirmada em tile limpo: o
+        # tick da régua confirmado por voto se isentaria do próprio
+        # veto e liberaria a remoção do traço sob ele — a cobertura
+        # confirmada só conta nas passadas em que o tile era a
+        # anomalia (atualizada no fim desta passada).
+        confirmed_cover = np.zeros((height, width), dtype=bool)
+        if confirmed_ink is not None:
+            confirmed_cover = (
+                cv2.dilate(
+                    confirmed_ink.astype(np.uint8),
+                    np.ones((2 * _TEXTURE_MARK_DILATE + 1,) * 2, dtype=np.uint8),
+                )
+                > 0
+            )
+        exempt = self._occluded_confirmed
         new_marks_fraction = cv2.resize(
-            (ink_mask & (learned_marks == 0)).astype(np.float32),
+            (ink_mask & (learned_marks == 0) & ~exempt).astype(np.float32),
+            size,
+            interpolation=cv2.INTER_AREA,
+        )
+        # A fração acima da baseline compara a tinta que a tinta
+        # confirmada sob anomalia não explica: sem o desconto, o traço
+        # sobrevivente de uma anomalia segurava o veto de fração
+        # sozinho. Marcas novas confirmadas em tile limpo seguem
+        # contando — o veto delas caduca pelo caminho do marks_hold.
+        excess_fraction = cv2.resize(
+            (ink_mask & ~exempt).astype(np.float32),
             size,
             interpolation=cv2.INTER_AREA,
         )
@@ -639,7 +671,7 @@ class PaperExposureGuard:
             & (
                 (
                     (
-                        ink_fraction
+                        excess_fraction
                         > self._texture_ink_baseline + _TEXTURE_NEW_INK_FRACTION
                     )
                     | marks_hold
@@ -1020,6 +1052,21 @@ class PaperExposureGuard:
         )
         self._recovering[anomalous] = 0
         self._recovering[self._was_anomalous & ~anomalous] = _RECOVERY_HOLD_PASSES
+        # Snapshot da tinta confirmada enquanto o tile era anômalo:
+        # só ela é isenta dos vetos de marca nova na próxima passada.
+        # O traço sob a régua (tile limpo) nunca entra — o tick
+        # confirmado não pode isentar a si mesmo. Pixels que saíram
+        # do canvas perdem a isenção junto com a confirmação.
+        occluded_px = (
+            cv2.resize(
+                anomalous.astype(np.uint8),
+                (width, height),
+                interpolation=cv2.INTER_NEAREST,
+            )
+            > 0
+        )
+        self._occluded_confirmed &= confirmed_cover
+        self._occluded_confirmed[occluded_px] = confirmed_cover[occluded_px]
         self._was_anomalous = anomalous.copy()
         self._was_texture_anomaly = texture_anomaly.copy()
         return ExposureAssessment(

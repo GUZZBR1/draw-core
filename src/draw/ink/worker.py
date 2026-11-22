@@ -3682,6 +3682,7 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
         paper_exposed = True
         if self._config.paper_guard:
             paper_exposed = False
+        physical_visible = p.visible
         if p.exposure is not None:
             # O par de registro é o da passada que VOTA
             # (p.last_reg), não o medido antes da
@@ -3886,14 +3887,18 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
                     pm_sampled if obs_visible is None else (obs_visible & pm_sampled)
                 )
             # Papel coberto agora pela mao (mascara fisica), ainda sem
-            # referencia: conta para a prontidao. Pixel visivel que a
-            # guarda recusa como papel (logo escuro, impressao densa)
-            # nunca semeia e fica de fora — esperar por ele seria
-            # esperar para sempre (o "fantasma" de inicializacao).
+            # referencia: conta para a prontidao. A mascara e a de
+            # ANTES do veto fotometrico — pixel visivel que a guarda
+            # recusa como papel (logo escuro, impressao densa) nunca
+            # semeia e fica de fora: esperar por ele seria esperar
+            # para sempre (o "fantasma" de inicializacao, medido no
+            # merge do #161 no PR #144).
             hand_covered = None
-            if p.visible is not None:
+            if physical_visible is not None:
                 hand_covered = (
-                    ~p.visible if pm_coverage is None else pm_coverage & ~p.visible
+                    ~physical_visible
+                    if pm_coverage is None
+                    else pm_coverage & ~physical_visible
                 )
             if self._config.paper_guard and p.warped.dtype == np.uint8:
                 exposed_mask = pm.exposed(
@@ -3993,8 +3998,26 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
             # do acumulador (visibilidade, testemunha, passadas
             # consecutivas) seguem.
             zero = suppress
-            if returned_mask is not None:
-                zero = zero | (erase_candidates & returned_mask & obs_admissible)
+            returned_seen = (
+                None
+                if returned_mask is None
+                else erase_candidates & returned_mask & obs_admissible
+            )
+            if returned_seen is not None and np.any(returned_seen):
+                zero = zero | returned_seen
+                # O retorno a aparencia semeada tambem prova exposicao:
+                # a impressao escura sob o traco apagado cai no veto
+                # dark_ink da guarda ("tinta confirmada sobre pixel
+                # escuro") e a remocao congelava para sempre (merge do
+                # #161 no PR #144). O casamento com a referencia do
+                # PageModel e a evidencia de que nada cobre o pixel.
+                exposed_mask = p.paper_exposed
+                if isinstance(exposed_mask, (bool, np.bool_)):
+                    exposed_mask = np.full(p.prob.shape, exposed_mask, dtype=bool)
+                else:
+                    exposed_mask = exposed_mask.copy()
+                exposed_mask[returned_seen] = True
+                p.paper_exposed = exposed_mask
             if np.any(zero):
                 p.prob = np.where(zero, 0.0, p.prob).astype(np.float32)
 
