@@ -269,6 +269,32 @@ def test_slide_and_stay_neither_duplicates_nor_freezes(fast):
 
 
 @pytest.mark.slow
+def test_slide_and_stay_with_page_model_preserves_thin_stroke(fast):
+    # Issue 3 (TR150): quando motion_fix corrige a probabilidade num slide
+    # sustentado de 3,0 px em X, um traco vertical de 2 px de largura
+    # (mais estreito que o offset, sem sobreposicao entre a coluna original
+    # e a deslocada) precisa que `gray` receba o mesmo warp_back — senao a
+    # posicao corrigida le papel branco e `pm.novel(gray)` suprime o traco.
+    page = _page(seed=5)
+    thin_vertical = np.zeros(SHAPE, np.float32)
+    thin_vertical[150:700, 600:602] = 1.0
+    slid = _shift(page, 3.0, 0.0)
+    written = np.maximum(slid, _shift(thin_vertical, 3.0, 0.0))
+    sequence = [page] * 4 + [slid] * 4 + [written] * 6
+    stats_on, records, conf_on = _run(
+        sequence,
+        InkConfig(motion_veto=True, page_model=True, **_PLAIN),
+    )
+    decisions = [r.get("motion_decision") for r in records]
+    assert decisions[:4] == ["accept"] * 4
+    assert set(decisions[4:]) == {"correct"}
+    assert stats_on["motion_vetoes_total"] == 0
+    line = thin_vertical > 0.5
+    assert np.count_nonzero(conf_on & line) > 0.8 * np.count_nonzero(line)
+    assert _stray(conf_on, line) == 0
+
+
+@pytest.mark.slow
 def test_rotated_and_stuck_page_is_corrected_not_vetoed(fast):
     # 0,3 grau: os cantos da grade andam ~3,2 px, dentro do que o
     # portao corrige (0,4 grau ja passa de MOTION_CORRECT_MAX_PX e veta).
