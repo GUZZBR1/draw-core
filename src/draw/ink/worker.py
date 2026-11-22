@@ -912,11 +912,21 @@ class PageCleanWorker(anchor_mod._AnchorSteps):
     def _pass_interval(self):
         if self._at_rest():
             return None
-        if self._hand_state is False and not self._confirm_once:
+        # Carencia de recuperacao anda na cadencia ativa: manter a
+        # porta aberta mas amostrar uma vez por segundo esticava a
+        # espera limitada muito alem do horizonte de adocao —
+        # passadas, nao segundos, e o que a guarda conta
+        # (Devin Review do PR #144).
+        if (
+            self._hand_state is False
+            and not self._confirm_once
+            and not self._recovery_wait_open()
+        ):
             return _IDLE_PROBE_SECONDS
         if (
             self._hand_state is None
             and self._still_passes >= _NO_HAND_REST_AFTER_STILL_PASSES
+            and not self._recovery_wait_open()
         ):
             return _IDLE_PROBE_SECONDS
         if self._config.pass_interval_s is not None:

@@ -11,6 +11,9 @@ _MIN_DARKENING = 5.0
 _DARKENING_FRACTION = 0.20
 _CHROMA_CHANGE = 0.20
 _VISIBLE_TILE_FRACTION = 0.85
+# Um objeto claro ainda pode ter a luma e o croma do papel. Compare a
+# variação relativa local com a textura de papel aprendida por tile.
+_TEXTURE_CHANGE = 0.015
 # Um deslocamento fotométrico da página inteira (luz da sala caindo,
 # auto-exposição da câmera, balanço de branco) move a quase totalidade
 # dos tiles de uma vez — não é oclusão local. Quando a parcela anômala
@@ -98,6 +101,8 @@ class PaperExposureGuard:
         self._color_reference = None
         self._page_reference = None
         self._page_color_reference = None
+        self._texture_reference = None
+        self._page_texture_reference = None
         self._ink_streak = None
         self._fill_adopted = None
         self._last_fill_adoption = False
@@ -229,9 +234,15 @@ class PaperExposureGuard:
         if image.ndim == 3:
             current = cv2.cvtColor(reduced, cv2.COLOR_BGR2GRAY).astype(np.float32)
             color = reduced.astype(np.float32)
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).astype(np.float32)
         else:
             current = reduced.astype(np.float32)
             color = None
+            gray = image.astype(np.float32)
+        mean_square = cv2.resize(gray * gray, size, interpolation=cv2.INTER_AREA)
+        texture = np.sqrt(
+            np.maximum(mean_square - current * current, 0.0)
+        ) / np.maximum(current, _CHROMA_LUMA_FLOOR)
 
         if visible is None:
             updateable = np.ones(current.shape, dtype=bool)
@@ -260,6 +271,8 @@ class PaperExposureGuard:
             )
             self._page_reference = None
             self._page_color_reference = None
+            self._texture_reference = np.full(current.shape, np.nan, dtype=np.float32)
+            self._page_texture_reference = None
             self._ink_streak = np.zeros(current.shape, dtype=np.uint8)
             self._fill_adopted = np.zeros(current.shape, dtype=bool)
             self._recovering = np.zeros(current.shape, dtype=np.uint8)
@@ -293,6 +306,24 @@ class PaperExposureGuard:
                     chroma[color_tiles], axis=0
                 ).astype(np.float32)
         color_anomaly = self._color_anomaly(known, chroma, current.shape)
+
+        texture_known = np.isfinite(self._texture_reference)
+        has_texture_history = self._page_texture_reference is not None
+        if self._page_texture_reference is None:
+            texture_candidates = texture[updateable & ~darkened & ~color_anomaly]
+            if texture_candidates.size:
+                self._page_texture_reference = float(np.median(texture_candidates))
+        expected_texture = np.where(
+            texture_known,
+            self._texture_reference,
+            self._page_texture_reference or 0.0,
+        )
+        texture_anomaly = (
+            np.abs(texture - expected_texture)
+            > np.maximum(_TEXTURE_CHANGE, expected_texture * 0.5)
+            if has_texture_history
+            else np.zeros(current.shape, dtype=bool)
+        )
 
         anomalous = darkened | color_anomaly
         updateable_px = int(np.count_nonzero(updateable))
@@ -362,7 +393,7 @@ class PaperExposureGuard:
             page_drop = max(_MIN_DARKENING, page_reference * _DARKENING_FRACTION)
             flattened = (
                 updateable
-                & anomalous
+                & (anomalous | texture_anomaly)
                 & ~color_anomaly
                 & (current >= page_reference - page_drop)
             )
@@ -370,6 +401,11 @@ class PaperExposureGuard:
                 self._reference[flattened] = current[flattened]
                 if self._color_reference is not None:
                     self._color_reference[flattened] = chroma[flattened]
+                # A tile já validado como parte do novo nível global da
+                # folha também atualiza sua textura: a iluminação anterior
+                # podia criar variação local que some quando a luz nivela.
+                self._texture_reference[flattened] = texture[flattened]
+                texture_anomaly[flattened] = False
                 anomalous &= ~flattened
 
         # Recuperação por preenchimento: o streak conta as passadas
@@ -438,12 +474,16 @@ class PaperExposureGuard:
             self._color_reference[initialize] = chroma[initialize]
         refresh = updateable & known & ~anomalous
         np.maximum(self._reference, current, out=self._reference, where=refresh)
+        texture_initialize = updateable & ~texture_known & ~anomalous & ~texture_anomaly
+        self._texture_reference[texture_initialize] = texture[texture_initialize]
+        texture_refresh = updateable & texture_known & ~anomalous & ~texture_anomaly
+        self._texture_reference[texture_refresh] = texture[texture_refresh]
 
         # A clean first sample can seed and use its own tile immediately;
         # anomalously dark tiles remain unknown and cannot authorize votes.
         # initialize ⊆ updateable, então a grade é "conhecido ou à vista,
         # sem anomalia".
-        paper_grid = (known | updateable) & ~anomalous
+        paper_grid = (known | updateable) & ~anomalous & ~texture_anomaly
         paper_exposed = (
             True
             if paper_grid.all()
@@ -505,8 +545,14 @@ class PaperExposureGuard:
             # faixa fina isolada dentro de uma sombra não tem âncora
             # adotada e segue bloqueada (Devin Review do PR #144).
             if np.any(recovered) and np.any(dark_ink):
+                # A ponte só atravessa pixels realmente à vista:
+                # a mão cobrindo o fosso entre o preenchimento e
+                # uma borda de sombra quebrava a conexão pelo mapa
+                # cru e a borda votava junto — tinta fantasma
+                # (Devin Review do PR #144).
+                connectable = dark_ink if visible is None else (dark_ink & visible)
                 _count, fill_labels = cv2.connectedComponents(
-                    dark_ink.astype(np.uint8), connectivity=8
+                    connectable.astype(np.uint8), connectivity=8
                 )
                 reached = np.unique(fill_labels[recovered])
                 reached = reached[reached != 0]

@@ -7,6 +7,7 @@ from draw.contracts import WarpedPage
 from draw.ink import accumulator as accumulator_mod
 from draw.ink import occlusion as occlusion_mod
 from draw.ink import registration as registration_mod
+from draw.ink import worker as worker_mod
 from draw.ink.config import InkConfig
 from rr import _ProbIsWarp
 
@@ -473,6 +474,56 @@ def test_fill_recovery_exempts_supported_pixels_across_tile_borders():
     assert not assessment.paper_exposed[37:83, 37:83].any()
 
 
+def test_texture_mismatch_blocks_removal_under_a_paper_colored_ruler():
+    """Uma régua clara esconde a pauta e imita a luma/croma do papel.
+
+    A variância local muda mesmo quando a cor média permanece igual, então
+    a guarda não autoriza apagar o traço que o modelo deixou de ver.
+    """
+    shape = (120, 168)
+    paper = np.full((*shape, 3), 220, dtype=np.uint8)
+    for row in range(12, shape[0], 24):
+        cv2.line(paper, (0, row), (shape[1] - 1, row), (175, 175, 175), 1)
+    ruler = paper.copy()
+    ruler[24:96, 24:120] = 220
+
+    old = np.zeros(shape, dtype=np.float32)
+    old[8:20, 8:20] = 0.95  # tinta-testemunha fora da régua
+    old[52:60, 48:80] = 0.95  # traço confirmado sob a régua
+    erased = old.copy()
+    erased[52:60, 48:80] = 0.0
+
+    class _MutablePageClean:
+        threshold = 0.7
+
+        def __init__(self):
+            self.prob = old
+
+        def ink_prob(self, _image):
+            return self.prob
+
+    clock = rr.SceneClock()
+    page_clean = _MutablePageClean()
+    worker = rr.make_ink_worker(page_clean, clock)
+    generation = worker.new_generation()
+    corners = rr.base_quad(shape)
+    for _ in range(16):
+        clock.now += 1
+        worker.submit(WarpedPage(paper, generation, corners))
+        assert worker.pump()
+        assert worker.error is None
+    assert worker._accumulator._confirmed[52:60, 48:80].all()
+
+    page_clean.prob = erased
+    for _ in range(occlusion_mod._RECOVERY_WAIT_PASSES + 4):
+        clock.now += 1
+        worker.submit(WarpedPage(ruler, generation, corners))
+        assert worker.pump()
+        assert worker.error is None
+
+    assert worker._accumulator._confirmed[52:60, 48:80].all()
+
+
 def test_fill_region_recovers_additions_but_never_proves_paper():
     """Preenchimento: o veto de adição cai com evidência de tinta
     sustentada e a mão fora do tile; o de remoção fica — papel
@@ -604,6 +655,38 @@ def test_fill_edge_partially_covering_a_tile_still_votes():
     assert not assessment.visible[180:184, 24:120].any()  # faixa sem âncora
     assert not assessment.visible[200, 60]  # sombra pura segue vetada
     assert not assessment.paper_exposed[42:120, 48:144].any()
+
+
+def test_hand_masked_gap_does_not_bridge_fill_to_shadow_edge():
+    """Ponte fantasma por baixo da mão: a extensão por componente
+    conexo corria sobre o mapa cru de dark_ink — uma mão tampando o
+    fosso entre o preenchimento e uma faixa escura dentro de uma
+    sombra fazia a faixa votar como parte do preenchimento. A
+    conexão só pode atravessar pixels realmente à vista
+    (Devin Review do PR #144)."""
+    guard = occlusion_mod.PaperExposureGuard()
+    paper = np.full((240, 240, 3), 220, dtype=np.uint8)
+    guard.observe(paper)
+
+    scene = paper.copy()
+    scene[42:120, 48:144] = 10  # preenchimento adotável
+    scene[42:240, 136:150] = 10  # corredor escuro: a ponte sob a mão
+    scene[168:240, 144:240] = 60  # sombra isolada (bloco 3x4 tiles)
+    ink = np.zeros((240, 240), np.float32)
+    ink[42:120, 48:144] = 0.95
+    ink[120:170, 136:150] = 0.9  # falso ink só no trecho coberto pela mão
+    ink[180:184, 144:216] = 0.9  # faixa forte dentro da sombra
+
+    visible = np.ones((240, 240), bool)
+    visible[120:170, 100:200] = False  # mão tampa o corredor no meio
+
+    guard.observe(scene, visible=visible, ink_prob=ink)
+    for _ in range(occlusion_mod._FILL_RECOVERY_PASSES):
+        assessment = guard.observe(scene, visible=visible, ink_prob=ink)
+
+    assert assessment.visible[42:120, 48:144].all()  # miolo vota
+    assert not assessment.visible[182, 180]  # faixa não vota: ponte cortada
+    assert not assessment.visible[200, 192]  # sombra segue vetada
 
 
 def test_uncertain_photometry_does_not_advance_removal_streak():
@@ -853,6 +936,33 @@ def test_fill_recovery_keeps_the_worker_awake_past_the_exit_window():
     ]
     assert all(ran)  # a porta de descanso não fechou durante o streak
     assert worker._accumulator._confirmed[24:96, 24:96].all()
+
+
+def test_fill_recovery_uses_active_cadence_after_hand_exit():
+    """A carência que mantém a worker acordada não pode reduzir a leitura a 1 Hz."""
+    shape = (120, 160)
+    paper = np.full((*shape, 3), 220, dtype=np.uint8)
+    filled = paper.copy()
+    filled[24:96, 24:96] = 60
+    ink_prob = np.zeros(shape, dtype=np.float32)
+    ink_prob[24:96, 24:96] = 0.95
+
+    class _MutablePageClean:
+        threshold = 0.7
+
+        def ink_prob(self, _image):
+            return ink_prob
+
+    worker = rr.make_ink_worker(_MutablePageClean(), rr.SceneClock())
+    worker._paper_exposure.observe(paper)
+    worker._paper_exposure.observe(filled, ink_prob=ink_prob)
+    assert worker._paper_exposure.recovery_pending
+    worker.set_hand_presence(False)
+    worker._confirm_passes = 0
+
+    interval = worker._pass_interval()
+    assert interval == worker_mod._PAGE_CLEAN_INTERVAL_SECONDS
+    assert interval != worker_mod._IDLE_PROBE_SECONDS
 
 
 def test_page_recovery_ignores_false_ink_inside_the_photometric_veto():
