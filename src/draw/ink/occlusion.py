@@ -53,9 +53,8 @@ _CHROMA_REFERENCE_MAX = 255.0 / _CHROMA_LUMA_FLOOR
 # A remoção segue exigindo papel exposto, que o preenchimento nunca
 # produz: o tile continua anômalo para o segundo veredito.
 _FILL_INK_PIXEL_THRESHOLD = 0.7
-# Fração do tile lendo tinta forte que conta como fill: metade do
-# tile — uma faixa fina de tinta falsa na borda de sombra não alcança.
-_FILL_INK_TILE_SUPPORT = 0.5
+_FILL_INK_TILE_SUPPORT = 0.15
+_FILL_INK_TILE_MEAN = 0.25
 _FILL_RECOVERY_PASSES = 4
 # Piso absoluto de papel exposto: a absorção de deslocamento global
 # segue a iluminação, mas uma página mediana abaixo deste nível não
@@ -319,6 +318,9 @@ class PaperExposureGuard:
             self._page_color_reference = None
             self._texture_reference = np.full(current.shape, np.nan, dtype=np.float32)
             self._texture_learned_clean = np.zeros(current.shape, dtype=bool)
+            self._texture_ink_baseline = np.full(
+                current.shape, np.nan, dtype=np.float32
+            )
             self._ink_streak = np.zeros(current.shape, dtype=np.uint8)
             self._fill_adopted = np.zeros(current.shape, dtype=bool)
             self._recovering = np.zeros(current.shape, dtype=np.uint8)
@@ -392,6 +394,10 @@ class PaperExposureGuard:
             np.abs(texture - texture_reference)
             > np.maximum(_TEXTURE_CHANGE, texture_reference * 0.5)
         )
+        # A textura atual combina com a mediana dos vizinhos: usada
+        # só no rebaseline de tiles JÁ escuros demais para o nível
+        # novo — uma superfície que cai junto com a página nunca é
+        # anomalous e não passa por aqui (Devin Review do PR #144).
         local_texture_match = (neighbor_count >= 2) & (
             np.abs(texture - neighbor_reference)
             <= np.maximum(_TEXTURE_CHANGE, neighbor_reference * 0.5)
@@ -399,20 +405,18 @@ class PaperExposureGuard:
         # Tinta nova sobre tile aprendida limpa: as marcas de um
         # oclusor podem ser lidas como tinta e sair da amostra
         # ponderada — a régua passava com textura de papel e a falta
-        # apagava o traço sob ela. O veto pede referência formada em
-        # papel: tile que sempre teve tinta não é "novo". Cobertura
-        # insuficiente barra só o aprendizado (texture_valid ali),
-        # não o veto por pixel — a metade apagada de um patch denso
-        # precisa poder provar papel. A contagem usa TODA a tinta que
-        # o modelo lê: confirmar a marca por voto não a torna papel —
-        # se a leitura parasse em "não confirmada", a régua marcada
-        # confirmaria os próprios ticks em ~3 passadas e o veto
-        # evaporaria sobre o traço que ela cobre (Devin Review do
-        # PR #144).
+        # apagava o traço sob ela. O veto compara com a fração de
+        # tinta gravada quando a referência foi formada: a régua
+        # soma tinta sobre uma baseline limpa e veta; a metade
+        # apagada de um traço retido fica ABAIXO da baseline e os
+        # pixels limpos votam a remoção — tinta confirmada por voto
+        # não vira papel, e tinta retida não é "nova" (Devin Review
+        # do PR #144). Cobertura insuficiente barra só o aprendizado
+        # (texture_valid ali), não o veto por pixel.
         new_ink = (
             texture_known
             & self._texture_learned_clean
-            & (ink_fraction >= _TEXTURE_NEW_INK_FRACTION)
+            & (ink_fraction > self._texture_ink_baseline + _TEXTURE_NEW_INK_FRACTION)
             & (ink_fraction <= _TEXTURE_NEW_INK_MAX_FRACTION)
         )
         texture_anomaly = texture_mismatch | new_ink
@@ -483,18 +487,21 @@ class PaperExposureGuard:
             # do nível da página e permanece vetado, assim como o tile
             # marcado só pelo croma (Devin Review do PR #144).
             page_drop = max(_MIN_DARKENING, page_reference * _DARKENING_FRACTION)
-            # O veto de textura no rebaseline segura só quem SEGUE
-            # anômalo agora: a régua parada não vira papel com a
-            # mudança de luz, mas o tile cuja textura já voltou ao
-            # normal precisa reancorar — senão a trava ficava
-            # permanente depois de qualquer nivelamento (Devin
-            # Review do PR #144).
+            # Reancora tiles cujo brilho mudou junto com a página
+            # apenas quando a textura volta a combinar com a
+            # referência — do próprio tile, ou dos vizinhos quando o
+            # tile já era desproporcionalmente claro: a textura dele
+            # era o gradiente da lâmpada, não a folha, e some quando
+            # a luz nivela. Uma capa lisa sobre tile impresso cai
+            # JUNTO com a página — não é `anomalous` por luma e nem
+            # chega aqui: o veto de textura fica em `paper_grid` e
+            # segura a remoção sob a capa (Devin Review do PR #144).
             flattened = (
                 updateable
-                & (anomalous | texture_anomaly)
-                & (~texture_anomaly | local_texture_match)
-                & ~new_ink
+                & anomalous
                 & ~color_anomaly
+                & ~new_ink
+                & (~texture_anomaly | local_texture_match)
                 & (current >= page_reference - page_drop)
             )
             if np.any(flattened):
@@ -505,6 +512,16 @@ class PaperExposureGuard:
                 # folha também atualiza sua textura: a iluminação anterior
                 # podia criar variação local que some quando a luz nivela.
                 self._texture_reference[flattened] = texture[flattened]
+                # A baseline de tinta só DESCE no reancoramento: um
+                # oclusor que aparece junto com a mudança de luz não
+                # grava suas marcas como o normal do tile — sem o
+                # mínimo, a régua que chega com o escurecimento
+                # global herdaria baseline suja e o veto de tinta
+                # nova morreria na mesma passada (Devin Review do
+                # PR #144).
+                self._texture_ink_baseline[flattened] = np.fmin(
+                    self._texture_ink_baseline[flattened], ink_fraction[flattened]
+                )
                 texture_anomaly[flattened] = False
                 anomalous &= ~flattened
 
@@ -524,14 +541,6 @@ class PaperExposureGuard:
                 pixel_support.astype(np.float32), size, interpolation=cv2.INTER_AREA
             )
             support_mean = cv2.resize(ink_prob, size, interpolation=cv2.INTER_AREA)
-            # A adoção exige evidência DENSA no nível que o voto
-            # configurado atua: metade do tile lendo tinta forte, ou a
-            # média do tile no nível do hit. Um bloco preenchido
-            # sustentado adota mesmo sem todos os pixels no hit; já a
-            # faixa fina de tinta falsa na borda de uma sombra (~15-30%
-            # do tile, média ~0,15) nunca semeia — antes 15% de pixels
-            # fortes bastava para adotar a sombra como fill
-            # (Devin Review do PR #144).
             # A média do tile no nível do hit conta evidência densa
             # sustentada que o voto configurado confirmaria (um bloco
             # preenchido a 0,68 sob Sketch) mesmo sem todos os pixels
@@ -613,8 +622,15 @@ class PaperExposureGuard:
         )
         self._texture_reference[texture_refresh] = texture[texture_refresh]
         # Referência formada com fundo visível bastante era papel:
-        # tinta nova sobre ela é anomalia, não "sempre foi assim".
-        self._texture_learned_clean[texture_initialize | texture_refresh] = True
+        # tinta nova sobre ela é anomalia, não "sempre foi assim". A
+        # baseline grava a fração de tinta presente quando a
+        # referência (re)aprende — a régua marcada soma tinta sobre
+        # a baseline limpa, e o apagamento parcial de um traço
+        # retido fica abaixo dela e prova papel nos pixels limpos
+        # (Devin Review do PR #144).
+        texture_learned = texture_initialize | texture_refresh
+        self._texture_learned_clean[texture_learned] = True
+        self._texture_ink_baseline[texture_learned] = ink_fraction[texture_learned]
 
         # A clean first sample can seed and use its own tile immediately;
         # anomalously dark tiles remain unknown and cannot authorize votes.
@@ -689,7 +705,18 @@ class PaperExposureGuard:
                 # uma borda de sombra quebrava a conexão pelo mapa
                 # cru e a borda votava junto — tinta fantasma
                 # (Devin Review do PR #144).
-                connectable = dark_ink if visible is None else (dark_ink & visible)
+                # A extensão do fill exige leitura de tinta nesta
+                # passada. Tinta confirmada mas perdida pelo modelo
+                # continua vetando a remoção acima, porém não pode
+                # conectar o fill a uma sombra e liberar falsos pixels
+                # para adição (Devin Review do PR #144).
+                connectable = (
+                    np.zeros((height, width), dtype=bool)
+                    if pixel_support is None
+                    else pixel_support & (gray < expected_pixels - pixel_drop)
+                )
+                if visible is not None:
+                    connectable &= visible
                 _count, fill_labels = cv2.connectedComponents(
                     connectable.astype(np.uint8), connectivity=8
                 )

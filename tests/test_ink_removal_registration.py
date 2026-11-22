@@ -434,6 +434,31 @@ def test_global_dimming_preserves_a_simultaneous_local_shadow():
         assert not assessment.paper_exposed[100:110, 100:110].any()
 
 
+def test_global_dimming_does_not_relearn_a_smooth_cover_over_print():
+    """Uma capa lisa que aparece sobre uma área texturada junto com
+    a queda global de luz ainda difere da referência do próprio tile.
+    A semelhança com os tiles brancos vizinhos não pode apagar esse
+    veto e autorizar remoção sob a capa (Devin Review do PR #144)."""
+    guard = occlusion_mod.PaperExposureGuard()
+    bright = np.full((120, 168, 3), 220, dtype=np.uint8)
+    # Um tile impresso isolado, cercado por tiles em branco. A capa
+    # lisa vai combinar com esses vizinhos, mas não com a referência
+    # própria do tile impresso.
+    for row in range(48, 72, 4):
+        bright[row : row + 1, 72:96] = 175
+    visible = np.ones(bright.shape[:2], dtype=bool)
+    blank_ink = np.zeros(bright.shape[:2], np.float32)
+    guard.observe(bright, visible, ink_prob=blank_ink)
+
+    dimmed_cover = np.full_like(bright, 150)
+    for _ in range(registration_mod._REMOVAL_PASSES + 2):
+        assessment = guard.observe(dimmed_cover, visible, ink_prob=blank_ink)
+        if isinstance(assessment.paper_exposed, (bool, np.bool_)):
+            assert not assessment.paper_exposed
+        else:
+            assert not assessment.paper_exposed[48:72, 72:96].any()
+
+
 def test_global_dimming_flattens_the_former_bright_region():
     """A lâmpada direcional apaga e a página nivela no brilho do lado
     escuro: a razão mediana escalava junto o gradiente antigo e a
@@ -442,7 +467,10 @@ def test_global_dimming_flattens_the_former_bright_region():
     só corrige tiles sem anomalia. O nivelamento reancora esses tiles
     no nível medido e solta a página (Devin Review do PR #144)."""
     guard = occlusion_mod.PaperExposureGuard()
-    lit = np.full((120, 160, 3), 190, dtype=np.uint8)
+    # Grade exata de tiles: sem reduzir 160 px em 7 colunas, o
+    # reamostrador mistura a borda clara com papel e muda a textura
+    # aprendida do próprio tile.
+    lit = np.full((120, 168, 3), 190, dtype=np.uint8)
     lit[24:96, 24:96] = 250  # faixa sob a lâmpada (bloco 3x3 tiles)
     visible = np.ones(lit.shape[:2], dtype=bool)
     assert guard.observe(lit, visible).paper_exposed is True
@@ -455,7 +483,7 @@ def test_global_dimming_flattens_the_former_bright_region():
     transient = guard.observe(transient_texture, visible)
     assert not transient.paper_exposed[24:96, 24:96].all()
 
-    dim = np.full((120, 160, 3), 140, dtype=np.uint8)  # lâmpada apagada
+    dim = np.full_like(lit, 140)  # lâmpada apagada
     for _ in range(2):
         assessment = guard.observe(dim, visible)
         assert assessment.visible is None
@@ -602,7 +630,11 @@ def test_marked_ruler_does_not_erase_the_covered_stroke():
     assert worker._accumulator._confirmed[target].all()
 
     page_clean.prob = marked
-    for _ in range(registration_mod._REMOVAL_PASSES + 2):
+    # Passadas testemunhadas de sobra depois dos ticks confirmarem:
+    # sem o veto, a remoção (6 passadas) já teria andado — o traço
+    # sobreviver por menos que isso provava nada (Devin Review do
+    # PR #144).
+    for _ in range(registration_mod._REMOVAL_PASSES * 2):
         clock.now += 1
         worker.submit(WarpedPage(ruler, generation, corners))
         assert worker.pump()
@@ -613,7 +645,7 @@ def test_marked_ruler_does_not_erase_the_covered_stroke():
 
     # A mudança global de luz não pode limpar o veto dos ticks locais.
     dimmed_ruler = np.rint(ruler.astype(np.float32) * (160.0 / 220.0)).astype(np.uint8)
-    for _ in range(registration_mod._REMOVAL_PASSES + 2):
+    for _ in range(registration_mod._REMOVAL_PASSES * 2):
         clock.now += 1
         worker.submit(WarpedPage(dimmed_ruler, generation, corners))
         assert worker.pump()
@@ -628,13 +660,7 @@ def test_partial_erasure_of_a_dense_patch_still_counts_cleared_pixels():
     (Devin Review do PR #144).
 
     O tile do patch nunca aprendeu referência (58% de tinta já na
-    primeira observação), então a evidência corre por pixel. Fronteira
-    conservadora documentada: sobre tile aprendido LIMPO, uma mancha
-    que segue lida como tinta ≥5% é indistinguível de marcas de
-    oclusor e o veto `new_ink` segura o tile inteiro — a borda limpa
-    espera a mancha sair da leitura do modelo. Perder tinta real é o
-    modo de falha que a PR existe para impedir; segurar um pouco mais
-    é o lado seguro."""
+    primeira observação), então a evidência corre por pixel."""
     shape = (120, 160)
     paper = np.full((*shape, 3), 220, dtype=np.uint8)
     patch = (slice(24, 48), slice(0, 14))  # ~58% do tile (1,0)
@@ -681,6 +707,63 @@ def test_partial_erasure_of_a_dense_patch_still_counts_cleared_pixels():
         assert worker.error is None
     assert not worker._accumulator._confirmed[cleared].any()
     assert worker._accumulator._confirmed[24:48, 0:12].all()
+
+
+def test_partial_erasure_on_a_tile_learned_with_ink_counts_cleared_pixels():
+    """Tile aprendido JÁ com traço: a baseline grava a fração de tinta
+    presente no aprendizado — apagar metade dela não é tinta nova, e a
+    metade limpa prova papel e vota a remoção. Sem a comparação com a
+    baseline, qualquer resto ≥1% segurava o tile inteiro e a borda
+    apagada nunca saía do canvas (Devin Review do PR #144)."""
+    shape = (120, 160)
+    paper = np.full((*shape, 3), 220, dtype=np.uint8)
+    # Tile (1,0) cobre linhas 24:48 e colunas ~0:23; a banda ocupa 6
+    # colunas (~26% do tile) — aprende a referência com ela.
+    patch = (slice(24, 48), slice(0, 6))
+    page = paper.copy()
+    page[patch] = 160
+    witness = (slice(60, 120), slice(88, 160))
+    page[witness] = 60
+
+    prob_full = np.zeros(shape, np.float32)
+    prob_full[patch] = 0.95
+    prob_full[witness] = 0.95
+    cleared = (slice(24, 48), slice(3, 6))  # metade da banda apagada
+    prob_partial = prob_full.copy()
+    prob_partial[cleared] = 0.0
+    erased_page = page.copy()
+    erased_page[cleared] = 220
+
+    class _MutablePageClean:
+        threshold = 0.7
+
+        def __init__(self):
+            self.prob = prob_full
+
+        def ink_prob(self, _image):
+            return self.prob
+
+    clock = rr.SceneClock()
+    page_clean = _MutablePageClean()
+    worker = rr.make_ink_worker(page_clean, clock)
+    generation = worker.new_generation()
+    corners = rr.base_quad(shape)
+    for _ in range(16):
+        clock.now += 1
+        worker.submit(WarpedPage(page, generation, corners))
+        assert worker.pump()
+        assert worker.error is None
+    assert worker._accumulator._confirmed[patch].all()
+
+    page_clean.prob = prob_partial
+    for _ in range(registration_mod._REMOVAL_PASSES + 2):
+        clock.now += 1
+        worker.submit(WarpedPage(erased_page, generation, corners))
+        assert worker.pump()
+        assert worker.error is None
+    assert not worker._accumulator._confirmed[cleared].any()
+    assert worker._accumulator._confirmed[24:48, 0:3].all()
+    assert worker._accumulator._confirmed[witness].all()
 
 
 def test_erasing_preexisting_pencil_stroke_releases_texture_veto():
@@ -903,6 +986,26 @@ def test_fill_support_rejects_a_thin_strong_ink_band():
     assert not assessment.visible[40:44, 24:96].any()
 
 
+def test_narrow_dark_fill_recovers_from_one_row_of_dense_tile_support():
+    """A 3x4 anomaly may have only one dense support row: its partially
+    filled edge rows still belong to that real fill. Dense evidence in
+    the blocking component seeds recovery (Devin Review do PR #144)."""
+    guard = occlusion_mod.PaperExposureGuard()
+    paper = np.full((120, 192, 3), 220, dtype=np.uint8)
+    guard.observe(paper)
+
+    filled = paper.copy()
+    filled[41:79, 48:144] = 10  # uma linha inteira e 7 px nas bordas
+    ink = np.zeros((120, 192), np.float32)
+    ink[41:79, 48:144] = 0.95
+    for _ in range(occlusion_mod._FILL_RECOVERY_PASSES):
+        assessment = guard.observe(filled, ink_prob=ink)
+
+    assert assessment.visible is not None
+    assert assessment.visible[41:79, 48:144].all()
+    assert not assessment.paper_exposed[41:79, 48:144].any()
+
+
 def test_fill_edge_partially_covering_a_tile_still_votes():
     """Borda de preenchimento cobrindo ~1/4 do tile de borda: 6 das
     24 linhas a 0,95 dão média ~0,2375 no tile — o piso de média
@@ -968,6 +1071,36 @@ def test_hand_masked_gap_does_not_bridge_fill_to_shadow_edge():
     assert assessment.visible[42:120, 48:144].all()  # miolo vota
     assert not assessment.visible[170, 180]  # faixa não vota: ponte cortada
     assert not assessment.visible[200, 192]  # sombra segue vetada
+
+
+def test_missed_confirmed_ink_cannot_bridge_fill_recovery_to_shadow():
+    """Tinta confirmada que o modelo perdeu pode vetar apagamento, mas
+    não pode conectar um fill adotado à borda falsa de uma sombra nem
+    liberar pixels dela para novas adições (Devin Review do PR #144)."""
+    guard = occlusion_mod.PaperExposureGuard()
+    paper = np.full((240, 240, 3), 220, dtype=np.uint8)
+    guard.observe(paper)
+
+    scene = paper.copy()
+    fill = (slice(48, 120), slice(48, 120))
+    shadow = (slice(168, 240), slice(144, 240))
+    scene[fill] = 10
+    scene[shadow] = 60
+    confirmed = np.zeros((240, 240), dtype=bool)
+    confirmed[84:90, 120:180] = True
+    confirmed[84:180, 174:180] = True
+    scene[confirmed] = 10
+    ink = np.zeros((240, 240), np.float32)
+    ink[fill] = 0.95
+    ink[180:184, 168:240] = 0.9  # faixa fina que não deve ser adotada
+
+    for _ in range(occlusion_mod._FILL_RECOVERY_PASSES):
+        assessment = guard.observe(scene, ink_prob=ink, confirmed_ink=confirmed)
+
+    assert assessment.visible is not None
+    assert assessment.visible[48:120, 48:120].all()
+    assert not assessment.visible[180:184, 168:240].any()
+    assert not assessment.paper_exposed[confirmed].any()
 
 
 def test_uncertain_photometry_does_not_advance_removal_streak():
