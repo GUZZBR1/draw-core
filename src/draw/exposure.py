@@ -114,6 +114,7 @@ class PaperGainSmoother:
         self._prev_sample = None
         self._prev_mask = None
         self._prev_p90_full = None
+        self._ceiling_target_log = None
 
     def update(self, target_gain, timestamp, *, image=None, mask=None):
         """Retorna o ganho temporalmente estabilizado para `timestamp` (s).
@@ -150,6 +151,7 @@ class PaperGainSmoother:
                 # sem a verificação ele cliparia a faixa clara na
                 # primeira passada (Devin Review PR #140).
                 self._gain = self._ceiling_safe_gain(target, clip_sample, clip_is_color)
+                self._ceiling_target_log = math.log(target)
             self._updated_at = now
             self._prev_sample = sample
             self._prev_mask = sample_mask
@@ -168,6 +170,7 @@ class PaperGainSmoother:
 
         if target == 1.0:
             self._gain = target
+            self._ceiling_target_log = None
             return self._gain
 
         if shift is not None:
@@ -199,16 +202,34 @@ class PaperGainSmoother:
             # ganho retido). Valer dos dois lados do teto impede o
             # flicker quando a máscara cruza o corte (Devin Review
             # PR #140): a mesma cena produz a mesma saída.
-            # O alvo efetivo mistura medido→nominal sem descontinuidade:
+            # O alvo efetivo mistura travado→nominal sem descontinuidade:
             # na borda da banda segue o medido (alvos alternando para
             # dentro/fora da banda convergem quase ao mesmo ponto); no
             # teto vira o nominal fixo, atrator que impede a catraca.
-            # A guarda limita a proposta pela observação da passada.
-            u = min(1.0, (target_log - _CEILING_GUARD_LOG) / _GAIN_DEADBAND_LOG)
-            eff_log = target_log + (math.log(_MAX_GAIN) - target_log) * u**3
+            # Histerese do alvo na banda: trava no primeiro valor —
+            # dois alvos dentro da banda estão sempre a menos de uma
+            # banda morta um do outro, então seguir cada um só perseguiria
+            # jitter do estimador (Devin Review PR #140). O travamento é
+            # do ALVO, não do ganho: a saída segue livre para descer e
+            # reabrir pela guarda de clip.
+            if (
+                self._ceiling_target_log is None
+                or abs(target_log - self._ceiling_target_log) > _GAIN_DEADBAND_LOG
+            ):
+                self._ceiling_target_log = target_log
+            u = min(
+                1.0,
+                (self._ceiling_target_log - _CEILING_GUARD_LOG) / _GAIN_DEADBAND_LOG,
+            )
+            eff_log = (
+                self._ceiling_target_log
+                + (math.log(_MAX_GAIN) - self._ceiling_target_log) * u**3
+            )
             proposed = math.exp(current_log + alpha * (eff_log - current_log))
             self._gain = self._ceiling_safe_gain(proposed, clip_sample, clip_is_color)
             return self._gain
+
+        self._ceiling_target_log = None
 
         if abs(error) <= _GAIN_DEADBAND_LOG:
             if error >= 0.0 or not self._saturates_newly(

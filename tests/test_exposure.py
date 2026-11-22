@@ -306,6 +306,37 @@ def test_targets_straddling_the_ceiling_band_hold_a_steady_gain():
     assert 190 < out[0, 40, 0] < 200  # ~194, constante
 
 
+def test_in_band_target_jitter_holds_a_stable_gain():
+    """Devin Review PR #140: duas máscaras da mesma folha (mão cobrindo
+    um retalho claro) produziam alvos 3,0 e ~2,92 — ambos dentro da
+    banda do teto — e o suavizador seguia cada um: o papel parado
+    pulsava 196↔194. O alvo da banda agora trava no primeiro valor por
+    histerese: jitter de estimativa menor que a banda morta não move
+    o ponto fixo — e o travamento é do alvo, não do ganho, que segue
+    livre para descer e reabrir pela guarda de clip."""
+    page = np.full((120, 120, 3), 66, np.uint8)
+    page[104:112, 0:96] = 70  # retalho ~10%: p90 interpola a ~68,4
+    page[112:120, 0:88] = 70
+
+    mask_open = np.ones((120, 120), dtype=bool)
+    mask_cover = mask_open.copy()
+    mask_cover[104:, :96] = False
+
+    t_open = exposure.paper_gain(page, mask_open)  # ~2,92, dentro da banda
+    t_cover = exposure.paper_gain(page, mask_cover)  # 3,0
+    assert t_cover == 3.0 and 2.913 < t_open < 3.0
+
+    smoother = exposure.PaperGainSmoother()
+    gains = [
+        smoother.update(t, index * 0.25, image=page, mask=m)
+        for index, (t, m) in enumerate([(t_cover, mask_cover), (t_open, mask_open)] * 8)
+    ]
+    # pixels compartilhados (sempre visíveis) renderizam constante
+    levels = [int(exposure.apply_gain(page, g)[0, 40, 0]) for g in gains[-6:]]
+    assert max(levels) - min(levels) <= 1
+    assert max(gains[-6:]) - min(gains[-6:]) < 0.01
+
+
 def test_ceiling_gain_stays_limited_while_the_flash_persists():
     """Controle: com a faixa MANTIDA no nível claro o ganho segue
     limitado — reabre só quando a cena permite, não por timer."""
