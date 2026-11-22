@@ -80,6 +80,13 @@ _FILL_INK_TILE_MEAN = 0.25
 # (Devin Review do PR #144).
 _FILL_SEED_MIN_DIM_PX = 4
 _FILL_SEED_MIN_FILL = 0.28
+# Caducidade do veto por posição: marcas novas persistentes em tile
+# que segue provando papel (luma e textura da referência) são edição
+# legítima — apagou e redesenhou — não capa de oclusor. Sem o prazo o
+# traço antigo nunca terminaria a remoção; o buraco residual aceito é
+# a capa imóvel fotometricamente idêntica ao papel (Devin Review do
+# PR #144). 12 passadas = 2x a janela de remoção.
+_MARKS_HOLD_MAX = 12
 _FILL_RECOVERY_PASSES = 4
 # Piso absoluto de papel exposto: a absorção de deslocamento global
 # segue a iluminação, mas uma página mediana abaixo deste nível não
@@ -135,6 +142,7 @@ class PaperExposureGuard:
         self._was_texture_anomaly = None
         self._texture_ink_mask = None
         self._texture_dark_share = None
+        self._marks_hold_age = None
 
     @property
     def pending_fill_recovery(self):
@@ -368,6 +376,7 @@ class PaperExposureGuard:
             self._texture_ink_mask = np.zeros((height, width), dtype=bool)
             self._texture_dark_share = np.full(current.shape, np.nan, dtype=np.float32)
             self._was_texture_anomaly = np.zeros(current.shape, dtype=bool)
+            self._marks_hold_age = np.zeros(current.shape, dtype=np.uint8)
             self._ink_streak = np.zeros(current.shape, dtype=np.uint8)
             self._fill_adopted = np.zeros(current.shape, dtype=bool)
             self._recovering = np.zeros(current.shape, dtype=np.uint8)
@@ -475,6 +484,31 @@ class PaperExposureGuard:
             size,
             interpolation=cv2.INTER_AREA,
         )
+        # Marcas novas persistentes em tile que SEGUE provando papel
+        # (luma e textura da referência intactas) não são capa de
+        # oclusor — são edição: o usuário apagou e redesenhou. O veto
+        # por posição caduca em _MARKS_HOLD_MAX passadas seguidas, senão
+        # o traço antigo nunca completaria a remoção ao lado da marca
+        # nova. O contador só anda em tile limpo — superfície estranha
+        # (anomalia, mismatch, textura incomparável) segura o veto
+        # sem prazo (Devin Review do PR #144).
+        paper_clean = (
+            texture_comparable & ~texture_mismatch & ~darkened & ~color_anomaly
+        )
+        marks_fire = (
+            texture_known
+            & self._texture_learned_clean
+            & (new_marks_fraction > _TEXTURE_NEW_MARK_FRACTION)
+            & (ink_fraction <= _TEXTURE_NEW_INK_MAX_FRACTION)
+        )
+        self._marks_hold_age = np.where(
+            marks_fire & paper_clean,
+            np.minimum(self._marks_hold_age.astype(np.uint16) + 1, 255),
+            0,
+        ).astype(np.uint8)
+        marks_hold = marks_fire & ~(
+            paper_clean & (self._marks_hold_age >= _MARKS_HOLD_MAX)
+        )
         new_ink = (
             texture_known
             & self._texture_learned_clean
@@ -484,7 +518,7 @@ class PaperExposureGuard:
                         ink_fraction
                         > self._texture_ink_baseline + _TEXTURE_NEW_INK_FRACTION
                     )
-                    | (new_marks_fraction > _TEXTURE_NEW_MARK_FRACTION)
+                    | marks_hold
                 )
                 & (ink_fraction <= _TEXTURE_NEW_INK_MAX_FRACTION)
             )
@@ -682,17 +716,24 @@ class PaperExposureGuard:
                     ]
                     if not np.any(region):
                         continue
-                    _, _, stats, _ = cv2.connectedComponentsWithStats(
+                    _, blob_labels, stats, _ = cv2.connectedComponentsWithStats(
                         region.astype(np.uint8), connectivity=8
                     )
-                    for stat in stats[1:]:
-                        blob_w = stat[cv2.CC_STAT_WIDTH]
-                        blob_h = stat[cv2.CC_STAT_HEIGHT]
+                    for blob_index in range(1, len(stats)):
+                        # O retângulo ORIENTADO é o que mede a forma:
+                        # um traço diagonal sólido preenche ~100% do
+                        # seu minAreaRect (o bbox alinhado ao eixo
+                        # diria ~8% e mataria a semente), enquanto o L
+                        # oco da sombra segue em ~19% em qualquer
+                        # orientação (Devin Review do PR #144).
+                        points = np.column_stack(
+                            np.where(blob_labels == blob_index)[::-1]
+                        ).astype(np.float32)
+                        (_, _), (rect_w, rect_h), _ = cv2.minAreaRect(points)
                         if (
-                            blob_w >= _FILL_SEED_MIN_DIM_PX
-                            and blob_h >= _FILL_SEED_MIN_DIM_PX
-                            and stat[cv2.CC_STAT_AREA]
-                            >= _FILL_SEED_MIN_FILL * blob_w * blob_h
+                            min(rect_w, rect_h) >= _FILL_SEED_MIN_DIM_PX
+                            and stats[blob_index, cv2.CC_STAT_AREA]
+                            >= _FILL_SEED_MIN_FILL * rect_w * rect_h
                         ):
                             supported |= labels == index
                             break

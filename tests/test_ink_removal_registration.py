@@ -1607,3 +1607,71 @@ def test_moved_marks_keep_veto_through_the_worker():
         assert worker.pump()
         assert worker.error is None
     assert worker._accumulator._confirmed[target].all()
+
+
+def test_diagonal_stroke_seeds_fill_recovery():
+    """Traço diagonal sólido (~18px de grossura, ~65% de cada tile que
+    cruza): o blob enche ~100% do retângulo ORIENTADO — a semente não
+    pode medir o bbox alinhado ao eixo (~8%), senão o traço nunca
+    confirma. O canto em L segue oco em qualquer orientação (Devin
+    Review do PR #144)."""
+    guard = occlusion_mod.PaperExposureGuard()
+    shape = (240, 240)
+    paper = np.full((*shape, 3), 220, dtype=np.uint8)
+    visible = np.ones(shape, dtype=bool)
+    for _ in range(2):
+        guard.observe(paper, visible)
+
+    dark = paper.copy()
+    dark[96:168, 48:192] = 60  # sombra ~3x6 tiles, fora do shift global
+    prob = np.zeros(shape, np.float32)
+    prob[104:160, 56:184] = 0.0
+    yy, xx = np.mgrid[0 : shape[0], 0 : shape[1]]
+    diag = (
+        (np.abs((xx - 48) - (yy - 96)) <= 9)
+        & (yy >= 96)
+        & (yy < 168)
+        & (xx >= 48)
+        & (xx < 192)
+    )
+    prob[diag] = 0.95  # diagonal grossa cruzando a sombra
+    for _ in range(occlusion_mod._FILL_RECOVERY_PASSES + 1):
+        guard.observe(dark, visible, ink_prob=prob, ink_support_threshold=0.7)
+    assert guard._ink_streak.any()
+
+
+def test_erase_and_redraw_lets_removal_finish_after_marks_hold_ages():
+    """Apagamento + redesenho no mesmo tile: marcas novas em tile que
+    segue provando papel caducam o veto por posição em _MARKS_HOLD_MAX
+    — a remoção do traço antigo completa ao lado do substituto
+    (Devin Review do PR #144)."""
+    guard = occlusion_mod.PaperExposureGuard()
+    shape = (120, 160)
+    paper = np.full((*shape, 3), 220, dtype=np.uint8)
+    visible = np.ones(shape, dtype=bool)
+    stroke = (slice(30, 33), slice(50, 68))  # 3x18px no tile (1,2)
+    page = paper.copy()
+    page[stroke] = 60
+    prob = np.zeros(shape, np.float32)
+    prob[stroke] = 0.95
+    for _ in range(3):
+        guard.observe(page, visible, ink_prob=prob, ink_support_threshold=0.7)
+    assert guard._texture_learned_clean[1, 2]
+
+    redraw = (slice(40, 42), slice(50, 68))  # 2x18 no MESMO tile, fora da dilatação
+    edited = paper.copy()  # traço antigo some; papel embaixo
+    edited[redraw] = 60
+    new_prob = np.zeros(shape, np.float32)
+    new_prob[redraw] = 0.9
+    # Enquanto o veto por posição segura, o traço antigo não expõe.
+    for _ in range(occlusion_mod._MARKS_HOLD_MAX - 2):
+        assessment = guard.observe(
+            edited, visible, ink_prob=new_prob, ink_support_threshold=0.7
+        )
+    assert not np.asarray(assessment.paper_exposed)[stroke].any()
+    # Passado o prazo, a edição é aceita e o papel reaparece.
+    for _ in range(4):
+        assessment = guard.observe(
+            edited, visible, ink_prob=new_prob, ink_support_threshold=0.7
+        )
+    assert np.asarray(assessment.paper_exposed)[stroke].any()
