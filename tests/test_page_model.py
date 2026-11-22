@@ -2315,10 +2315,39 @@ def test_page_model_clean_copy_darker_print_does_not_inherit(monkeypatch):
         for _ in range(bound):
             _drive(worker, gen2, darker_copy, visible=vis)
         events = worker.telemetry_snapshot()["page_identity_events"]
-        assert "same_page" not in [e["decision"] for e in events]
+        decisions = [e["decision"] for e in events]
+        assert "same_page" not in decisions
+        # Termina (nao fica adiada) e publica o canvas da folha nova.
+        assert decisions[-1] == "new_page"
+        assert worker.poll(gen2, 0) is not None
         assert int(np.count_nonzero(_confirmed(worker, gen2))) == 0
     finally:
         worker.stop()
+
+
+def test_saved_tone_evidence_shifted_match_uses_saved_frame():
+    """page_model.py:761: folha 1 px abaixo, lapis inalterado e uma regra
+    do mesmo tom logo alem da vizinhanca valida: a regra (grade salva)
+    nao pode empatar com o match exato do traco deslocado."""
+    model = pm_mod.PageModel((H, W))
+    form = np.full((H, W), PAPER, dtype=np.float32)
+    form[36, 10:110] = 90.0
+    vis = np.ones((H, W), dtype=bool)
+    for _ in range(4):
+        model.observe(form, visible=vis, paper=vis)
+    assert model.seeded_fraction == 1.0
+    levels = np.full((H, W), np.nan, dtype=np.float32)
+    levels[31, 40:70] = 90.0
+    at = np.zeros((H, W), dtype=bool)
+    at[31, 40:70] = True
+    gray = np.full((H, W), PAPER, dtype=np.float32)
+    gray[37, 10:110] = 90.0  # a regra, deslocada com a folha
+    gray[32, 40:70] = 90.0  # o lapis, deslocado com a folha
+    distinct, matched = model.saved_tone_evidence(
+        gray, levels, at, dy=1, dx=0, near=3, visible=vis
+    )
+    assert distinct[31, 40:70].all()
+    assert matched[32, 40:70].all()
 
 
 def test_align_identity_baseline_removes_prior_halo_across_band_edge():
@@ -2340,6 +2369,7 @@ def test_align_identity_baseline_removes_prior_halo_across_band_edge():
     assert (dy, dx) == (0, 0)
 
 
+@pytest.mark.slow
 def test_identity_recovery_photometric_budget_on_a4_grid():
     """test_page_model.py:613: o caminho completo (cinza, modelo semeado,
     tom salvo, alinhamento e comparacao local) cabe no orcamento A4."""

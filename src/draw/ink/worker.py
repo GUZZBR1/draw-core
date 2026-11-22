@@ -806,9 +806,14 @@ def _evaluate_page_identity(
         ambiguous_seen = ambiguous is not None and bool(
             np.any(ambiguous if inspected is None else (ambiguous & inspected))
         )
-        prior_vis = prior_guard_full
+        # Dominio julgavel: a tinta salva sob a guarda e na pegada
+        # amostrada. Faixa de borda e faixa nao amostrada nunca
+        # reaparecem — nao contam como escondidas para o hold.
+        prior_dom = prior_guard_full
         if identity_sampled is not None:
-            prior_vis = prior_vis & identity_sampled
+            prior_dom = prior_dom & identity_sampled
+        prior_dom_px = int(np.count_nonzero(prior_dom))
+        prior_vis = prior_dom
         if identity_visible is not None:
             prior_vis = prior_vis & identity_visible
         prior_vis_px = int(np.count_nonzero(prior_vis))
@@ -845,7 +850,7 @@ def _evaluate_page_identity(
                     0,
                     True,
                     "occlusion",
-                    prior_vis_px < prior_px,
+                    prior_vis_px < prior_dom_px,
                 )
             keep_page = True
         elif ambiguous_seen:

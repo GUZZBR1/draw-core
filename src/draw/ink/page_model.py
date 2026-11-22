@@ -183,7 +183,7 @@ class PageModel:
         # visto): o que a mao cobriu na ultima passada guarda o tom
         # da ultima observacao valida, nao o da mao.
         self._observed_norm = np.full((height, width), np.nan, dtype=np.float32)
-        self._last_norm_prev = None
+        self._observed_shared = False
         self._seeded = np.zeros((height, width), dtype=bool)
         # Referencia com inf fora do semeado: derivada, refeita sob
         # demanda depois de cada observe (que a altera).
@@ -292,13 +292,16 @@ class PageModel:
         self._last_chroma_ok = chroma_ok
         self._last_visible = visible
         norm_gray = gray if abs(gain - 1.0) <= 1e-4 else (gray / np.float32(gain))
-        self._last_norm_prev = self._last_norm
         self._last_norm = norm_gray
         if visible.all():
+            # Sem copia: a passada inteira vista E o ultimo visto.
             self._observed_norm = norm_gray
+            self._observed_shared = True
         else:
-            if self._observed_norm is self._last_norm_prev:
+            if self._observed_shared:
+                # Nunca escrever no gray de uma passada anterior.
                 self._observed_norm = self._observed_norm.copy()
+                self._observed_shared = False
             np.copyto(self._observed_norm, norm_gray, where=visible)
         if has_seed_now:
             self._ref[seed_now] = gray[seed_now]
@@ -747,18 +750,20 @@ class PageModel:
         for oy, ox in {(0, 0), (int(dy), int(dx))}:
             qy, qx = ys + oy, xs + ox
             ok = (qy >= 0) & (qy < height) & (qx >= 0) & (qx < width)
-            qy, qx, lq = qy[ok], qx[ok], lv[ok]
             if vis is not None:
-                ok_v = vis[qy, qx]
-                qy, qx, lq = qy[ok_v], qx[ok_v], lq[ok_v]
+                ok[ok] = vis[qy[ok], qx[ok]]
+            py, px = ys[ok], xs[ok]
+            qy, qx, lq = qy[ok], qx[ok], lv[ok]
             obs = norm_gray[qy, qx]
             saved_gap = np.abs(obs - lq)
             # A observacao tem de ser melhor explicada pela tinta salva
-            # que por QUALQUER aparencia limpa alcancavel: pauta de uma
+            # que pela aparencia limpa no MESMO quadro: pauta de uma
             # copia limpa um pouco mais escura (85 vs 95) cai dentro do
             # delta da escrita salva (65), mas segue mais perto da
-            # pauta — e pauta, nao tinta.
-            clean_gap = _nearest_reference_gap(ref_inf, qy, qx, obs, reach)
+            # pauta. A referencia mora na grade salva: sob a hipotese
+            # (oy, ox) a observacao em q volta para q - (oy, ox), a
+            # posicao salva, e so `near` a cerca.
+            clean_gap = _nearest_reference_gap(ref_inf, py, px, obs, int(near))
             hit = (saved_gap <= self.novel_delta) & (saved_gap < clean_gap)
             matched_obs[qy[hit], qx[hit]] = True
         return distinct, matched_obs
