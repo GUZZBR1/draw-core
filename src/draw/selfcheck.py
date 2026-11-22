@@ -148,9 +148,10 @@ def run_check(source=0, helper_token_file=None):
         if is_wsl():
             print(
                 "  Correcao: no Windows rode 'hvcam-host.exe --reverse' "
-                "(santleme/hvcam) ou anexe a camera com "
-                "bash scripts/setup_camera_wsl.sh. A alternativa e uma "
-                "camera via rede com --source."
+                "(santleme/hvcam) ou anexe a camera com 'usbipd bind "
+                "--busid <BUS>' (admin) + 'usbipd attach --wsl "
+                "--busid <BUS>' (BUSID sai de 'usbipd list'). "
+                "A alternativa e uma camera via rede com --source."
             )
         else:
             print("  Correcao: conecte uma webcam a este computador.")

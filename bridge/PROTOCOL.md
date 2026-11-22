@@ -2,9 +2,8 @@
 
 Specification of the channel between the helper resident on Windows and Draw
 running on WSL. This document is the contract: the reference receiver
-lives in the legacy repo (`tools/helper_receiver.py`; migrates later —
-it depends on draw.safe_io, still an open PR) and
-the helper sketch, in [`windows_helper.py`](windows_helper.py).
+lives in [`../tools/helper_receiver.py`](../tools/helper_receiver.py) and
+the Windows-side helper, in [`windows_helper.py`](windows_helper.py).
 
 ## Why this channel exists
 
@@ -170,7 +169,7 @@ helper (after). A millisecond stopwatch is filmed; for each
 frame, `frame_id`, `t_capture_us` (source clock),
 `t_receive_us` (WSL clock) and, when present, `t_screen_ms` (the
 stopwatch reading inside that frame) are recorded. The tool is
-[`../tools/step0_latency.py`](../tools/step0_latency.py).
+`tools/step0_latency.py` (in the legacy repo, not migrated).
 
 The metric that decides is **jitter, p95 − median**, over **200+
 frames**; the median alone does not decide. The screen reading error
@@ -187,7 +186,7 @@ with the recorder and replay above. Explicitly outside v1:
 - **Control channel WSL → helper**: start/stop, change
   resolution and quality, request state. Today this is
   manual helper configuration.
-- **Cursor injection**: the helper sketch already declares injection
+- **Cursor injection**: the helper already declares injection
   via `SendInput` (normalized absolute coordinates with a virtual
   desktop), but transport of cursor commands **is not** part
   of this protocol in v1. It will be a channel of its own when the

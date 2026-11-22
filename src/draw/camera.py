@@ -522,8 +522,9 @@ def _local_open_hint(source):
         if is_wsl():
             hint += (
                 "No Windows, rode 'hvcam-host.exe --reverse' (santleme/hvcam) "
-                "ou anexe a camera ao WSL com: bash scripts/setup_camera_wsl.sh. "
-                "A alternativa e uma camera via rede: draw "
+                "ou anexe a camera ao WSL: 'usbipd bind --busid <BUS>' (admin) "
+                "e 'usbipd attach --wsl --busid <BUS>' (BUSID sai de "
+                "'usbipd list'). A alternativa e uma camera via rede: draw "
                 "--source http://<ip-da-camera>:8080/video."
             )
         else:
