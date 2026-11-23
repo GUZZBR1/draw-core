@@ -11,18 +11,13 @@ Pipeline:
   2. afinamento com cv2.ximgproc.thinning (Zhang-Suen ou Guo-Hall);
   3. travessia indexada O(H*W) do esqueleto como grafo (~225x mais
      rápida que varredura por nó em páginas densas);
-  4. poda opcional de esporões guiada por cv2.distanceTransform +
-     contração de junções residuais de grau 2;
-  5. costura opcional de ramos colineares em junções (ponderada por
-     ângulo tangente e continuidade temporal dos carimbos quando
-     disponíveis);
-     — no caminho limpo (topology="v2", o de vectorize_clean) os
-     passos 4-5 dão lugar à higiene topológica: poda radial de
-     esporões (1,5*r), contração de junções vizinhas (1,2*(r_u+r_v))
-     e pareamento de ramos por tangente + espessura em cada junção;
-  6. ordenação temporal (por first_seen_ms) ou espacial (vizinho mais
+  4. higiene topológica opcional (topology="v2", a de vectorize_clean):
+     poda radial de esporões (1,5*r), contração de junções vizinhas
+     (1,2*(r_u+r_v)) e pareamento de ramos por tangente + espessura
+     em cada junção;
+  5. ordenação temporal (por first_seen_ms) ou espacial (vizinho mais
      próximo com inversão de sentido para reduzir saltos de caneta);
-  7. simplificação Douglas-Peucker + classificação de primitivas
+  6. simplificação Douglas-Peucker + classificação de primitivas
      geométricas (line, circle, rectangle, polygon, polyline) e
      exportação SVG/JSON em milímetros do A4.
 
@@ -106,202 +101,6 @@ def _polyline_arc_length(points):
     return float(np.hypot(diffs[:, 0], diffs[:, 1]).sum())
 
 
-def prune_skeleton_spurs(skel, ink, max_spur_ratio=2.4, min_spur_px=7.0, passes=2):
-    """Remove cantos L redundantes e esporões curtos guiado por distanceTransform."""
-    dt = cv2.distanceTransform(ink.astype(np.uint8), cv2.DIST_L2, 5)
-    cleaned = _make_8_minimal(skel)
-    width = cleaned.shape[1]
-
-    for _ in range(passes):
-        edges = traverse_graph(cleaned, include_topology=True)
-        incident_count = {}
-        for e in edges:
-            if e["closed"]:
-                continue
-            for key in ("start_node", "end_node"):
-                nid = e.get(key)
-                if nid is not None:
-                    incident_count[nid] = incident_count.get(nid, 0) + 1
-
-        removed_any = False
-        flat_clean = cleaned.ravel()
-        for e in edges:
-            if e["closed"] or len(e["points"]) <= 1:
-                continue
-            u, v = e.get("start_node"), e.get("end_node")
-            if u is None or v is None or u == v:
-                continue
-            du = incident_count.get(u, 0)
-            dv = incident_count.get(v, 0)
-            if not ((du == 1 and dv >= 3) or (dv == 1 and du >= 3)):
-                continue
-            j_pt = e["points"][-1] if du == 1 else e["points"][0]
-            jx = int(np.clip(round(j_pt[0]), 0, width - 1))
-            jy = int(np.clip(round(j_pt[1]), 0, cleaned.shape[0] - 1))
-            local_r = float(dt[jy, jx])
-            limit = max(float(min_spur_px), float(max_spur_ratio) * local_r)
-            if _polyline_arc_length(e["points"]) <= limit:
-                # Apaga os pixels do ramo exceto os que pertencem à junção.
-                leaf_First = du == 1
-                pix = e["flat_pixels"]
-                to_clear = pix[:-1] if leaf_First else pix[1:]
-                for fidx in to_clear:
-                    flat_clean[fidx] = False
-                # Limpa também o pixel folha na ponta.
-                lp = e["points"][0] if leaf_First else e["points"][-1]
-                lx = int(np.clip(round(lp[0]), 0, width - 1))
-                ly = int(np.clip(round(lp[1]), 0, cleaned.shape[0] - 1))
-                flat_clean[ly * width + lx] = False
-                removed_any = True
-        if not removed_any:
-            break
-        cleaned = _make_8_minimal(cleaned)
-    return cleaned
-
-
-def _edge_stamp_At_end(points, at_end, stamp_plane):
-    """Lê carimbo mediano perto da ponta (`at_end=False` início, `True` fim)."""
-    if stamp_plane is None or len(points) == 0:
-        return None
-    h, w = stamp_plane.shape
-    sample = points[-min(6, len(points)) :] if at_end else points[: min(6, len(points))]
-    xs = np.clip(np.round(sample[:, 0]).astype(int), 0, w - 1)
-    ys = np.clip(np.round(sample[:, 1]).astype(int), 0, h - 1)
-    vals = stamp_plane[ys, xs]
-    valid = vals[vals > 0]
-    if len(valid) == 0:
-        return None
-    return float(np.median(valid))
-
-
-def _outward_tangent(points, from_end, lookahead=8):
-    """Vetor unitário apontando da ponta para DENTRO da aresta."""
-    n = len(points)
-    if n < 2:
-        return np.array([1.0, 0.0], dtype=np.float64)
-    if not from_end:
-        idx = min(n - 1, lookahead)
-        vec = points[idx] - points[0]
-    else:
-        idx = max(0, n - 1 - lookahead)
-        vec = points[idx] - points[-1]
-    norm = float(np.hypot(vec[0], vec[1]))
-    if norm < 1e-9:
-        vec = (points[-1] - points[0]) if not from_end else (points[0] - points[-1])
-        norm = max(float(np.hypot(vec[0], vec[1])), 1e-9)
-    return vec / norm
-
-
-def stitch_junctions(polylines, max_turn_deg=32.0, stamps=None):
-    """Costura pares de arestas que atravessam uma junção mantendo tangente contínua.
-
-    Dois ramos incidentes num mesmo nó que saem em sentidos quase opostos
-    (`ângulo de desvio <= max_turn_deg`, ex.: as duas metades de cada reta
-    de um 'X') são fundidos numa única polilinha contínua. Quando `stamps`
-    está disponível, desempata cruzamentos pelo menor salto temporal.
-    """
-    stamp_plane = None
-    if isinstance(stamps, dict):
-        stamp_plane = (
-            stamps.get("first_seen_ms")
-            if stamps.get("first_seen_ms") is not None
-            else stamps.get("last_update_ms")
-        )
-    elif isinstance(stamps, np.ndarray):
-        stamp_plane = stamps
-
-    open_edges = []
-    passthrough = []
-    for item in polylines:
-        if item["closed"] or len(item["points"]) < 2:
-            passthrough.append({"points": item["points"], "closed": item["closed"]})
-        else:
-            open_edges.append(
-                {
-                    "points": item["points"].copy(),
-                    "u": item.get("start_node"),
-                    "v": item.get("end_node"),
-                }
-            )
-
-    if not open_edges:
-        return passthrough
-
-    # Agrupa incidências por nó compartilhado (ou proximidade <= 2,5 px caso sem id).
-    changed = True
-    cos_min = math.cos(math.radians(float(max_turn_deg)))
-    while changed:
-        changed = False
-        by_node = {}
-        for eid, edge in enumerate(open_edges):
-            if edge is None:
-                continue
-            for is_end, nid in ((False, edge["u"]), (True, edge["v"])):
-                if nid is not None:
-                    by_node.setdefault(nid, []).append((eid, is_end))
-
-        best_pair = None
-        best_cost = 1e18
-        for inc in by_node.values():
-            if len(inc) < 2:
-                continue
-            for i in range(len(inc)):
-                eid_a, end_a = inc[i]
-                ea = open_edges[eid_a]
-                if ea is None:
-                    continue
-                tan_a = _outward_tangent(ea["points"], end_a)
-                ta = _edge_stamp_At_end(ea["points"], end_a, stamp_plane)
-                for j in range(i + 1, len(inc)):
-                    eid_b, end_b = inc[j]
-                    if eid_a == eid_b:
-                        continue
-                    eb = open_edges[eid_b]
-                    if eb is None:
-                        continue
-                    tan_b = _outward_tangent(eb["points"], end_b)
-                    # Ramos colineares que atravessam a junção apontam em sentidos opostos:
-                    # tan_a · tan_b ~ -1  =>  -tan_a · tan_b >= cos_min.
-                    align = float(-np.dot(tan_a, tan_b))
-                    if align < cos_min:
-                        continue
-                    turn_deg = math.degrees(math.acos(min(1.0, max(-1.0, align))))
-                    cost = turn_deg
-                    if stamp_plane is not None:
-                        tb = _edge_stamp_At_end(eb["points"], end_b, stamp_plane)
-                        if ta is not None and tb is not None:
-                            cost += 0.015 * min(abs(ta - tb), 2000.0)
-                    if cost < best_cost:
-                        best_cost = cost
-                        best_pair = (eid_a, end_a, eid_b, end_b)
-
-        if best_pair is not None:
-            eid_a, end_a, eid_b, end_b = best_pair
-            ea = open_edges[eid_a]
-            eb = open_edges[eid_b]
-            pts_a = ea["points"] if end_a else ea["points"][::-1]
-            u_new = ea["u"] if end_a else ea["v"]
-            pts_b = eb["points"][::-1] if end_b else eb["points"]
-            v_new = eb["u"] if end_b else eb["v"]
-            merged_pts = np.vstack([pts_a, pts_b[1:]])
-            if u_new is not None and u_new == v_new and len(merged_pts) >= 4:
-                passthrough.append({"points": merged_pts[:-1], "closed": True})
-                open_edges[eid_a] = None
-            else:
-                open_edges[eid_a] = {
-                    "points": merged_pts,
-                    "u": u_new,
-                    "v": v_new,
-                }
-            open_edges[eid_b] = None
-            changed = True
-
-    for edge in open_edges:
-        if edge is not None:
-            passthrough.append({"points": edge["points"], "closed": False})
-    return passthrough
-
-
 # --- Higiene topológica v2 (Etapas A/B/C) -------------------------------
 # Medido em 2026-11-19 nos quatro clipes reais da régua (e5 e agora
 # estáticos, mão-sombra, folha-movida; canvas confirmado do page_clean
@@ -370,10 +169,10 @@ class _TopoGraph:
             if u is None or v is None or len(pts) < 2 or item["closed"]:
                 # Laço fechado que volta ao próprio nó (o círculo com
                 # uma haste tangente) sai como traço próprio e fica
-                # fora do pareamento, como na costura legada: ligar
-                # uma ponta dele à haste trocaria um círculo e uma
-                # reta por uma polilinha aberta. As duas pontas dele
-                # seguem contando no grau do nó (ver degrees).
+                # fora do pareamento: ligar uma ponta dele à haste
+                # trocaria um círculo e uma reta por uma polilinha
+                # aberta. As duas pontas dele seguem contando no grau
+                # do nó (ver degrees).
                 self.loose.append({"points": pts, "closed": item["closed"]})
                 if item["closed"] and u is not None and u == v:
                     self._add_node(u, pts[0])
@@ -660,8 +459,7 @@ def topology_strokes(
 ):
     """Esqueleto -> traços (Etapas B e C): poda, contração e pareamento.
 
-    Substitui prune_skeleton_spurs + stitch_junctions no caminho
-    limpo. Mesmo formato de saída de traverse_graph sem topologia:
+    Mesmo formato de saída de traverse_graph sem topologia:
     lista de {"points": Nx2 (x, y) px, "closed": bool}.
     """
     dist = cv2.distanceTransform(ink.astype(np.uint8), cv2.DIST_L2, 5)
@@ -985,8 +783,6 @@ def vectorize_mask(
     thinning="zhangsuen",
     *,
     min_area=0,
-    prune_spurs=False,
-    stitch=False,
     stamps=None,
     order_strokes=False,
     fill_holes=False,
@@ -994,9 +790,9 @@ def vectorize_mask(
 ):
     """Máscara de tinta -> polilinhas simplificadas (px, espaço do papel).
 
-    topology="v2" troca a poda e a costura legadas (prune_spurs,
-    stitch) pela higiene topológica (topology_strokes); os dois
-    caminhos devolvem o mesmo formato.
+    topology="v2" aplica a higiene topológica (topology_strokes);
+    "legacy" devolve a travessia crua do esqueleto. Os dois caminhos
+    devolvem o mesmo formato.
     """
     if topology not in ("legacy", "v2"):
         raise ValueError(f"topology desconhecida: {topology!r}")
@@ -1006,11 +802,7 @@ def vectorize_mask(
     if topology == "v2":
         raw = topology_strokes(skel, work)
     else:
-        if prune_spurs:
-            skel = prune_skeleton_spurs(skel, work)
-        raw = traverse_graph(skel, include_topology=stitch)
-        if stitch:
-            raw = stitch_junctions(raw, stamps=stamps)
+        raw = traverse_graph(skel)
     if order_strokes or stamps is not None:
         raw = annotate_and_order_polylines(raw, stamps=stamps)
     out = []
@@ -1270,7 +1062,7 @@ def _selfcheck():
     )
     assert dists.mean() <= 1.5, "erro médio acima do esperado"
 
-    # Bancada 2: traço real de 4 px + poeira de 1-2 px + costura + Camada 2:
+    # Bancada 2: traço real de 4 px + poeira de 1-2 px + higiene + Camada 2:
     img_thick = np.full((PAPER_H_PX, PAPER_W_PX), 255, dtype=np.uint8)
     for a, b in zip(rect, rect[1:] + rect[:1], strict=False):
         cv2.line(img_thick, a, b, 0, thickness=4)
@@ -1315,16 +1107,15 @@ def main(argv=None):
     parser.add_argument(
         "--clean",
         action="store_true",
-        help="ativa limpeza completa: remove microfragmentos, poda esporões "
-        "do esqueleto, costura junções colineares e ordena os traços",
+        help="ativa limpeza completa: remove microfragmentos, poda esporões, "
+        "contrai junções vizinhas, pareia ramos e ordena os traços",
     )
     parser.add_argument(
         "--stamps",
         default=None,
         metavar="ARQUIVO.npz",
         help="carimbos temporais (`_stamps.npz`) para orientar e ordenar os "
-        "traços na ordem real em que foram desenhados (sem --clean, também "
-        "desempatam a costura legada; o --clean não usa tempo nas junções)",
+        "traços na ordem real em que foram desenhados",
     )
     parser.add_argument(
         "--primitives",

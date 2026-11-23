@@ -254,15 +254,13 @@ def test_thick_cross_contracts_double_junction():
     raw = vectorize.traverse_graph(
         vectorize._make_8_minimal(vectorize.thin(img < 128)), include_topology=True
     )
-    junctions = {
-        nid
-        for e in raw
-        for nid, deg in (
-            (e["start_node"], e["start_deg"]),
-            (e["end_node"], e["end_deg"]),
-        )
-        if nid is not None and deg >= 3
-    }
+    incidence = {}
+    for e in raw:
+        for key in ("start_node", "end_node"):
+            nid = e[key]
+            if nid is not None:
+                incidence[nid] = incidence.get(nid, 0) + 1
+    junctions = {nid for nid, deg in incidence.items() if deg >= 3}
     assert len(junctions) >= 2, "a bancada precisa de um cruzamento partido"
     assert len(_strokes(img)) == 2
 
@@ -368,8 +366,8 @@ def test_line_crossing_two_close_parallels_keeps_each_line_whole():
 
 
 def test_circle_with_tangent_stem_keeps_both_primitives():
-    # O laço volta ao próprio nó (u == v): fica fora do pareamento,
-    # como na costura legada (review do PR #65). Quando a haste grossa
+    # O laço volta ao próprio nó (u == v): fica fora do pareamento
+    # (review do PR #65). Quando a haste grossa
     # se sobrepõe ao arco por um trecho, o nó de junção sai do laço e
     # o arco continua tangente na haste — leitura ambígua (um 'd'),
     # resolvida pela continuidade.

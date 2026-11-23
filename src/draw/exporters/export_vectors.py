@@ -217,7 +217,7 @@ def traverse_graph(skel, include_topology=False):
 
     Cada polilinha é um dict {"points": array Nx2 (x, y) em px,
     "closed": bool}. Com `include_topology=True`, inclui também
-    `start_node`, `end_node` e `pixel_indices` para poda e costura O(E).
+    `start_node` e `end_node` para a higiene topológica.
     """
     height, width = skel.shape
     deg = _degree(skel)
@@ -228,11 +228,6 @@ def traverse_graph(skel, include_topology=False):
     labels_flat = labels.ravel()
     skel_flat = skel.ravel()
     anchors, node_pixels = _index_node_components(labels, n_nodes)
-    node_degrees = (
-        {nid: int(deg.ravel()[pix].max()) for nid, pix in node_pixels.items()}
-        if include_topology
-        else {}
-    )
 
     polylines = []
     visited = set()
@@ -269,9 +264,6 @@ def traverse_graph(skel, include_topology=False):
         if include_topology:
             item["start_node"] = start_nid
             item["end_node"] = end_nid
-            item["start_deg"] = node_degrees.get(start_nid, 0)
-            item["end_deg"] = node_degrees.get(end_nid, 0)
-            item["flat_pixels"] = [start_pixel] + path
         return item
 
     for nid in range(1, n_nodes):
@@ -295,9 +287,6 @@ def traverse_graph(skel, include_topology=False):
             if include_topology:
                 item["start_node"] = nid
                 item["end_node"] = nid
-                item["start_deg"] = 0
-                item["end_deg"] = 0
-                item["flat_pixels"] = list(node_pixels[nid])
             polylines.append(item)
 
     covered = np.zeros(skel_flat.shape, dtype=bool)
@@ -334,9 +323,6 @@ def traverse_graph(skel, include_topology=False):
         if include_topology:
             item["start_node"] = None
             item["end_node"] = None
-            item["start_deg"] = 2
-            item["end_deg"] = 2
-            item["flat_pixels"] = path
         polylines.append(item)
 
     return polylines
