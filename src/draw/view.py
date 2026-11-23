@@ -834,13 +834,13 @@ def _draw_settings_menu(studio, layout, items, progress):
         _draw_toggle(studio, (tx, ty, tw, tg), on_p, direction, progress, bg)
 
 
-def _draw_hud_footer(studio, geo, sc, lines, size):
+def _draw_hud_footer(studio, geo, sc, lines, size, show_base=False):
     """Painel numa linha so no rodape, quando nao ha margem ao lado da camera."""
 
     k = _scale(sc)
 
     font, th = cv2.FONT_HERSHEY_SIMPLEX, k(1)
-    left = button_rects(size)[-1]
+    left = button_rects(size, show_base)[-1]
     left = left[0] + left[2] + k(24)
     right = settings_menu_layout(size, 1)["gear"]
     right = right[0] - right[2] - k(20)
@@ -864,7 +864,7 @@ def _draw_hud_footer(studio, geo, sc, lines, size):
         tx += cv2.getTextSize(text, font, fs, th)[0][0]
 
 
-def _draw_hud(studio, geo, sc, lines, size):
+def _draw_hud(studio, geo, sc, lines, size, show_base=False):
     """Informacoes no canto superior esquerdo da area escura da camera.
 
     O painel nunca passa da margem escura a esquerda da imagem: se o texto
@@ -892,7 +892,7 @@ def _draw_hud(studio, geo, sc, lines, size):
     needed = width(base_fs)
     factor = min(1.0, avail / needed) if needed > 0 else 1.0
     if factor < 0.6:
-        _draw_hud_footer(studio, geo, sc, lines, size)
+        _draw_hud_footer(studio, geo, sc, lines, size, show_base)
         return
     fs = base_fs * factor
     line_h = max(1, int(round(18 * sc * factor)))
@@ -1107,7 +1107,7 @@ def compose_view(
     _draw_camera_dot(studio, layout, menu.get("dot", 0.0), menu.get("opened", False))
     _draw_camera_menu(studio, layout, menu.get("items", ()), menu.get("progress", 0.0))
 
-    _draw_hud(studio, geo, sc, _hud_lines(studio, hud or {}), size)
+    _draw_hud(studio, geo, sc, _hud_lines(studio, hud or {}), size, show_base)
 
     settings = settings_menu or {}
     gear = settings_menu_layout(size, len(settings.get("items", ())))
