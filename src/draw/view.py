@@ -895,7 +895,7 @@ def _draw_hud(studio, geo, sc, lines, size):
         _draw_hud_footer(studio, geo, sc, lines, size)
         return
     fs = base_fs * factor
-    line_h = k(18 * factor)
+    line_h = max(1, int(round(18 * sc * factor)))
     _draw_pill(
         studio,
         x,
